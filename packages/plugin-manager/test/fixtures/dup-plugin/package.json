@@ -1,0 +1,9 @@
+{
+  "name": "@viate-test/dup-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "viate": {
+    "id": "fixture-ok",
+    "entry": "index.js"
+  }
+}

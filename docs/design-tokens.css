@@ -1,0 +1,16 @@
+/*
+  Starter tokens for the `vercel` direction.
+  Copy or adapt these into the project's Tailwind/shadcn theme entry point.
+*/
+
+:root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 4%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 42%;
+    --border: 0 0% 88%;
+    --primary: 0 0% 4%;
+    --primary-foreground: 0 0% 100%;
+    --accent: 0 0% 96%;
+    --radius: 0.375rem;
+}

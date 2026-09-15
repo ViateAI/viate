@@ -1,0 +1,9 @@
+{
+  "name": "@viate-test/multi-provider-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "viate": {
+    "id": "fixture-multi",
+    "entry": "index.js"
+  }
+}

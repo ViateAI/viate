@@ -1,0 +1,9 @@
+{
+  "name": "@viate-test/mismatched-provider-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "viate": {
+    "id": "fixture-mismatch",
+    "entry": "index.js"
+  }
+}

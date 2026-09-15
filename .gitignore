@@ -1,0 +1,20 @@
+node_modules/
+dist/
+coverage/
+.nyc_output/
+.env
+.env.*
+*.log
+logs/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+/data/
+data/
+.pnpm-store/
+.codegraph/
+
+# Local product-contract notes. Do not commit.
+PROJECT_BRIEF.txt
+*_BRIEF.txt

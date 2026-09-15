@@ -1,0 +1,9 @@
+{
+  "name": "@viate-test/no-provider-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "viate": {
+    "id": "fixture-none",
+    "entry": "index.js"
+  }
+}

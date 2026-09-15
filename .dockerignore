@@ -1,0 +1,15 @@
+node_modules
+dist
+.git
+.gitignore
+**/.DS_Store
+**/*.log
+.env
+.env.*
+data
+coverage
+.nyc_output
+.pnpm-store
+.idea
+.vscode
+PROJECT_BRIEF.txt

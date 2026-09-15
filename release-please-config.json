@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "include-component-in-tag": false,
+      "include-v-in-tag": true,
+      "bump-minor-pre-major": true,
+      "extra-files": [
+        { "type": "json", "path": "apps/server/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "apps/web/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.version" }
+      ]
+    }
+  }
+}

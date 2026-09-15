@@ -1,0 +1,12 @@
+{
+  "name": "@viate-test/ok-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "viate": {
+    "id": "fixture-ok",
+    "entry": "index.js"
+  },
+  "scripts": {
+    "preinstall": "node -e \"require('node:fs').writeFileSync('SCRIPT_RAN','1')\""
+  }
+}

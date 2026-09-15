@@ -1,0 +1,9 @@
+{
+  "name": "@viate-test/broken-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "viate": {
+    "id": "fixture-broken",
+    "entry": "index.js"
+  }
+}
