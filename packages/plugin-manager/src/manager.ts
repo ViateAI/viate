@@ -17,7 +17,7 @@ import {
   pendingWorkDir,
   pluginRoot,
 } from "./paths.js";
-import { addPackage, initPluginWorkspace, removePackage, updatePackage } from "./pnpm.js";
+import { addPackage, ensureHostSdkPeerRule, initPluginWorkspace, removePackage, updatePackage } from "./pnpm.js";
 import { assertSafePackageArg, redactSource } from "./source.js";
 import { readState, writeState, type InstalledPluginRecord } from "./state.js";
 
@@ -131,10 +131,12 @@ export class PluginManager {
     if (await pathExists(pendingReadyPath(this.dataDir))) {
       await copyDir(pendingDir(this.dataDir), work);
       await rm(join(work, ".viate-ready"), { force: true });
+      await ensureHostSdkPeerRule(work);
       return;
     }
     if (await pathExists(join(activeDir(this.dataDir), "package.json"))) {
       await copyDir(activeDir(this.dataDir), work);
+      await ensureHostSdkPeerRule(work);
       return;
     }
     await initPluginWorkspace(work);

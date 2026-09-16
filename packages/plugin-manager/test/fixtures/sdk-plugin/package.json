@@ -1,0 +1,12 @@
+{
+  "name": "@viate-test/sdk-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "viate": {
+    "id": "fixture-sdk",
+    "entry": "index.js"
+  },
+  "peerDependencies": {
+    "@viateai/sdk": "*"
+  }
+}

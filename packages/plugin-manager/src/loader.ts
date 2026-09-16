@@ -3,6 +3,7 @@ import type { PluginContext, ProviderHandler, ViatePlugin } from "@viateai/sdk";
 import { loadManifest, resolveEntryUrl } from "./manifest.js";
 import { PluginManager } from "./manager.js";
 import { activeDir } from "./paths.js";
+import { registerHostSdk } from "./host-sdk.js";
 
 export type LoadedPlugin = {
   name: string;
@@ -22,6 +23,7 @@ export type PluginLoadResult = {
 };
 
 export async function loadActivePlugins(manager: PluginManager): Promise<PluginLoadResult> {
+  registerHostSdk();
   await manager.applyPendingAtStartup();
   const listed = await manager.list();
   const plugins: LoadedPlugin[] = [];

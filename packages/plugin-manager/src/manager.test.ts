@@ -132,6 +132,26 @@ describe("PluginManager tarball lifecycle", { timeout: 120_000 }, () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+
+  it("installs a tarball that peers on @viateai/sdk without fetching the SDK", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-plugins-sdk-"));
+    const packDir = await mkdtemp(join(tmpdir(), "viate-pack-sdk-"));
+    try {
+      const tarball = await packFixture("sdk-plugin", packDir);
+      const manager = new PluginManager({ dataDir });
+      const afterAdd = await manager.add(tarball);
+      assert.equal(afterAdd.length, 1);
+      assert.equal(afterAdd[0]?.id, "fixture-sdk");
+      assert.equal(afterAdd[0]?.status, "pending");
+      assert.equal(
+        await exists(join(pendingDir(dataDir), "node_modules", "@viateai", "sdk")),
+        false,
+      );
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(packDir, { recursive: true, force: true });
+    }
+  });
 });
 
 async function packFixture(name: string, destDir: string): Promise<string> {

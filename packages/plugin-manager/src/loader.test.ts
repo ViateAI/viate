@@ -70,6 +70,23 @@ describe("loadActivePlugins", { timeout: 120_000 }, () => {
       }
     });
   }
+
+  it("loads a plugin that imports @viateai/sdk at runtime", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-load-sdk-"));
+    const packDir = await mkdtemp(join(tmpdir(), "viate-load-sdk-pack-"));
+    try {
+      const manager = new PluginManager({ dataDir });
+      await manager.add(await packFixture("sdk-plugin", packDir));
+      const loaded = await loadActivePlugins(manager);
+      assert.deepEqual(loaded.failures, []);
+      assert.equal(loaded.plugins.length, 1);
+      assert.equal(loaded.plugins[0]?.id, "fixture-sdk");
+      assert.equal(loaded.plugins[0]?.provider.id, "fixture-sdk");
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(packDir, { recursive: true, force: true });
+    }
+  });
 });
 
 async function packFixture(name: string, destDir: string): Promise<string> {
