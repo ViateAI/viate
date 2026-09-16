@@ -1,0 +1,15 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { parseAdvertisedEndpointTypes } from "./endpoints.js";
+
+describe("parseAdvertisedEndpointTypes", () => {
+  it("keeps known types in stable order and rejects unknown values", () => {
+    assert.deepEqual(parseAdvertisedEndpointTypes(["openai-response", "openai", "openai"]), [
+      "openai",
+      "openai-response",
+    ]);
+    assert.deepEqual(parseAdvertisedEndpointTypes([]), []);
+    assert.throws(() => parseAdvertisedEndpointTypes(["anthropic"]), /unsupported endpoint type/);
+    assert.throws(() => parseAdvertisedEndpointTypes(undefined), /advertisedEndpointTypes is required/);
+  });
+});

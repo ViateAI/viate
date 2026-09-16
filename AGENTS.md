@@ -89,7 +89,7 @@ Public:
 
 - `GET /health` — open, `{ status: "ok" }`
 - `POST /v1/chat/completions`
-- `GET /v1/models`
+- `GET /v1/models` — OpenAI `{ object: "list", data }` plus proxy fields `supported_endpoint_types` (`openai`, `openai-response`) and optional `name` / `context_length`. Multi-source models keep `children`.
 - `POST /v1/embeddings`
 - `POST /v1/responses`
 
@@ -104,6 +104,7 @@ Admin API (`/api/admin/*`) requires `VIATE_ADMIN_PASSWORD`. Absent password disa
 - CSRF: token in login/session JSON and `viate_csrf` cookie; mutations need Origin/Referer match plus `X-Viate-Csrf`
 - `GET /api/admin/session`, `POST /api/admin/logout`
 - Plugins: `GET /api/admin/plugins`; `POST /api/admin/plugins/install|update|remove`
+- Providers: `PUT /api/admin/providers/:providerId/advertised-endpoints` `{advertisedEndpointTypes}`. Filters `/v1/models` discovery only; `/v1` request routes stay open.
 - Logs: `GET /api/admin/logs`
 - Connections: `GET/POST /api/admin/connections`; `PUT/DELETE /api/admin/connections/:id`; activate/deactivate; OAuth start/poll/callback; per-connection model sync
 - Client keys: `GET/POST /api/admin/api-keys`; `DELETE /api/admin/api-keys/:id`. Secret shown once as `viate_…`; list returns prefix. Store HMAC-SHA256 only.

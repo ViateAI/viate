@@ -251,7 +251,7 @@ function pageLabel(page: Page): string {
 
 function pageDescription(page: Page): string {
   if (page === "plugins") {
-    return "Install trusted packages, then restart to load them.";
+    return "Install trusted packages, then restart to load them. Protocol toggles only change /v1/models discovery.";
   }
   if (page === "connections") {
     return "Store encrypted provider credentials. Enable any number of connections.";
@@ -292,6 +292,37 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
   }, []);
 
   const pending = useMemo(() => plugins?.some((plugin) => plugin.restartRequired) ?? false, [plugins]);
+
+  async function updateAdvertisedEndpoints(
+    plugin: AdminPlugin,
+    type: "openai" | "openai-response",
+    enabled: boolean,
+  ) {
+    if (!plugin.id) {
+      return;
+    }
+    const current = plugin.advertisedEndpointTypes ?? [];
+    const next = (["openai", "openai-response"] as const).filter((value) =>
+      value === type ? enabled : current.includes(value),
+    );
+    setBusy(true);
+    setError(null);
+    onNotice(null);
+    try {
+      const result = await api<{ plugins: AdminPlugin[] }>(
+        `/api/admin/providers/${encodeURIComponent(plugin.id)}/advertised-endpoints`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ advertisedEndpointTypes: next }),
+        },
+      );
+      setPlugins(result.plugins);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <section className="stack">
@@ -362,6 +393,33 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
               <div><dt>Source</dt><dd>{plugin.source}</dd></div>
               {plugin.id ? <div><dt>Provider</dt><dd>{plugin.id}</dd></div> : null}
             </dl>
+            {plugin.id ? (
+              <div className="protocol-toggles">
+                <p className="meta">Advertised on GET /v1/models. Requests are unchanged.</p>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={plugin.advertisedEndpointTypes.includes("openai")}
+                    disabled={busy}
+                    onChange={(event) => {
+                      void updateAdvertisedEndpoints(plugin, "openai", event.target.checked);
+                    }}
+                  />
+                  Chat Completions
+                </label>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={plugin.advertisedEndpointTypes.includes("openai-response")}
+                    disabled={busy}
+                    onChange={(event) => {
+                      void updateAdvertisedEndpoints(plugin, "openai-response", event.target.checked);
+                    }}
+                  />
+                  Responses
+                </label>
+              </div>
+            ) : null}
             {plugin.error ? <div className="status error">Load error: {plugin.error}</div> : null}
           </div>
           <div className="row-actions">

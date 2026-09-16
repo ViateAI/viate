@@ -6,14 +6,25 @@ describe("modelList", () => {
   it("builds an OpenAI-style list and drops duplicate ids", () => {
     assert.deepEqual(
       modelList([
-        { id: "gpt-4o", name: "GPT-4o", owned_by: "openai" },
+        {
+          id: "gpt-4o",
+          name: "GPT-4o",
+          owned_by: "openai",
+          context_length: 128000,
+        },
         { id: " gpt-4o ", name: "ignored" },
         { id: "gpt-4o-mini" },
       ]),
       {
         object: "list",
         data: [
-          { id: "gpt-4o", object: "model", owned_by: "openai", name: "GPT-4o" },
+          {
+            id: "gpt-4o",
+            object: "model",
+            owned_by: "openai",
+            name: "GPT-4o",
+            context_length: 128000,
+          },
           { id: "gpt-4o-mini", object: "model" },
         ],
       },
@@ -30,12 +41,24 @@ describe("toModelList", () => {
     assert.deepEqual(
       toModelList({
         object: "list",
-        data: [{ id: "gpt-4o", name: "GPT-4o" }, { id: "gpt-4o-mini" }],
+        data: [
+          {
+            id: "gpt-4o",
+            name: "GPT-4o",
+            context_length: 128000.9,
+          },
+          { id: "gpt-4o-mini" },
+        ],
       }),
       {
         object: "list",
         data: [
-          { id: "gpt-4o", object: "model", name: "GPT-4o" },
+          {
+            id: "gpt-4o",
+            object: "model",
+            name: "GPT-4o",
+            context_length: 128000,
+          },
           { id: "gpt-4o-mini", object: "model" },
         ],
       },

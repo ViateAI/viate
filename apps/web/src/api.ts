@@ -11,6 +11,7 @@ export type AdminPlugin = {
   hasParseCredentials: boolean;
   hasOAuth: boolean;
   hasKeepalive: boolean;
+  advertisedEndpointTypes: Array<"openai" | "openai-response">;
 };
 
 export type CredentialField = {

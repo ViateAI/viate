@@ -3,6 +3,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { AdminStore } from "./store.js";
 
 describe("AdminStore connections", () => {
@@ -152,7 +153,14 @@ describe("AdminStore connection models", () => {
 
     assert.deepEqual(store.listPublicCatalog(), {
       object: "list",
-      data: [{ id: "keep", object: "model", owned_by: "openai-compatible" }],
+      data: [
+        {
+          id: "keep",
+          object: "model",
+          owned_by: "openai-compatible",
+          supported_endpoint_types: ["openai", "openai-response"],
+        },
+      ],
     });
     store.deleteConnection(active.id);
     assert.throws(() => store.getConnectionModels(active.id), /connection not found/);
@@ -172,7 +180,12 @@ describe("AdminStore connection models", () => {
     store.setActive(left.id, true);
     store.setActive(right.id, true);
     assert.deepEqual(store.listPublicCatalog().data, [
-      { id: "gpt-4o", object: "model", owned_by: "openai-compatible" },
+      {
+        id: "gpt-4o",
+        object: "model",
+        owned_by: "openai-compatible",
+        supported_endpoint_types: ["openai", "openai-response"],
+      },
     ]);
     store.setActive(other.id, true);
     assert.deepEqual(store.listPublicCatalog().data, [
@@ -180,6 +193,7 @@ describe("AdminStore connection models", () => {
         id: "gpt-4o",
         object: "model",
         owned_by: "viate",
+        supported_endpoint_types: ["openai", "openai-response"],
         children: [
           { id: "openai-compatible/gpt-4o", owned_by: "openai-compatible" },
           { id: "anthropic/gpt-4o", owned_by: "anthropic" },
@@ -191,5 +205,129 @@ describe("AdminStore connection models", () => {
       store.listPublicCatalog().data[0]?.children?.map((child) => child.id),
       ["anthropic/gpt-4o", "openai-compatible/gpt-4o"],
     );
+  });
+});
+
+describe("AdminStore public catalog proxy fields", () => {
+  let dataDir = "";
+  let store: AdminStore;
+
+  before(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), "viate-store-catalog-"));
+    store = await AdminStore.open(dataDir);
+  });
+
+  after(async () => {
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it("emits proxy name and the largest known context window", () => {
+    const left = store.createConnection("openai-compatible");
+    const right = store.createConnection("anthropic");
+    store.putCredentials(left.id, { token: "a" }, "left");
+    store.putCredentials(right.id, { token: "b" }, "right");
+    store.replaceConnectionModels(left.id, [
+      { id: "gpt-4o", name: "GPT-4o", context_length: 128000 },
+    ]);
+    store.replaceConnectionModels(right.id, [{ id: "gpt-4o", context_length: 200000 }]);
+    store.setActive(left.id, true);
+    store.setActive(right.id, true);
+    assert.deepEqual(store.listPublicCatalog().data, [
+      {
+        id: "gpt-4o",
+        object: "model",
+        owned_by: "viate",
+        name: "GPT-4o",
+        supported_endpoint_types: ["openai", "openai-response"],
+        context_length: 200000,
+        children: [
+          { id: "openai-compatible/gpt-4o", owned_by: "openai-compatible" },
+          { id: "anthropic/gpt-4o", owned_by: "anthropic" },
+        ],
+      },
+    ]);
+  });
+
+  it("filters advertised endpoint types per provider without hiding the model", () => {
+    const connection = store.createConnection("codex");
+    store.putCredentials(connection.id, { token: "a" }, "codex");
+    store.replaceConnectionModels(connection.id, [{ id: "gpt-5.5" }]);
+    store.setActive(connection.id, true);
+    assert.deepEqual(store.getAdvertisedEndpointTypes("codex"), ["openai", "openai-response"]);
+    assert.deepEqual(store.setAdvertisedEndpointTypes("codex", ["openai-response"]), ["openai-response"]);
+    const catalog = store.listPublicCatalog().data.find((model) => model.id === "gpt-5.5");
+    assert.deepEqual(catalog, {
+      id: "gpt-5.5",
+      object: "model",
+      owned_by: "codex",
+      supported_endpoint_types: ["openai-response"],
+    });
+    assert.deepEqual(store.setAdvertisedEndpointTypes("codex", []), []);
+    assert.deepEqual(
+      store.listPublicCatalog().data.find((model) => model.id === "gpt-5.5")?.supported_endpoint_types,
+      [],
+    );
+  });
+
+  it("unions advertised endpoint types across contributing providers", () => {
+    const chat = store.createConnection("grok");
+    const responses = store.createConnection("codex");
+    store.putCredentials(chat.id, { token: "g" }, "grok");
+    store.putCredentials(responses.id, { token: "c" }, "codex");
+    store.replaceConnectionModels(chat.id, [{ id: "shared" }]);
+    store.replaceConnectionModels(responses.id, [{ id: "shared" }]);
+    store.setActive(chat.id, true);
+    store.setActive(responses.id, true);
+    store.setAdvertisedEndpointTypes("grok", ["openai"]);
+    store.setAdvertisedEndpointTypes("codex", ["openai-response"]);
+    assert.deepEqual(
+      store.listPublicCatalog().data.find((model) => model.id === "shared")?.supported_endpoint_types,
+      ["openai", "openai-response"],
+    );
+  });
+
+  it("adds context_length to existing connection_models tables", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-store-migrate-models-"));
+    const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    db.exec(`
+      CREATE TABLE connections (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        credentials_enc TEXT,
+        display_label TEXT,
+        active INTEGER NOT NULL DEFAULT 0,
+        keepalive_status TEXT NOT NULL DEFAULT 'idle',
+        keepalive_error TEXT,
+        keepalive_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE connection_models (
+        connection_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        synced_at TEXT NOT NULL,
+        PRIMARY KEY (connection_id, model_id),
+        FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
+      );
+    `);
+    db.close();
+    const migrated = await AdminStore.open(dataDir);
+    try {
+      const connection = migrated.createConnection("openai-compatible");
+      migrated.putCredentials(connection.id, { token: "a" }, "a");
+      migrated.replaceConnectionModels(connection.id, [{ id: "gpt-4o", context_length: 128000 }]);
+      migrated.setActive(connection.id, true);
+      assert.equal(migrated.listPublicCatalog().data[0]?.context_length, 128000);
+      assert.deepEqual(migrated.listPublicCatalog().data[0]?.supported_endpoint_types, [
+        "openai",
+        "openai-response",
+      ]);
+    } finally {
+      migrated.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 });

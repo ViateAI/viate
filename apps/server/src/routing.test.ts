@@ -8,6 +8,8 @@ function member(connectionId: string, providerId = "openai-compatible"): Publish
     connectionId,
     providerId,
     modelId: "gpt-4o",
+    name: "gpt-4o",
+    contextLength: null,
     displayLabel: connectionId,
     keepaliveStatus: "ok",
     createdAt: "2026-01-01T00:00:00.000Z",

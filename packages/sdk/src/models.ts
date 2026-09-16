@@ -3,6 +3,7 @@ export type Model = {
   object: "model";
   owned_by?: string;
   name?: string;
+  context_length?: number;
 };
 
 export type ModelList = {
@@ -10,7 +11,7 @@ export type ModelList = {
   data: Model[];
 };
 
-export function modelList(models: Array<{ id: string; name?: string; owned_by?: string }>): ModelList {
+export function modelList(models: Array<{ id: string; name?: string; owned_by?: string; context_length?: number }>): ModelList {
   const data: Model[] = [];
   const seen: Record<string, true> = {};
   for (const model of models) {
@@ -20,11 +21,16 @@ export function modelList(models: Array<{ id: string; name?: string; owned_by?: 
     }
     seen[id] = true;
     const name = model.name?.trim();
+    const context =
+      typeof model.context_length === "number" && Number.isFinite(model.context_length) && model.context_length > 0
+        ? Math.trunc(model.context_length)
+        : undefined;
     data.push({
       id,
       object: "model",
       ...(model.owned_by?.trim() ? { owned_by: model.owned_by.trim() } : {}),
       ...(name && name !== id ? { name } : {}),
+      ...(context ? { context_length: context } : {}),
     });
   }
   if (data.length === 0) {
@@ -45,6 +51,7 @@ export function toModelList(payload: unknown): ModelList {
         id,
         name: stringValue(record.name),
         owned_by: stringValue(record.owned_by),
+        context_length: typeof record.context_length === "number" ? record.context_length : undefined,
       }];
     }),
   );

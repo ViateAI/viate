@@ -262,6 +262,7 @@ describe("admin API", () => {
     assert.equal(plugin.hasParseCredentials, true);
     assert.equal(plugin.hasOAuth, true);
     assert.equal(plugin.hasKeepalive, true);
+    assert.deepEqual(plugin.advertisedEndpointTypes, ["openai", "openai-response"]);
 
     const orphan = store.createConnection("uninstalled");
     assert.equal(store.getConnection(orphan.id)?.providerId, "uninstalled");
@@ -492,6 +493,50 @@ describe("admin connection models", () => {
     });
     assert.equal(missing.statusCode, 400);
     assert.match(missing.json().error.message, /no credentials/);
+  });
+
+  it("updates advertised endpoint types for a loaded provider", async () => {
+    const session = await login(app, "correct-horse");
+    plugins.plugins = [{
+      name: "@viateai/plugin-openai-compatible",
+      version: "1.0.0",
+      source: "npm:@viateai/plugin-openai-compatible",
+      id: "openai-compatible",
+      status: "active",
+    }];
+    const created = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible" },
+    });
+    const id = created.json().connection.id as string;
+    await authed(app, session, {
+      method: "PUT",
+      url: `/api/admin/connections/${id}`,
+      payload: { credentials: { baseUrl: "http://127.0.0.1:9999/v1", apiKey: "k" } },
+    });
+    await authed(app, session, { method: "POST", url: `/api/admin/connections/${id}/models/sync` });
+    await authed(app, session, { method: "POST", url: `/api/admin/connections/${id}/activate` });
+
+    const updated = await authed(app, session, {
+      method: "PUT",
+      url: "/api/admin/providers/openai-compatible/advertised-endpoints",
+      payload: { advertisedEndpointTypes: ["openai-response"] },
+    });
+    assert.equal(updated.statusCode, 200);
+    assert.deepEqual(updated.json().plugins[0]?.advertisedEndpointTypes, ["openai-response"]);
+
+    const models = await authed(app, session, { method: "GET", url: "/api/admin/published-models" });
+    assert.equal(models.statusCode, 200);
+    const catalog = store.listPublicCatalog().data[0];
+    assert.deepEqual(catalog?.supported_endpoint_types, ["openai-response"]);
+
+    const empty = await authed(app, session, {
+      method: "PUT",
+      url: "/api/admin/providers/openai-compatible/advertised-endpoints",
+      payload: { advertisedEndpointTypes: ["anthropic"] },
+    });
+    assert.equal(empty.statusCode, 400);
   });
 });
 

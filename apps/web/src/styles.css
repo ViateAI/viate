@@ -378,6 +378,15 @@ textarea {
   accent-color: var(--primary);
 }
 
+.protocol-toggles {
+  display: grid;
+  gap: 2px;
+}
+
+.protocol-toggles .toggle {
+  width: fit-content;
+}
+
 .section-title {
   margin: 8px 0 0;
   font-size: 0.92rem;

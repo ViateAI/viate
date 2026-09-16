@@ -11,6 +11,7 @@ import type {
   OAuthStartResult,
   ProviderHandler,
 } from "@viateai/sdk";
+import { VIATE_PUBLIC_ENDPOINT_TYPES, type ProxyEndpointType } from "./endpoints.js";
 import {
   CSRF_COOKIE,
   SESSION_COOKIE,
@@ -43,6 +44,7 @@ export type AdminPluginView = {
   hasParseCredentials: boolean;
   hasOAuth: boolean;
   hasKeepalive: boolean;
+  advertisedEndpointTypes: ProxyEndpointType[];
 };
 
 export type PluginOperationResult = {
@@ -150,7 +152,7 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
 
   app.get("/api/admin/plugins", async () => {
     const plugins = await options.pluginManager.list();
-    return { plugins: toPluginViews(plugins, options.pluginFailures, providers) };
+    return { plugins: toPluginViews(plugins, options.pluginFailures, providers, options.store) };
   });
 
   app.get("/api/admin/logs", async () => {
@@ -182,6 +184,25 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       return reply.code(400).send({ error: { message: "name is required", type: "viate_error" } });
     }
     return runPluginOp(options, "remove", { name });
+  });
+
+  app.put("/api/admin/providers/:providerId/advertised-endpoints", async (request, reply) => {
+    const { providerId } = request.params as { providerId: string };
+    const id = decodeURIComponent(providerId).trim();
+    if (!id) {
+      return reply.code(400).send({ error: { message: "providerId is required", type: "viate_error" } });
+    }
+    if (!providers.has(id)) {
+      return reply.code(404).send({ error: { message: "provider not loaded", type: "viate_error" } });
+    }
+    const body = asRecord(request.body);
+    try {
+      options.store.setAdvertisedEndpointTypes(id, body.advertisedEndpointTypes);
+      const plugins = await options.pluginManager.list();
+      return { plugins: toPluginViews(plugins, options.pluginFailures, providers, options.store) };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
   });
 
   app.get("/api/admin/connections", async () => {
@@ -404,7 +425,11 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       );
       return options.store.replaceConnectionModels(
         id,
-        listed.data.map((model) => ({ id: model.id, name: model.name })),
+        listed.data.map((model) => ({
+          id: model.id,
+          name: model.name,
+          context_length: model.context_length,
+        })),
       );
     } catch (error) {
       return sendInputError(reply, error);
@@ -499,7 +524,7 @@ async function runPluginOp(
       message: `${action} staged; restart required`,
       restartRequired: true,
     });
-    return { plugins: toPluginViews(listed, options.pluginFailures, new Map(options.providers.map((provider) => [provider.id, provider]))), log };
+    return { plugins: toPluginViews(listed, options.pluginFailures, new Map(options.providers.map((provider) => [provider.id, provider])), options.store), log };
   } catch (error) {
     const message = redactInstallerOutput(error instanceof Error ? error.message : "plugin operation failed");
     const log = options.store.addOperationLog({
@@ -510,7 +535,7 @@ async function runPluginOp(
       message,
       restartRequired: false,
     });
-    return { plugins: toPluginViews(await options.pluginManager.list(), options.pluginFailures, new Map(options.providers.map((provider) => [provider.id, provider]))), log };
+    return { plugins: toPluginViews(await options.pluginManager.list(), options.pluginFailures, new Map(options.providers.map((provider) => [provider.id, provider])), options.store), log };
   }
 }
 
@@ -518,6 +543,7 @@ function toPluginViews(
   plugins: ListedPlugin[],
   failures: PluginLoadFailure[],
   providers: Map<string, ProviderHandler>,
+  store: AdminStore,
 ): AdminPluginView[] {
   const errors = new Map(failures.map((failure) => [failure.name, failure.error]));
   return plugins.map((plugin) => {
@@ -540,6 +566,9 @@ function toPluginViews(
       hasParseCredentials: Boolean(provider?.parseCredentials),
       hasOAuth: Boolean(provider?.startOAuth),
       hasKeepalive: Boolean(provider?.keepalive),
+      advertisedEndpointTypes: plugin.id
+        ? store.getAdvertisedEndpointTypes(plugin.id)
+        : [...VIATE_PUBLIC_ENDPOINT_TYPES],
     };
   });
 }

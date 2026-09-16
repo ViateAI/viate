@@ -66,6 +66,25 @@ describe("POST /v1/chat/completions", () => {
     assert.equal(response.json().id, "chatcmpl-local");
   });
 
+  it("hides chat discovery without blocking /v1/chat/completions", async () => {
+    store.setAdvertisedEndpointTypes("openai-compatible", ["openai-response"]);
+    const models = await app.inject({
+      method: "GET",
+      url: "/v1/models",
+      headers: bearer(clientSecret),
+    });
+    assert.equal(models.statusCode, 200);
+    assert.deepEqual(models.json().data[0]?.supported_endpoint_types, ["openai-response"]);
+    const chat = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: bearer(clientSecret),
+      payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
+    });
+    assert.equal(chat.statusCode, 200);
+    store.setAdvertisedEndpointTypes("openai-compatible", ["openai", "openai-response"]);
+  });
+
   it("proxies an SSE stream through the registered provider", async () => {
     const response = await app.inject({
       method: "POST",
@@ -261,7 +280,14 @@ describe("core capability dispatcher", () => {
       assert.equal(models.headers["x-private"], undefined);
       assert.deepEqual(models.json(), {
         object: "list",
-        data: [{ id: "demo", object: "model", owned_by: "all" }],
+        data: [
+          {
+            id: "demo",
+            object: "model",
+            owned_by: "all",
+            supported_endpoint_types: ["openai", "openai-response"],
+          },
+        ],
       });
       assert.equal(calls.length, 0);
 
@@ -351,7 +377,14 @@ describe("core capability dispatcher", () => {
       });
       assert.deepEqual(sameProvider.json(), {
         object: "list",
-        data: [{ id: "gpt-4o", object: "model", owned_by: "openai-compatible" }],
+        data: [
+          {
+            id: "gpt-4o",
+            object: "model",
+            owned_by: "openai-compatible",
+            supported_endpoint_types: ["openai", "openai-response"],
+          },
+        ],
       });
       store.setActive(anthropic.id, true);
       const both = await app.inject({
@@ -406,7 +439,14 @@ describe("core capability dispatcher", () => {
       });
       assert.deepEqual(models.json(), {
         object: "list",
-        data: [{ id: "keep", object: "model", owned_by: "openai-compatible" }],
+        data: [
+          {
+            id: "keep",
+            object: "model",
+            owned_by: "openai-compatible",
+            supported_endpoint_types: ["openai", "openai-response"],
+          },
+        ],
       });
     } finally {
       await app.close();

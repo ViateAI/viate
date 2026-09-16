@@ -2,6 +2,11 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
+import {
+  parseAdvertisedEndpointTypes,
+  VIATE_PUBLIC_ENDPOINT_TYPES,
+  type ProxyEndpointType,
+} from "./endpoints.js";
 import { decryptSecret, encryptSecret, loadOrCreateCredentialKey } from "./crypto.js";
 
 export type KeepaliveStatus = "idle" | "ok" | "failed" | "needs_reauth";
@@ -23,6 +28,7 @@ export type StoredModel = {
   id: string;
   name: string;
   enabled: boolean;
+  contextLength?: number;
 };
 
 export type ConnectionModelCatalog = {
@@ -64,6 +70,8 @@ export type PublishedMember = {
   connectionId: string;
   providerId: string;
   modelId: string;
+  name: string;
+  contextLength: number | null;
   displayLabel: string;
   keepaliveStatus: KeepaliveStatus;
   createdAt: string;
@@ -79,6 +87,9 @@ export type PublicModel = {
   id: string;
   object: "model";
   owned_by: string;
+  name?: string;
+  supported_endpoint_types: ProxyEndpointType[];
+  context_length?: number;
   children?: PublicModelChild[];
 };
 
@@ -192,6 +203,7 @@ export class AdminStore {
         name TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
         synced_at TEXT NOT NULL,
+        context_length INTEGER,
         PRIMARY KEY (connection_id, model_id),
         FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
       );
@@ -207,8 +219,14 @@ export class AdminStore {
         connection_id TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS provider_advertised_endpoints (
+        provider_id TEXT PRIMARY KEY,
+        endpoint_types TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
     migrateConnections(db);
+    migrateConnectionModels(db);
     return new AdminStore(db, key);
   }
 
@@ -330,12 +348,18 @@ export class AdminStore {
     this.requireRow(id);
     const rows = this.db
       .prepare(
-        `SELECT model_id, name, enabled, synced_at
+        `SELECT model_id, name, enabled, synced_at, context_length
          FROM connection_models
          WHERE connection_id = ?
          ORDER BY model_id`,
       )
-      .all(id) as Array<{ model_id: string; name: string; enabled: number; synced_at: string }>;
+      .all(id) as Array<{
+        model_id: string;
+        name: string;
+        enabled: number;
+        synced_at: string;
+        context_length: number | null;
+      }>;
     if (rows.length === 0) {
       return { connectionId: id, syncedAt: null, models: [] };
     }
@@ -346,13 +370,14 @@ export class AdminStore {
         id: row.model_id,
         name: row.name,
         enabled: row.enabled === 1,
+        ...(typeof row.context_length === "number" ? { contextLength: row.context_length } : {}),
       })),
     };
   }
 
   replaceConnectionModels(
     id: string,
-    models: Array<{ id: string; name?: string }>,
+    models: Array<{ id: string; name?: string; context_length?: number }>,
   ): ConnectionModelCatalog {
     this.requireRow(id);
     const previous = new Map(
@@ -366,10 +391,15 @@ export class AdminStore {
         continue;
       }
       seen.add(modelId);
+      const context =
+        typeof model.context_length === "number" && Number.isFinite(model.context_length) && model.context_length > 0
+          ? Math.trunc(model.context_length)
+          : undefined;
       next.push({
         id: modelId,
         name: model.name?.trim() || modelId,
         enabled: previous.get(modelId)?.enabled ?? true,
+        ...(context ? { contextLength: context } : {}),
       });
     }
     const syncedAt = new Date().toISOString();
@@ -377,11 +407,11 @@ export class AdminStore {
     try {
       this.db.prepare("DELETE FROM connection_models WHERE connection_id = ?").run(id);
       const insert = this.db.prepare(
-        `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       );
       for (const model of next) {
-        insert.run(id, model.id, model.name, model.enabled ? 1 : 0, syncedAt);
+        insert.run(id, model.id, model.name, model.enabled ? 1 : 0, syncedAt, model.contextLength ?? null);
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -421,7 +451,7 @@ export class AdminStore {
     const rows = this.db
       .prepare(
         `SELECT c.id AS connection_id, c.provider_id, c.display_label, c.keepalive_status,
-                c.credentials_enc, c.created_at, cm.model_id
+                c.credentials_enc, c.created_at, cm.model_id, cm.name, cm.context_length
          FROM connection_models cm
          INNER JOIN connections c ON c.id = cm.connection_id
          WHERE ${clauses.join(" AND ")}
@@ -435,11 +465,15 @@ export class AdminStore {
       credentials_enc: string;
       created_at: string;
       model_id: string;
+      name: string;
+      context_length: number | null;
     }>;
     return rows.map((row) => ({
       connectionId: row.connection_id,
       providerId: row.provider_id,
       modelId: row.model_id,
+      name: row.name,
+      contextLength: typeof row.context_length === "number" ? row.context_length : null,
       displayLabel: row.display_label?.trim() || row.connection_id,
       keepaliveStatus: (row.keepalive_status as KeepaliveStatus) || "idle",
       createdAt: row.created_at,
@@ -454,6 +488,40 @@ export class AdminStore {
       data.push(this.toPublicModel(modelId, grouped.get(modelId) ?? []));
     }
     return { object: "list", data };
+  }
+
+  getAdvertisedEndpointTypes(providerId: string): ProxyEndpointType[] {
+    const id = providerId.trim();
+    if (!id) {
+      return [...VIATE_PUBLIC_ENDPOINT_TYPES];
+    }
+    const row = this.db
+      .prepare("SELECT endpoint_types FROM provider_advertised_endpoints WHERE provider_id = ?")
+      .get(id) as { endpoint_types: string } | undefined;
+    if (!row) {
+      return [...VIATE_PUBLIC_ENDPOINT_TYPES];
+    }
+    try {
+      return parseAdvertisedEndpointTypes(JSON.parse(row.endpoint_types) as unknown);
+    } catch {
+      return [...VIATE_PUBLIC_ENDPOINT_TYPES];
+    }
+  }
+
+  setAdvertisedEndpointTypes(providerId: string, types: unknown): ProxyEndpointType[] {
+    const id = providerId.trim();
+    if (!id) {
+      throw Object.assign(new Error("providerId is required"), { statusCode: 400 });
+    }
+    const advertised = parseAdvertisedEndpointTypes(types);
+    this.db
+      .prepare(
+        `INSERT INTO provider_advertised_endpoints (provider_id, endpoint_types, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(provider_id) DO UPDATE SET endpoint_types = excluded.endpoint_types, updated_at = excluded.updated_at`,
+      )
+      .run(id, JSON.stringify(advertised), new Date().toISOString());
+    return advertised;
   }
 
   listAdminPublishedModels(): AdminPublishedModel[] {
@@ -603,20 +671,44 @@ export class AdminStore {
     return grouped;
   }
 
+  private advertisedEndpointTypesFor(providerIds: string[]): ProxyEndpointType[] {
+    const seen: Record<string, true> = {};
+    for (const providerId of providerIds) {
+      for (const type of this.getAdvertisedEndpointTypes(providerId)) {
+        seen[type] = true;
+      }
+    }
+    return VIATE_PUBLIC_ENDPOINT_TYPES.filter((type) => seen[type]);
+  }
+
   private toPublicModel(modelId: string, members: PublishedMember[]): PublicModel {
     const providerIds = this.providerOrder(modelId, members);
     this.prunePublishedModelProviders(modelId, providerIds);
+    const name = members.map((member) => member.name.trim()).find((value) => value && value !== modelId);
+    let contextLength: number | undefined;
+    for (const member of members) {
+      if (typeof member.contextLength === "number" && (contextLength === undefined || member.contextLength > contextLength)) {
+        contextLength = member.contextLength;
+      }
+    }
+    const proxyFields = {
+      supported_endpoint_types: this.advertisedEndpointTypesFor(providerIds),
+      ...(name ? { name } : {}),
+      ...(contextLength ? { context_length: contextLength } : {}),
+    };
     if (providerIds.length <= 1) {
       return {
         id: modelId,
         object: "model",
         owned_by: providerIds[0] ?? "viate",
+        ...proxyFields,
       };
     }
     return {
       id: modelId,
       object: "model",
       owned_by: "viate",
+      ...proxyFields,
       children: providerIds.map((providerId) => ({
         id: `${providerId}/${modelId}`,
         owned_by: providerId,
@@ -852,4 +944,12 @@ function migrateConnections(db: DatabaseSync): void {
       );
     `);
   }
+}
+
+function migrateConnectionModels(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(connection_models)").all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === "context_length")) {
+    return;
+  }
+  db.exec("ALTER TABLE connection_models ADD COLUMN context_length INTEGER");
 }
