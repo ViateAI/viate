@@ -1,5 +1,11 @@
 import { join } from "node:path";
-import type { PluginContext, ProviderHandler, ViatePlugin } from "@viateai/sdk";
+import {
+  silentPluginLogger,
+  type PluginContext,
+  type PluginLogger,
+  type ProviderHandler,
+  type ViatePlugin,
+} from "@viateai/sdk";
 import { loadManifest, resolveEntryUrl } from "./manifest.js";
 import { PluginManager } from "./manager.js";
 import { activeDir } from "./paths.js";
@@ -22,7 +28,14 @@ export type PluginLoadResult = {
   failures: PluginLoadFailure[];
 };
 
-export async function loadActivePlugins(manager: PluginManager): Promise<PluginLoadResult> {
+export type LoadActivePluginsOptions = {
+  log?: PluginLogger;
+};
+
+export async function loadActivePlugins(
+  manager: PluginManager,
+  options: LoadActivePluginsOptions = {},
+): Promise<PluginLoadResult> {
   registerHostSdk();
   await manager.applyPendingAtStartup();
   const listed = await manager.list();
@@ -30,6 +43,7 @@ export async function loadActivePlugins(manager: PluginManager): Promise<PluginL
   const failures: PluginLoadFailure[] = [];
   const seenIds = new Map<string, string>();
   const workspace = activeDir(manager.dataDir);
+  const hostLog = options.log ?? silentPluginLogger();
 
   for (const record of listed) {
     if (record.status !== "active") {
@@ -53,6 +67,7 @@ export async function loadActivePlugins(manager: PluginManager): Promise<PluginL
         registerProvider(handler) {
           providers.push(handler);
         },
+        log: hostLog.child({ plugin: plugin.id, package: record.name }),
       };
       await plugin.register(ctx);
       if (providers.length !== 1) {

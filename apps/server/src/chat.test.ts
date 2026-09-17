@@ -5,6 +5,7 @@ import { after, before, describe, it } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import type { JsonPostRequest, ProviderConnection, ProviderHandler } from "@viateai/sdk";
 import { buildApp, type App } from "./app.js";
 import { resetRoutingStateForTests } from "./routing.js";
@@ -700,6 +701,7 @@ describe("core capability dispatcher", () => {
           calls += 1;
           assert.equal(input.reason, "timer");
           assert.deepEqual(input.credentials, { refreshToken: "old" });
+          assert.equal(typeof input.log.warn, "function");
           return {
             status: "ok",
             credentials: { refreshToken: "new" },
@@ -773,6 +775,73 @@ describe("core capability dispatcher", () => {
     await app.close();
     store.close();
     await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it("logs keepalive needs_reauth and thrown failures", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-keepalive-logs-"));
+    const store = await AdminStore.open(dataDir);
+    const reauth = store.createConnection("grok");
+    store.putCredentials(reauth.id, { refreshToken: "old" });
+    const exploding = store.createConnection("codex");
+    store.putCredentials(exploding.id, { refreshToken: "old" });
+    const lines: string[] = [];
+    const app = await buildApp({
+      logger: {
+        level: "warn",
+        stream: new Writable({
+          write(chunk, _encoding, callback) {
+            lines.push(String(chunk));
+            callback();
+          },
+        }),
+      },
+      providers: [
+        {
+          id: "grok",
+          async keepalive() {
+            return {
+              status: "needs_reauth",
+              error: "Grok token refresh failed (400): Refresh token has been revoked",
+            };
+          },
+        },
+        {
+          id: "codex",
+          async keepalive() {
+            throw new Error("network down");
+          },
+        },
+      ],
+      store,
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const parsed = lines.map((line) => JSON.parse(line) as {
+        msg?: string;
+        connectionId?: string;
+        providerId?: string;
+        status?: string;
+        error?: string;
+        err?: { message?: string };
+      });
+      const reauthLog = parsed.find((line) => line.connectionId === reauth.id);
+      const thrownLog = parsed.find((line) => line.connectionId === exploding.id);
+      assert.equal(reauthLog?.msg, "keepalive failed");
+      assert.equal(reauthLog?.providerId, "grok");
+      assert.equal(reauthLog?.status, "needs_reauth");
+      assert.equal(
+        reauthLog?.error,
+        "Grok token refresh failed (400): Refresh token has been revoked",
+      );
+      assert.equal(thrownLog?.msg, "keepalive failed");
+      assert.equal(thrownLog?.providerId, "codex");
+      assert.equal(thrownLog?.status, "failed");
+      assert.equal(thrownLog?.error, "network down");
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 });
 

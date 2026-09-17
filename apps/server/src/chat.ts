@@ -9,6 +9,7 @@ import {
   type ProviderConnection,
   type ProviderHandler,
 } from "@viateai/sdk";
+import { pluginLoggerFromFastify } from "./plugin-log.js";
 import { dispatchRouted, RouteError } from "./routing.js";
 import type { AdminStore, StoredApiKey } from "./store.js";
 
@@ -135,6 +136,10 @@ async function startKeepalives(
         credentials: connection.credentials,
         signal: AbortSignal.timeout(CORE_TIMEOUT_MS),
         reason: "timer",
+        log: pluginLoggerFromFastify(app.log).child({
+          plugin: connection.providerId,
+          connectionId: connection.connectionId,
+        }),
       });
       if (result.credentials !== undefined || result.displayLabel !== undefined) {
         store.putCredentials(
@@ -144,6 +149,17 @@ async function startKeepalives(
         );
       }
       store.setKeepalive(connection.connectionId, result.status, result.error);
+      if (result.status !== "ok") {
+        app.log.warn(
+          {
+            connectionId: connection.connectionId,
+            providerId: connection.providerId,
+            status: result.status,
+            error: result.error,
+          },
+          "keepalive failed",
+        );
+      }
       if (result.nextDueMs !== undefined) {
         clearTimeout(timers.get(connection.connectionId));
         const timer = setTimeout(() => {
@@ -159,10 +175,21 @@ async function startKeepalives(
         timers.set(connection.connectionId, timer);
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       store.setKeepalive(
         connection.connectionId,
         "failed",
-        error instanceof Error ? error.message : String(error),
+        message,
+      );
+      app.log.error(
+        {
+          err: error,
+          connectionId: connection.connectionId,
+          providerId: connection.providerId,
+          status: "failed",
+          error: message,
+        },
+        "keepalive failed",
       );
     } finally {
       inFlight.delete(connection.connectionId);

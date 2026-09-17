@@ -68,6 +68,8 @@ The entry exports `definePlugin({ id, register })`. `register` calls `ctx.regist
 
 `ProviderHandler` may implement `chatCompletions`, `embeddings`, `responses`, `listModels`, `keepalive`, credential form/normalize, and OAuth start/exchange/poll. Return `HttpExchange` for proxied HTTP; do not invent a second protocol layer.
 
+Plugins log through SDK `PluginLogger` (`ctx.log`, `KeepaliveInput.log`). Hosts adapt their logger with `createPluginLogger(write)`. Do not import Fastify or `console` from plugins.
+
 Sibling plugin repos (`viate-plugin-*`) are separate packages. This repo does not vendor them.
 
 ## Installer And Data Layout

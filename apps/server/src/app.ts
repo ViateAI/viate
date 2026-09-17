@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { ProviderHandler } from "@viateai/sdk";
 import type { PluginLoadFailure } from "@viateai/plugin-manager";
 import { registerAdminRoutes, type PluginOperator } from "./admin.js";
@@ -12,7 +12,7 @@ export type HealthResponse = {
 };
 
 export type BuildAppOptions = {
-  logger?: boolean;
+  logger?: FastifyServerOptions["logger"];
   providers?: ProviderHandler[];
   pluginFailures?: PluginLoadFailure[];
   pluginManager?: PluginOperator;
@@ -34,7 +34,7 @@ const healthResponseSchema = {
   },
 } as const;
 
-export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
+export function createApp(options: Pick<BuildAppOptions, "logger"> = {}): App {
   const app = Fastify({
     logger: options.logger ?? true,
     bodyLimit: 32 * 1024 * 1024,
@@ -46,7 +46,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     }
     done(null, body);
   });
+  return app;
+}
 
+export async function registerApp(app: App, options: Omit<BuildAppOptions, "logger"> = {}): Promise<App> {
   for (const failure of options.pluginFailures ?? []) {
     app.log.error({ plugin: failure.name, err: failure.error }, "plugin failed to load");
   }
@@ -84,6 +87,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   }
 
   await registerAdminStatic(app, options.adminUiDist ?? null);
-
   return app;
+}
+
+export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
+  return registerApp(createApp(options), options);
 }

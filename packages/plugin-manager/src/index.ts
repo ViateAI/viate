@@ -4,6 +4,7 @@ export {
   type LoadedPlugin,
   type PluginLoadFailure,
   type PluginLoadResult,
+  type LoadActivePluginsOptions,
 } from "./loader.js";
 export { defaultDataDir } from "./paths.js";
 export { readState, type InstalledPluginRecord, type PluginState } from "./state.js";

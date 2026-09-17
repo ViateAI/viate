@@ -1,13 +1,15 @@
 import { loadActivePlugins, PluginManager } from "@viateai/plugin-manager";
-import { buildApp } from "./app.js";
+import { createApp, registerApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { pluginLoggerFromFastify } from "./plugin-log.js";
 import { AdminStore } from "./store.js";
 
 const config = loadConfig();
 const manager = new PluginManager({ dataDir: config.dataDir });
-const loaded = await loadActivePlugins(manager);
+const app = createApp();
+const loaded = await loadActivePlugins(manager, { log: pluginLoggerFromFastify(app.log) });
 const store = await AdminStore.open(config.dataDir);
-const app = await buildApp({
+await registerApp(app, {
   providers: loaded.plugins.map((plugin) => plugin.provider),
   pluginFailures: loaded.failures,
   pluginManager: manager,

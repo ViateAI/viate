@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { loadActivePlugins } from "./loader.js";
 import { PluginManager } from "./manager.js";
+import { createPluginLogger } from "@viateai/sdk";
 
 const FIXTURES = join(fileURLToPath(new URL("../test/fixtures", import.meta.url)));
 
@@ -77,11 +78,18 @@ describe("loadActivePlugins", { timeout: 120_000 }, () => {
     try {
       const manager = new PluginManager({ dataDir });
       await manager.add(await packFixture("sdk-plugin", packDir));
-      const loaded = await loadActivePlugins(manager);
+      const writes: Array<{ message: string; fields?: Record<string, unknown> }> = [];
+      const loaded = await loadActivePlugins(manager, {
+        log: createPluginLogger((_level, fields, message) => {
+          writes.push({ message, fields });
+        }),
+      });
       assert.deepEqual(loaded.failures, []);
       assert.equal(loaded.plugins.length, 1);
       assert.equal(loaded.plugins[0]?.id, "fixture-sdk");
       assert.equal(loaded.plugins[0]?.provider.id, "fixture-sdk");
+      const registered = writes.find((write) => write.message === "plugin registered");
+      assert.equal(registered?.fields?.plugin, "fixture-sdk");
     } finally {
       await rm(dataDir, { recursive: true, force: true });
       await rm(packDir, { recursive: true, force: true });

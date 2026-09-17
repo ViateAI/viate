@@ -3,6 +3,7 @@ import { definePlugin } from "@viateai/sdk";
 export const plugin = definePlugin({
   id: "fixture-sdk",
   register(ctx) {
+    ctx.log.info("plugin registered");
     ctx.registerProvider({
       id: "fixture-sdk",
       async chatCompletions() {

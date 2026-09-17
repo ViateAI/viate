@@ -51,6 +51,7 @@ export type KeepaliveInput = {
   credentials: unknown;
   signal: AbortSignal;
   reason: "timer" | "request";
+  log: PluginLogger;
 };
 
 export type KeepaliveResult = {
@@ -137,6 +138,7 @@ export type ProviderHandler = {
 
 export type PluginContext = {
   registerProvider(handler: ProviderHandler): void;
+  log: PluginLogger;
 };
 
 export type ViatePlugin = {
@@ -181,4 +183,54 @@ export function definePlugin(plugin: ViatePlugin): ViatePlugin {
     throw new Error("plugin register is required");
   }
   return plugin;
+}
+
+export type PluginLogFields = Record<string, unknown>;
+
+export type PluginLogger = {
+  debug(fields: PluginLogFields, message: string): void;
+  debug(message: string): void;
+  info(fields: PluginLogFields, message: string): void;
+  info(message: string): void;
+  warn(fields: PluginLogFields, message: string): void;
+  warn(message: string): void;
+  error(fields: PluginLogFields, message: string): void;
+  error(message: string): void;
+  child(fields: PluginLogFields): PluginLogger;
+};
+
+export type PluginLogWrite = (
+  level: "debug" | "info" | "warn" | "error",
+  fields: PluginLogFields | undefined,
+  message: string,
+) => void;
+
+export function createPluginLogger(
+  write: PluginLogWrite,
+  bindings: PluginLogFields = {},
+): PluginLogger {
+  const emit = (
+    level: "debug" | "info" | "warn" | "error",
+    fieldsOrMessage: PluginLogFields | string,
+    message?: string,
+  ): void => {
+    if (typeof fieldsOrMessage === "string") {
+      write(level, Object.keys(bindings).length > 0 ? bindings : undefined, fieldsOrMessage);
+      return;
+    }
+    write(level, { ...bindings, ...fieldsOrMessage }, message ?? "");
+  };
+  return {
+    debug: emit.bind(null, "debug"),
+    info: emit.bind(null, "info"),
+    warn: emit.bind(null, "warn"),
+    error: emit.bind(null, "error"),
+    child(fields) {
+      return createPluginLogger(write, { ...bindings, ...fields });
+    },
+  };
+}
+
+export function silentPluginLogger(): PluginLogger {
+  return createPluginLogger(() => {});
 }
