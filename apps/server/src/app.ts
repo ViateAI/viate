@@ -6,6 +6,7 @@ import { registerChatRoute } from "./chat.js";
 import { registerAdminStatic } from "./static.js";
 import type { AdminStore } from "./store.js";
 import type { SessionStore } from "./sessions.js";
+import { RequestLogRecorder } from "./request-logs.js";
 
 export type HealthResponse = {
   status: "ok";
@@ -67,11 +68,18 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
   );
 
   const store = options.store;
+  const requestLogs = store ? new RequestLogRecorder(store) : undefined;
+  if (requestLogs) {
+    app.addHook("onClose", async () => {
+      await requestLogs.close();
+    });
+  }
 
   await registerChatRoute(app, {
     providers: options.providers ?? [],
     authenticateClient: store ? (secret) => store.verifyApiKey(secret) : undefined,
     store,
+    requestLogs,
   });
 
   if (options.pluginManager && store) {
@@ -83,6 +91,7 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
       providers: options.providers ?? [],
       pluginFailures: options.pluginFailures ?? [],
       sessions: options.sessions,
+      requestLogs,
     });
   }
 

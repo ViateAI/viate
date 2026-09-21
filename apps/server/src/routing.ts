@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { HttpExchange, ProviderConnection, ProviderHandler } from "@viateai/sdk";
 import { resolvePublishedMembers } from "./catalog.js";
-import type { AdminStore, PublishedMember } from "./store.js";
+import { redactLogError } from "./request-logs.js";
+import type { AdminStore, PublishedMember, RequestAttemptRecord } from "./store.js";
 
 const STICKY_TTL_MS = 15 * 60 * 1000;
 const STICKY_MAX_ENTRIES = 500;
@@ -13,14 +14,25 @@ type StickyEntry = {
 
 const stickyMap = new Map<string, StickyEntry>();
 
-export type RoutedCapability = "chatCompletions" | "embeddings" | "responses";
+export type RoutedCapability = "chatCompletions" | "embeddings" | "responses" | "responsesCompact";
+
+export type RoutedResult = {
+  exchange: HttpExchange;
+  requestModel: string;
+  upstreamModel: string | null;
+  providerId: string | null;
+  connectionId: string | null;
+  attempts: RequestAttemptRecord[];
+};
 
 export class RouteError extends Error {
   statusCode: number;
+  attempts: RequestAttemptRecord[];
 
-  constructor(statusCode: number, message: string) {
+  constructor(statusCode: number, message: string, attempts: RequestAttemptRecord[] = []) {
     super(message);
     this.statusCode = statusCode;
+    this.attempts = attempts;
   }
 }
 
@@ -67,7 +79,7 @@ export async function dispatchRouted(
   capability: RoutedCapability,
   request: { body: unknown; headers: Record<string, string>; signal: AbortSignal },
   clientAbort: AbortSignal,
-): Promise<HttpExchange> {
+): Promise<RoutedResult> {
   const requestModel = requestModelFromBody(request.body);
   const members = resolvePublishedMembers(store, requestModel, providers.keys());
   if (members.length === 0) {
@@ -92,6 +104,8 @@ export async function dispatchRouted(
   let lastError = "no healthy connection served the model";
   let attempted = 0;
   let lastExchange: HttpExchange | undefined;
+  let lastMember: PublishedMember | undefined;
+  const attempts: RequestAttemptRecord[] = [];
   for (const member of ordered) {
     if (clientAbort.aborted) {
       throw Object.assign(new Error("aborted"), { name: "AbortError" });
@@ -107,6 +121,7 @@ export async function dispatchRouted(
       providerId: member.providerId,
       credentials: member.credentials,
     };
+    const attemptStarted = Date.now();
     try {
       const upstream = await handler(
         {
@@ -116,12 +131,22 @@ export async function dispatchRouted(
         },
         connection,
       );
+      attempts.push({
+        seq: attempts.length + 1,
+        providerId: member.providerId,
+        connectionId: member.connectionId,
+        upstreamModel: member.modelId,
+        status: upstream.status,
+        durationMs: Date.now() - attemptStarted,
+        error: upstream.status >= 400 ? `upstream ${upstream.status}` : null,
+      });
       if (isTerminalClientError(upstream.status)) {
-        return upstream;
+        return routed(upstream, requestModel, member, attempts);
       }
       if (isRetryableStatus(upstream.status)) {
         lastError = `upstream ${upstream.status}`;
         lastExchange = upstream;
+        lastMember = member;
         if (hash && stickyConnectionId === member.connectionId) {
           clearStickyBinding(hash);
         }
@@ -132,26 +157,51 @@ export async function dispatchRouted(
         if (hash) {
           recordStickyBinding(hash, member.connectionId);
         }
-        return upstream;
+        return routed(upstream, requestModel, member, attempts);
       }
-      return upstream;
+      return routed(upstream, requestModel, member, attempts);
     } catch (error) {
       if (clientAbort.aborted || (isAbortError(error) && clientAbort.aborted)) {
         throw error;
       }
       lastError = error instanceof Error ? error.message : String(error);
+      attempts.push({
+        seq: attempts.length + 1,
+        providerId: member.providerId,
+        connectionId: member.connectionId,
+        upstreamModel: member.modelId,
+        status: null,
+        durationMs: Date.now() - attemptStarted,
+        error: redactLogError(lastError),
+      });
       if (hash && stickyConnectionId === member.connectionId) {
         clearStickyBinding(hash);
       }
     }
   }
   if (attempted === 0) {
-    throw new RouteError(404, lastError);
+    throw new RouteError(404, lastError, attempts);
   }
   if (lastExchange) {
-    return lastExchange;
+    return routed(lastExchange, requestModel, lastMember, attempts);
   }
-  throw new RouteError(503, `no healthy connection served the model: ${lastError}`);
+  throw new RouteError(503, `no healthy connection served the model: ${lastError}`, attempts);
+}
+
+function routed(
+  exchange: HttpExchange,
+  requestModel: string,
+  member: PublishedMember | undefined,
+  attempts: RequestAttemptRecord[],
+): RoutedResult {
+  return {
+    exchange,
+    requestModel,
+    upstreamModel: member?.modelId ?? attempts.at(-1)?.upstreamModel ?? null,
+    providerId: member?.providerId ?? attempts.at(-1)?.providerId ?? null,
+    connectionId: member?.connectionId ?? attempts.at(-1)?.connectionId ?? null,
+    attempts,
+  };
 }
 
 function requestModelFromBody(body: unknown): string {

@@ -11,7 +11,15 @@ import {
 } from "@viateai/sdk";
 import { pluginLoggerFromFastify } from "./plugin-log.js";
 import { dispatchRouted, RouteError } from "./routing.js";
+import {
+  classifyOutcome,
+  endpointForCapability,
+  isStreamRequest,
+  requestModelFrom,
+  type RequestLogRecorder,
+} from "./request-logs.js";
 import type { AdminStore, StoredApiKey } from "./store.js";
+import { tapExchange } from "./usage-frames.js";
 
 export type ClientAuthenticator = (secret: string | undefined) => StoredApiKey | null;
 
@@ -19,9 +27,10 @@ export type ChatRouteOptions = {
   providers: ProviderHandler[];
   authenticateClient?: ClientAuthenticator;
   store?: AdminStore;
+  requestLogs?: RequestLogRecorder;
 };
 
-type Capability = "chatCompletions" | "listModels" | "embeddings" | "responses";
+type Capability = "chatCompletions" | "listModels" | "embeddings" | "responses" | "responsesCompact";
 
 const CORE_TIMEOUT_MS = 10 * 60 * 1_000;
 
@@ -45,6 +54,9 @@ export async function registerChatRoute(app: FastifyInstance, options: ChatRoute
   );
   app.post("/v1/responses", (request, reply) =>
     dispatch(request, reply, "responses", options, providers),
+  );
+  app.post("/v1/responses/compact", (request, reply) =>
+    dispatch(request, reply, "responsesCompact", options, providers),
   );
 
   if (options.store) {
@@ -78,6 +90,8 @@ async function dispatch(
 
   const signal = AbortSignal.any([clientAbort.signal, AbortSignal.timeout(CORE_TIMEOUT_MS)]);
   const headers = pickAllowedHeaders(request.headers, INBOUND_HEADER_ALLOWLIST);
+  const startedAt = Date.now();
+  const apiKey = options.authenticateClient?.(clientSecretFrom(request)) ?? null;
 
   try {
     if (capability === "listModels") {
@@ -88,16 +102,75 @@ async function dispatch(
       cleanup();
       return viateError(reply, 404, "unknown model");
     }
-    const upstream = await dispatchRouted(
+    const routed = await dispatchRouted(
       options.store,
       providers,
       capability,
       { body: request.body, headers, signal },
       clientAbort.signal,
     );
-    return sendUpstream(reply, upstream);
+    const { exchange, tap } = tapExchange(routed.exchange, startedAt);
+    const sent = sendUpstream(reply, exchange);
+    void tap
+      .then((result) => {
+        options.requestLogs?.record({
+          startedAt,
+          endedAt: Date.now(),
+          endpoint: endpointForCapability(capability),
+          stream: isStreamRequest(request.body),
+          status: exchange.status,
+          outcome: classifyOutcome(
+            exchange.status,
+            clientAbort.signal.aborted,
+            signal.aborted && !clientAbort.signal.aborted,
+          ),
+          requestModel: routed.requestModel,
+          upstreamModel: routed.upstreamModel,
+          providerId: routed.providerId,
+          connectionId: routed.connectionId,
+          apiKeyId: apiKey?.id ?? null,
+          apiKeyPrefix: apiKey?.prefix ?? null,
+          attempts: routed.attempts,
+          usage: result.usage,
+          error: exchange.status >= 400 ? `upstream ${exchange.status}` : null,
+          ttfbMs: result.ttfbMs,
+          requestBody: request.body,
+          responseBody: result.responseBody,
+          payloadTruncated: result.truncated,
+        });
+      })
+      .catch(() => {});
+    return sent;
   } catch (error) {
     cleanup();
+    const aborted = clientAbort.signal.aborted || isAbortError(error);
+    const timedOut = signal.aborted && !clientAbort.signal.aborted;
+    const status = aborted ? 499 : error instanceof RouteError ? error.statusCode : 500;
+    const message = error instanceof Error ? error.message : String(error);
+    const lastAttempt = error instanceof RouteError ? error.attempts.at(-1) : undefined;
+    if (capability !== "listModels") {
+      options.requestLogs?.record({
+        startedAt,
+        endedAt: Date.now(),
+        endpoint: endpointForCapability(capability),
+        stream: isStreamRequest(request.body),
+        status,
+        outcome: classifyOutcome(status, aborted, timedOut),
+        requestModel: requestModelFrom(request.body),
+        upstreamModel: lastAttempt?.upstreamModel ?? null,
+        providerId: lastAttempt?.providerId ?? null,
+        connectionId: lastAttempt?.connectionId ?? null,
+        apiKeyId: apiKey?.id ?? null,
+        apiKeyPrefix: apiKey?.prefix ?? null,
+        attempts: error instanceof RouteError ? error.attempts : [],
+        usage: null,
+        error: aborted ? "aborted" : message,
+        ttfbMs: null,
+        requestBody: request.body,
+        responseBody: null,
+        payloadTruncated: false,
+      });
+    }
     if (clientAbort.signal.aborted || isAbortError(error)) {
       if (!reply.sent) {
         return reply.code(499).send();

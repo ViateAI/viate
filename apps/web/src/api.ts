@@ -6,7 +6,7 @@ export type AdminPlugin = {
   status: "active" | "pending";
   restartRequired: boolean;
   error: string | null;
-  capabilities: Array<"chatCompletions" | "listModels" | "embeddings" | "responses">;
+  capabilities: Array<"chatCompletions" | "listModels" | "embeddings" | "responses" | "responsesCompact">;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
   hasOAuth: boolean;

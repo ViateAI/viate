@@ -17,6 +17,22 @@ import {
 
 type Page = "plugins" | "connections" | "models" | "api-keys" | "logs";
 
+type CredentialMode = "form" | "paste" | "oauth";
+
+const CREDENTIAL_MODE_LABEL: Record<CredentialMode, string> = {
+  form: "Form",
+  paste: "Paste",
+  oauth: "OAuth",
+};
+
+function credentialModes(provider: AdminPlugin | null): CredentialMode[] {
+  const modes: CredentialMode[] = [];
+  if (provider?.credentialsForm.length) modes.push("form");
+  if (provider?.hasParseCredentials) modes.push("paste");
+  if (provider?.hasOAuth) modes.push("oauth");
+  return modes;
+}
+
 export function App() {
   const [ready, setReady] = useState(false);
   const [authed, setAuthed] = useState(false);
@@ -818,9 +834,8 @@ function ConnectionForm({
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
   const [paste, setPaste] = useState("");
-  const [mode, setMode] = useState<"form" | "paste">(
-    provider?.credentialsForm.length ? "form" : "paste",
-  );
+  const modes = credentialModes(provider);
+  const [mode, setMode] = useState<CredentialMode>(modes[0] ?? "paste");
   const [oauth, setOAuth] = useState<OAuthStart | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -834,6 +849,7 @@ function ConnectionForm({
         aria-labelledby="connection-form-title"
         onSubmit={async (event) => {
           event.preventDefault();
+          if (mode === "oauth") return;
           setBusy(true);
           setError(null);
           try {
@@ -852,58 +868,85 @@ function ConnectionForm({
       >
         <h2 id="connection-form-title">Configure {existing.displayLabel || existing.providerId}</h2>
         <p className="meta">Credentials are encrypted and never returned to this page.</p>
-        {provider?.credentialsForm.length && provider.hasParseCredentials ? (
+        {modes.length > 1 ? (
           <div className="segmented" role="tablist" aria-label="Credential method">
-            <button type="button" aria-pressed={mode === "form"} onClick={() => setMode("form")}>Form</button>
-            <button type="button" aria-pressed={mode === "paste"} onClick={() => setMode("paste")}>Paste</button>
+            {modes.map((item) => (
+              <button
+                key={item}
+                type="button"
+                aria-pressed={mode === item}
+                onClick={() => {
+                  setMode(item);
+                  if (item !== "oauth") {
+                    setOAuth(null);
+                    setError(null);
+                  }
+                }}
+              >
+                {CREDENTIAL_MODE_LABEL[item]}
+              </button>
+            ))}
           </div>
         ) : null}
-        {mode === "form" ? provider?.credentialsForm.map((field: CredentialField) => (
-          <label key={field.key}>
-            {field.label}
-            <input
-              type={field.kind === "secret" ? "password" : field.kind}
-              autoComplete={field.kind === "secret" ? "new-password" : undefined}
-              value={values[field.key] ?? ""}
-              onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}
-              required={field.required}
-            />
-          </label>
-        )) : (
+        {mode === "form"
+          ? provider?.credentialsForm.map((field: CredentialField) => (
+              <label key={field.key}>
+                {field.label}
+                <input
+                  type={field.kind === "secret" ? "password" : field.kind}
+                  autoComplete={field.kind === "secret" ? "new-password" : undefined}
+                  value={values[field.key] ?? ""}
+                  onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}
+                  required={field.required}
+                />
+              </label>
+            ))
+          : null}
+        {mode === "paste" ? (
           <label>
             Credential JSON or token
             <textarea value={paste} onChange={(event) => setPaste(event.target.value)} required />
           </label>
-        )}
-        {provider?.hasOAuth ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              setError(null);
-              try {
-                const started = await api<OAuthStart>(`/api/admin/connections/${existing.id}/oauth/start`, { method: "POST" });
-                setOAuth(started);
-                if (started.type === "authorization_url") {
-                  window.location.assign(started.authorizationUrl);
-                }
-              } catch (err) {
-                setError(isApiError(err) ? err.message : "OAuth start failed");
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            Connect with OAuth
-          </button>
         ) : null}
-        {oauth?.type === "device_code" ? (
+        {mode === "oauth" && busy && !oauth ? <p className="meta">Starting OAuth…</p> : null}
+        {mode === "oauth" && oauth?.type === "device_code" ? (
           <DeviceCodePanel connectionId={existing.id} flow={oauth} onComplete={onSaved} onError={setError} />
+        ) : null}
+        {mode === "oauth" && oauth?.type === "authorization_url" ? (
+          <AuthUrlPanel connectionId={existing.id} url={oauth.authorizationUrl} onComplete={onSaved} />
         ) : null}
         {error ? <p className="banner error" role="alert">{error}</p> : null}
         <div className="row-actions">
-          <button className="primary" type="submit" disabled={busy}>{busy ? "Saving…" : "Save"}</button>
+          {mode === "oauth" ? (
+            oauth ? null : (
+              <button
+                className="primary"
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setError(null);
+                  try {
+                    const started = await api<OAuthStart>(`/api/admin/connections/${existing.id}/oauth/start`, {
+                      method: "POST",
+                    });
+                    setOAuth(started);
+                    if (started.type === "authorization_url") {
+                      window.open(started.authorizationUrl, "_blank", "noopener,noreferrer");
+                    }
+                  } catch (err) {
+                    setError(isApiError(err) ? err.message : "OAuth start failed");
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                {busy ? "Starting…" : "Connect"}
+              </button>
+            )
+          ) : (
+            <button className="primary" type="submit" disabled={busy}>{busy ? "Saving…" : "Save"}</button>
+          )}
           <button type="button" onClick={onCancel}>Cancel</button>
         </div>
       </form>
@@ -956,6 +999,51 @@ function DeviceCodePanel({
   return (
     <div className="banner ok" role="status">
       Open <a href={flow.verificationUrl} target="_blank" rel="noreferrer">{flow.verificationUrl}</a> and enter <code>{flow.userCode}</code>. Waiting for authorization…
+    </div>
+  );
+}
+
+function AuthUrlPanel({
+  connectionId,
+  url,
+  onComplete,
+}: {
+  connectionId: string;
+  url: string;
+  onComplete: () => Promise<void>;
+}) {
+  useEffect(() => {
+    let cancelled = false;
+    let polling = false;
+    const timer = window.setInterval(async () => {
+      if (cancelled || polling) return;
+      polling = true;
+      try {
+        const result = await api<{ connections: Connection[] }>("/api/admin/connections");
+        const found = result.connections.find((c) => c.id === connectionId);
+        if (found?.hasCredentials && !cancelled) {
+          window.clearInterval(timer);
+          await onComplete();
+        }
+      } catch {
+        // ignore polling errors
+      } finally {
+        polling = false;
+      }
+    }, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [connectionId, onComplete]);
+
+  return (
+    <div className="banner ok" role="status">
+      Opened authorization page in a new window. Complete sign-in there, or{" "}
+      <a href={url} target="_blank" rel="noreferrer">
+        click here
+      </a>{" "}
+      if it didn't open. Waiting for authorization…
     </div>
   );
 }

@@ -9,7 +9,7 @@ import { Writable } from "node:stream";
 import type { JsonPostRequest, ProviderConnection, ProviderHandler } from "@viateai/sdk";
 import { buildApp, type App } from "./app.js";
 import { resetRoutingStateForTests } from "./routing.js";
-import { AdminStore } from "./store.js";
+import { AdminStore, type RequestLogRecord } from "./store.js";
 
 describe("POST /v1/chat/completions", () => {
   let upstream: TestServer;
@@ -65,6 +65,14 @@ describe("POST /v1/chat/completions", () => {
     assert.equal(response.statusCode, 200);
     assert.match(String(response.headers["content-type"]), /application\/json/);
     assert.equal(response.json().id, "chatcmpl-local");
+    const logged = await waitForRequestLog(store, "demo");
+    assert.ok(logged.length >= 1);
+    assert.equal(logged[0]?.endpoint, "chat.completions");
+    assert.equal(logged[0]?.status, 200);
+    assert.equal(logged[0]?.outcome, "success");
+    assert.equal(logged[0]?.usageSource, "missing");
+    assert.equal(logged[0]?.payloadTruncated, false);
+    assert.ok(logged[0]?.payloadPath);
   });
 
   it("hides chat discovery without blocking /v1/chat/completions", async () => {
@@ -239,7 +247,7 @@ describe("core capability dispatcher", () => {
     store.putCredentials(created.id, { token: "k" }, "all");
     store.setActive(created.id, true);
     store.replaceConnectionModels(created.id, [{ id: "demo" }]);
-    const calls: Array<{ capability: string; headers: Record<string, string> }> = [];
+    const calls: Array<{ capability: string; headers: Record<string, string>; body?: unknown }> = [];
     const body = () =>
       new ReadableStream<Uint8Array>({
         start(controller) {
@@ -261,6 +269,14 @@ describe("core capability dispatcher", () => {
         calls.push({ capability: "responses", headers: request.headers });
         return {
           status: 202,
+          headers: { "content-type": "application/json", "x-private": "no" },
+          body: body(),
+        };
+      },
+      async responsesCompact(request) {
+        calls.push({ capability: "responsesCompact", headers: request.headers, body: request.body });
+        return {
+          status: 203,
           headers: { "content-type": "application/json", "x-private": "no" },
           body: body(),
         };
@@ -319,6 +335,103 @@ describe("core capability dispatcher", () => {
         capability: "responses",
         headers: { "openai-beta": "assistants=v2" },
       });
+
+      const compact = await app.inject({
+        method: "POST",
+        url: "/v1/responses/compact",
+        headers: { ...bearer(secret), "openai-beta": "assistants=v2" },
+        payload: { model: "demo", input: "hello", stream: false, include: ["reasoning.encrypted_content"] },
+      });
+      assert.equal(compact.statusCode, 203);
+      assert.equal(compact.headers["content-type"], "application/json");
+      assert.equal(compact.headers["x-private"], undefined);
+      assert.deepEqual(calls[2], {
+        capability: "responsesCompact",
+        headers: { "openai-beta": "assistants=v2" },
+        body: { model: "demo", input: "hello", stream: false, include: ["reasoning.encrypted_content"] },
+      });
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns 404 when the provider does not implement responsesCompact", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-compact-missing-"));
+    const store = await AdminStore.open(dataDir);
+    const secret = store.createApiKey("compact").secret;
+    const created = store.createConnection("all");
+    store.putCredentials(created.id, { token: "k" }, "all");
+    store.setActive(created.id, true);
+    store.replaceConnectionModels(created.id, [{ id: "demo" }]);
+    const app = await buildApp({
+      logger: false,
+      providers: [{
+        id: "all",
+        async responses() {
+          return { status: 200, headers: {}, body: null };
+        },
+      }],
+      store,
+    });
+    try {
+      const compact = await app.inject({
+        method: "POST",
+        url: "/v1/responses/compact",
+        headers: bearer(secret),
+        payload: { model: "demo", input: "hello" },
+      });
+      assert.equal(compact.statusCode, 404);
+      assert.deepEqual(compact.json(), {
+        error: { message: "capability not supported", type: "viate_error" },
+      });
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("answers POST /v1/responses/compact over a real HTTP listener", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-compact-http-"));
+    const store = await AdminStore.open(dataDir);
+    const secret = store.createApiKey("compact-http").secret;
+    const created = store.createConnection("all");
+    store.putCredentials(created.id, { token: "k" }, "all");
+    store.setActive(created.id, true);
+    store.replaceConnectionModels(created.id, [{ id: "demo" }]);
+    const app = await buildApp({
+      logger: false,
+      providers: [{
+        id: "all",
+        async responsesCompact() {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new Response(JSON.stringify({ id: "resp_compact", object: "response" })).body,
+          };
+        },
+      }],
+      store,
+    });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    try {
+      const address = app.server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected tcp address");
+      }
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/responses/compact`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${secret}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "demo", input: "hello" }),
+      });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-type"), "application/json");
+      assert.deepEqual(await response.json(), { id: "resp_compact", object: "response" });
     } finally {
       await app.close();
       store.close();
@@ -847,6 +960,17 @@ describe("core capability dispatcher", () => {
 
 function bearer(secret: string): Record<string, string> {
   return { authorization: `Bearer ${secret}` };
+}
+
+async function waitForRequestLog(store: AdminStore, model: string): Promise<RequestLogRecord[]> {
+  for (let i = 0; i < 20; i += 1) {
+    const logged = store.listRequestLogs({ model });
+    if (logged.length > 0) {
+      return logged;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  return store.listRequestLogs({ model });
 }
 
 function enablePublished(

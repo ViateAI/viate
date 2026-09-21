@@ -22,7 +22,8 @@ import {
   parseCookies,
 } from "./sessions.js";
 import { LoginRateLimiter } from "./rate-limit.js";
-import type { AdminStore, OperationLog } from "./store.js";
+import { readRequestPayload, type RequestLogRecorder } from "./request-logs.js";
+import type { AdminStore, OperationLog, RequestLogOutcome, RequestLogStatsWindow } from "./store.js";
 
 export type PluginOperator = {
   list(): Promise<ListedPlugin[]>;
@@ -39,7 +40,7 @@ export type AdminPluginView = {
   status: "active" | "pending";
   restartRequired: boolean;
   error: string | null;
-  capabilities: Array<"chatCompletions" | "listModels" | "embeddings" | "responses">;
+  capabilities: Array<"chatCompletions" | "listModels" | "embeddings" | "responses" | "responsesCompact">;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
   hasOAuth: boolean;
@@ -60,6 +61,7 @@ export type AdminRouteOptions = {
   providers: ProviderHandler[];
   pluginFailures: PluginLoadFailure[];
   sessions?: SessionStore;
+  requestLogs?: RequestLogRecorder;
 };
 
 const SESSION_MAX_AGE = 12 * 60 * 60;
@@ -157,6 +159,44 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
 
   app.get("/api/admin/logs", async () => {
     return { logs: options.store.listOperationLogs() };
+  });
+
+  app.get("/api/admin/requests", async (request) => {
+    const query = request.query as Record<string, string | undefined>;
+    const limit = query.limit ? Number(query.limit) : undefined;
+    const logs = options.store.listRequestLogs({
+      from: query.from,
+      to: query.to,
+      model: query.model,
+      connectionId: query.connectionId,
+      keyId: query.keyId,
+      outcome: query.outcome as RequestLogOutcome | undefined,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    return { requests: logs };
+  });
+
+  app.get("/api/admin/requests/stats", async (request) => {
+    const query = request.query as Record<string, string | undefined>;
+    const window = query.window === "5m" || query.window === "1h" || query.window === "24h" ? query.window : "1m";
+    if (window === "1m" && options.requestLogs) {
+      return { stats: options.requestLogs.liveStats() };
+    }
+    return { stats: options.store.requestLogStats(window as RequestLogStatsWindow) };
+  });
+
+  app.get("/api/admin/requests/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const found = options.store.getRequestLog(id);
+    if (!found) {
+      return reply.code(404).send({ error: { message: "request log not found", type: "viate_error" } });
+    }
+    const payload = await readRequestPayload(
+      options.store.dataDir,
+      found.record.payloadPath,
+      found.record.payloadOffset,
+    );
+    return { request: found.record, attempts: found.attempts, payload };
   });
 
   app.post("/api/admin/plugins/install", async (request, reply) => {
@@ -553,6 +593,7 @@ function toPluginViews(
     if (provider?.listModels) capabilities.push("listModels");
     if (provider?.embeddings) capabilities.push("embeddings");
     if (provider?.responses) capabilities.push("responses");
+    if (provider?.responsesCompact) capabilities.push("responsesCompact");
     return {
       name: plugin.name,
       version: plugin.version,

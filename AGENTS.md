@@ -66,7 +66,7 @@ A plugin package.json must include:
 
 The entry exports `definePlugin({ id, register })`. `register` calls `ctx.registerProvider(handler)` once. Duplicate provider ids fail load.
 
-`ProviderHandler` may implement `chatCompletions`, `embeddings`, `responses`, `listModels`, `keepalive`, credential form/normalize, and OAuth start/exchange/poll. Return `HttpExchange` for proxied HTTP; do not invent a second protocol layer.
+`ProviderHandler` may implement `chatCompletions`, `embeddings`, `responses`, `responsesCompact`, `listModels`, `keepalive`, credential form/normalize, and OAuth start/exchange/poll. Return `HttpExchange` for proxied HTTP; do not invent a second protocol layer.
 
 Plugins log through SDK `PluginLogger` (`ctx.log`, `KeepaliveInput.log`). Hosts adapt their logger with `createPluginLogger(write)`. Do not import Fastify or `console` from plugins.
 
@@ -94,6 +94,7 @@ Public:
 - `GET /v1/models` — OpenAI `{ object: "list", data }` plus proxy fields `supported_endpoint_types` (`openai`, `openai-response`) and optional `name` / `context_length`. Multi-source models keep `children`.
 - `POST /v1/embeddings`
 - `POST /v1/responses`
+- `POST /v1/responses/compact` — Codex-style conversation compaction. Routed like `/v1/responses`; plugins that omit `responsesCompact` return 404 `capability not supported`.
 
 `/v1` requires `Authorization: Bearer` or `x-api-key`. Admin cookies do not authenticate `/v1`. No client keys => `/v1` is 401. Missing/invalid key is 401.
 
@@ -113,7 +114,7 @@ Admin API (`/api/admin/*`) requires `VIATE_ADMIN_PASSWORD`. Absent password disa
 
 ## Routing And Secrets
 
-Many connections may be enabled. `/v1/models` aggregates enabled models by upstream id. Chat/embeddings/responses route by request model with last-known-good plus session stickiness and failover.
+Many connections may be enabled. `/v1/models` aggregates enabled models by upstream id. Chat/embeddings/responses/compact route by request model with last-known-good plus session stickiness and failover.
 
 Connection secrets live in SQLite, AES-256-GCM, key file `$VIATE_DATA_DIR/credential.key` mode `0600`. API never returns `apiKey`. Omitted `apiKey` on update keeps the saved secret.
 

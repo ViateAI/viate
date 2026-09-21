@@ -54,6 +54,84 @@ export type OperationLog = {
   createdAt: string;
 };
 
+export type RequestLogEndpoint = "chat.completions" | "embeddings" | "responses" | "responses.compact";
+
+export type RequestLogOutcome =
+  | "success"
+  | "upstream_error"
+  | "client_error"
+  | "aborted"
+  | "timeout"
+  | "auth_error";
+
+export type RequestAttemptRecord = {
+  seq: number;
+  providerId: string;
+  connectionId: string;
+  upstreamModel: string | null;
+  status: number | null;
+  durationMs: number;
+  error: string | null;
+};
+
+export type RequestLogRecord = {
+  id: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  ttfbMs: number | null;
+  endpoint: RequestLogEndpoint;
+  stream: boolean;
+  status: number;
+  outcome: RequestLogOutcome;
+  requestModel: string | null;
+  upstreamModel: string | null;
+  providerId: string | null;
+  connectionId: string | null;
+  apiKeyId: string | null;
+  apiKeyPrefix: string | null;
+  attemptCount: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  usageSource: "parser" | "missing";
+  error: string | null;
+  payloadPath: string | null;
+  payloadOffset: number | null;
+  payloadTruncated: boolean;
+};
+
+export type RequestLogStatsWindow = "1m" | "5m" | "1h" | "24h";
+
+export type RequestLogStats = {
+  window: RequestLogStatsWindow;
+  qps: number;
+  tokenTps: number;
+  inputTps: number;
+  outputTps: number;
+  cacheReadTps: number;
+  errorRate: number;
+  requests: number;
+  errors: number;
+  aborted: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  series: Array<{ t: number; requests: number; tokens: number }>;
+};
+
+export type RequestLogListQuery = {
+  from?: string;
+  to?: string;
+  model?: string;
+  connectionId?: string;
+  keyId?: string;
+  outcome?: RequestLogOutcome;
+  limit?: number;
+};
+
 export type StoredApiKey = {
   id: string;
   name: string;
@@ -151,13 +229,54 @@ type ApiKeyRow = {
   created_at: string;
 };
 
+type RequestLogRow = {
+  id: string;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  ttfb_ms: number | null;
+  endpoint: string;
+  stream: number;
+  status: number;
+  outcome: string;
+  request_model: string | null;
+  upstream_model: string | null;
+  provider_id: string | null;
+  connection_id: string | null;
+  api_key_id: string | null;
+  api_key_prefix: string | null;
+  attempt_count: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  usage_source: string;
+  error: string | null;
+  payload_path: string | null;
+  payload_offset: number | null;
+  payload_truncated: number;
+};
+
+type RequestAttemptRow = {
+  request_id: string;
+  seq: number;
+  provider_id: string;
+  connection_id: string;
+  upstream_model: string | null;
+  status: number | null;
+  duration_ms: number;
+  error: string | null;
+};
+
 export class AdminStore {
   private readonly db: DatabaseSync;
   private readonly key: Buffer;
+  readonly dataDir: string;
 
-  private constructor(db: DatabaseSync, key: Buffer) {
+  private constructor(db: DatabaseSync, key: Buffer, dataDir: string) {
     this.db = db;
     this.key = key;
+    this.dataDir = dataDir;
   }
 
   static async open(dataDir: string): Promise<AdminStore> {
@@ -224,10 +343,68 @@ export class AdminStore {
         endpoint_types TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS request_logs (
+        id TEXT PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        ended_at TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        ttfb_ms INTEGER,
+        endpoint TEXT NOT NULL,
+        stream INTEGER NOT NULL DEFAULT 0,
+        status INTEGER NOT NULL,
+        outcome TEXT NOT NULL,
+        request_model TEXT,
+        upstream_model TEXT,
+        provider_id TEXT,
+        connection_id TEXT,
+        api_key_id TEXT,
+        api_key_prefix TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        cache_read_tokens INTEGER,
+        cache_write_tokens INTEGER,
+        usage_source TEXT NOT NULL DEFAULT 'missing',
+        error TEXT,
+        payload_path TEXT,
+        payload_offset INTEGER,
+        payload_truncated INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS request_logs_started_at ON request_logs(started_at DESC);
+      CREATE INDEX IF NOT EXISTS request_logs_model_started ON request_logs(request_model, started_at DESC);
+      CREATE INDEX IF NOT EXISTS request_logs_connection_started ON request_logs(connection_id, started_at DESC);
+      CREATE TABLE IF NOT EXISTS request_attempts (
+        request_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        provider_id TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        upstream_model TEXT,
+        status INTEGER,
+        duration_ms INTEGER NOT NULL,
+        error TEXT,
+        PRIMARY KEY (request_id, seq),
+        FOREIGN KEY (request_id) REFERENCES request_logs(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS request_stats_minute (
+        bucket TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        request_model TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        aborted INTEGER NOT NULL DEFAULT 0,
+        duration_ms_sum INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (bucket, endpoint, request_model, provider_id, connection_id)
+      );
     `);
     migrateConnections(db);
     migrateConnectionModels(db);
-    return new AdminStore(db, key);
+    return new AdminStore(db, key, dataDir);
   }
 
   close(): void {
@@ -851,6 +1028,273 @@ export class AdminStore {
       restartRequired: row.restart_required === 1,
       createdAt: row.created_at,
     }));
+  }
+
+  insertRequestLog(record: RequestLogRecord, attempts: RequestAttemptRecord[]): void {
+    this.db.exec("BEGIN");
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO request_logs (
+            id, started_at, ended_at, duration_ms, ttfb_ms, endpoint, stream, status, outcome,
+            request_model, upstream_model, provider_id, connection_id, api_key_id, api_key_prefix,
+            attempt_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+            usage_source, error, payload_path, payload_offset, payload_truncated
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          record.id,
+          record.startedAt,
+          record.endedAt,
+          record.durationMs,
+          record.ttfbMs,
+          record.endpoint,
+          record.stream ? 1 : 0,
+          record.status,
+          record.outcome,
+          record.requestModel,
+          record.upstreamModel,
+          record.providerId,
+          record.connectionId,
+          record.apiKeyId,
+          record.apiKeyPrefix,
+          record.attemptCount,
+          record.inputTokens,
+          record.outputTokens,
+          record.cacheReadTokens,
+          record.cacheWriteTokens,
+          record.usageSource,
+          record.error,
+          record.payloadPath,
+          record.payloadOffset,
+          record.payloadTruncated ? 1 : 0,
+        );
+      const insertAttempt = this.db.prepare(
+        `INSERT INTO request_attempts (
+          request_id, seq, provider_id, connection_id, upstream_model, status, duration_ms, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const attempt of attempts) {
+        insertAttempt.run(
+          record.id,
+          attempt.seq,
+          attempt.providerId,
+          attempt.connectionId,
+          attempt.upstreamModel,
+          attempt.status,
+          attempt.durationMs,
+          attempt.error,
+        );
+      }
+      this.bumpRequestStats(record);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listRequestLogs(query: RequestLogListQuery = {}): RequestLogRecord[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (query.from) {
+      clauses.push("started_at >= ?");
+      params.push(query.from);
+    }
+    if (query.to) {
+      clauses.push("started_at <= ?");
+      params.push(query.to);
+    }
+    if (query.model) {
+      clauses.push("request_model = ?");
+      params.push(query.model);
+    }
+    if (query.connectionId) {
+      clauses.push("connection_id = ?");
+      params.push(query.connectionId);
+    }
+    if (query.keyId) {
+      clauses.push("api_key_id = ?");
+      params.push(query.keyId);
+    }
+    if (query.outcome) {
+      clauses.push("outcome = ?");
+      params.push(query.outcome);
+    }
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM request_logs ${where} ORDER BY started_at DESC, id DESC LIMIT ?`)
+      .all(...params, limit) as RequestLogRow[];
+    return rows.map((row) => this.toRequestLog(row));
+  }
+
+  getRequestLog(id: string): { record: RequestLogRecord; attempts: RequestAttemptRecord[] } | null {
+    const row = this.db.prepare("SELECT * FROM request_logs WHERE id = ?").get(id) as RequestLogRow | undefined;
+    if (!row) {
+      return null;
+    }
+    const attempts = this.db
+      .prepare("SELECT * FROM request_attempts WHERE request_id = ? ORDER BY seq ASC")
+      .all(id) as RequestAttemptRow[];
+    return {
+      record: this.toRequestLog(row),
+      attempts: attempts.map((attempt) => ({
+        seq: attempt.seq,
+        providerId: attempt.provider_id,
+        connectionId: attempt.connection_id,
+        upstreamModel: attempt.upstream_model,
+        status: attempt.status,
+        durationMs: attempt.duration_ms,
+        error: attempt.error,
+      })),
+    };
+  }
+
+  requestLogStats(window: RequestLogStatsWindow, now = Date.now()): RequestLogStats {
+    const seconds = window === "1m" ? 60 : window === "5m" ? 300 : window === "1h" ? 3600 : 86400;
+    const from = new Date(now - seconds * 1000).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT
+           CAST(strftime('%s', bucket) AS INTEGER) AS ts,
+           SUM(requests) AS requests,
+           SUM(errors) AS errors,
+           SUM(aborted) AS aborted,
+           SUM(input_tokens) AS input_tokens,
+           SUM(output_tokens) AS output_tokens,
+           SUM(cache_read_tokens) AS cache_read_tokens,
+           SUM(cache_write_tokens) AS cache_write_tokens
+         FROM request_stats_minute
+         WHERE bucket >= ?
+         GROUP BY bucket
+         ORDER BY bucket ASC`,
+      )
+      .all(from) as Array<{
+        ts: number;
+        requests: number;
+        errors: number;
+        aborted: number;
+        input_tokens: number;
+        output_tokens: number;
+        cache_read_tokens: number;
+        cache_write_tokens: number;
+      }>;
+    const totals = {
+      requests: 0,
+      errors: 0,
+      aborted: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    };
+    const series: RequestLogStats["series"] = [];
+    for (const row of rows) {
+      totals.requests += row.requests;
+      totals.errors += row.errors;
+      totals.aborted += row.aborted;
+      totals.inputTokens += row.input_tokens;
+      totals.outputTokens += row.output_tokens;
+      totals.cacheReadTokens += row.cache_read_tokens;
+      totals.cacheWriteTokens += row.cache_write_tokens;
+      series.push({
+        t: row.ts * 1000,
+        requests: row.requests,
+        tokens: row.input_tokens + row.output_tokens,
+      });
+    }
+    const counted = Math.max(1, seconds);
+    const completed = Math.max(0, totals.requests - totals.aborted);
+    return {
+      window,
+      qps: totals.requests / counted,
+      tokenTps: (totals.inputTokens + totals.outputTokens) / counted,
+      inputTps: totals.inputTokens / counted,
+      outputTps: totals.outputTokens / counted,
+      cacheReadTps: totals.cacheReadTokens / counted,
+      errorRate: completed === 0 ? 0 : totals.errors / completed,
+      requests: totals.requests,
+      errors: totals.errors,
+      aborted: totals.aborted,
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens,
+      cacheReadTokens: totals.cacheReadTokens,
+      cacheWriteTokens: totals.cacheWriteTokens,
+      series,
+    };
+  }
+
+  pruneRequestLogs(now = Date.now()): void {
+    const eventCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const minuteCutoff = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+    this.db.prepare("DELETE FROM request_logs WHERE started_at < ?").run(eventCutoff);
+    this.db.prepare("DELETE FROM request_stats_minute WHERE bucket < ?").run(minuteCutoff);
+  }
+
+  private bumpRequestStats(record: RequestLogRecord): void {
+    const bucket = record.startedAt.slice(0, 16) + ":00.000Z";
+    this.db
+      .prepare(
+        `INSERT INTO request_stats_minute (
+          bucket, endpoint, request_model, provider_id, connection_id,
+          requests, errors, aborted, duration_ms_sum,
+          input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bucket, endpoint, request_model, provider_id, connection_id) DO UPDATE SET
+          requests = requests + 1,
+          errors = errors + excluded.errors,
+          aborted = aborted + excluded.aborted,
+          duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum,
+          input_tokens = input_tokens + excluded.input_tokens,
+          output_tokens = output_tokens + excluded.output_tokens,
+          cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+          cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens`,
+      )
+      .run(
+        bucket,
+        record.endpoint,
+        record.requestModel ?? "",
+        record.providerId ?? "",
+        record.connectionId ?? "",
+        record.outcome !== "success" && record.outcome !== "aborted" ? 1 : 0,
+        record.outcome === "aborted" ? 1 : 0,
+        record.durationMs,
+        record.inputTokens ?? 0,
+        record.outputTokens ?? 0,
+        record.cacheReadTokens ?? 0,
+        record.cacheWriteTokens ?? 0,
+      );
+  }
+
+  private toRequestLog(row: RequestLogRow): RequestLogRecord {
+    return {
+      id: row.id,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      durationMs: row.duration_ms,
+      ttfbMs: row.ttfb_ms,
+      endpoint: row.endpoint as RequestLogEndpoint,
+      stream: row.stream === 1,
+      status: row.status,
+      outcome: row.outcome as RequestLogOutcome,
+      requestModel: row.request_model,
+      upstreamModel: row.upstream_model,
+      providerId: row.provider_id,
+      connectionId: row.connection_id,
+      apiKeyId: row.api_key_id,
+      apiKeyPrefix: row.api_key_prefix,
+      attemptCount: row.attempt_count,
+      inputTokens: row.input_tokens,
+      outputTokens: row.output_tokens,
+      cacheReadTokens: row.cache_read_tokens,
+      cacheWriteTokens: row.cache_write_tokens,
+      usageSource: row.usage_source === "parser" ? "parser" : "missing",
+      error: row.error,
+      payloadPath: row.payload_path,
+      payloadOffset: row.payload_offset,
+      payloadTruncated: row.payload_truncated === 1,
+    };
   }
 
   private toResolved(row: ConnectionRow): ResolvedConnection {

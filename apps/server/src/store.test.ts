@@ -98,6 +98,82 @@ describe("AdminStore API keys", () => {
   });
 });
 
+describe("AdminStore request logs", () => {
+  let dataDir = "";
+  let store: AdminStore;
+
+  before(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), "viate-request-logs-"));
+    store = await AdminStore.open(dataDir);
+  });
+
+  after(async () => {
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it("stores request metadata, attempts, and minute rollup without payloads", () => {
+    const id = "req-1";
+    store.insertRequestLog(
+      {
+        id,
+        startedAt: "2026-09-18T00:00:10.000Z",
+        endedAt: "2026-09-18T00:00:11.200Z",
+        durationMs: 1200,
+        ttfbMs: 80,
+        endpoint: "chat.completions",
+        stream: false,
+        status: 200,
+        outcome: "success",
+        requestModel: "demo",
+        upstreamModel: "gpt-4o",
+        providerId: "openai-compatible",
+        connectionId: "conn-1",
+        apiKeyId: "key-1",
+        apiKeyPrefix: "viate_abc",
+        attemptCount: 1,
+        inputTokens: 20,
+        outputTokens: 5,
+        cacheReadTokens: 8,
+        cacheWriteTokens: 0,
+        usageSource: "parser",
+        error: null,
+        payloadPath: "request-logs/2026-09-18.jsonl",
+        payloadOffset: 0,
+        payloadTruncated: false,
+      },
+      [
+        {
+          seq: 1,
+          providerId: "openai-compatible",
+          connectionId: "conn-1",
+          upstreamModel: "gpt-4o",
+          status: 200,
+          durationMs: 1200,
+          error: null,
+        },
+      ],
+    );
+
+    const listed = store.listRequestLogs({ model: "demo" });
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.id, id);
+    assert.equal(listed[0]?.inputTokens, 20);
+    assert.equal(listed[0]?.cacheReadTokens, 8);
+    assert.equal("request" in listed[0]!, false);
+
+    const detail = store.getRequestLog(id);
+    assert.equal(detail?.attempts.length, 1);
+    assert.equal(detail?.attempts[0]?.connectionId, "conn-1");
+
+    const stats = store.requestLogStats("1h", Date.parse("2026-09-18T00:30:00.000Z"));
+    assert.equal(stats.requests, 1);
+    assert.equal(stats.inputTokens, 20);
+    assert.equal(stats.outputTokens, 5);
+    assert.equal(stats.cacheReadTokens, 8);
+  });
+});
+
 describe("AdminStore connection models", () => {
   let dataDir = "";
   let store: AdminStore;

@@ -2,12 +2,16 @@ export type PluginId = string;
 
 export type { Model, ModelList } from "./models.js";
 export { modelList, toModelList } from "./models.js";
+export type { RequestUsage, UsageParser } from "./usage.js";
+export { parseAnthropicUsage, parseOpenAIChatUsage, parseOpenAIResponsesUsage } from "./usage.js";
 import type { ModelList } from "./models.js";
+import type { UsageParser } from "./usage.js";
 
 export type HttpExchange = {
   status: number;
   headers: Record<string, string>;
   body: ReadableStream<Uint8Array> | null;
+  parseUsage?: UsageParser;
 };
 
 export type JsonPostRequest = {
@@ -118,6 +122,10 @@ export type Responses = {
   responses(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
 };
 
+export type ResponsesCompact = {
+  responsesCompact(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
+};
+
 export type Models = {
   listModels(request: JsonGetRequest, connection: ProviderConnection): Promise<ModelList>;
 };
@@ -134,7 +142,7 @@ export type ProviderHandler = {
   startOAuth?(ctx: OAuthStartContext): Promise<OAuthStartResult>;
   exchangeOAuth?(input: OAuthExchangeInput): Promise<CredentialsWrite>;
   pollOAuth?(input: OAuthPollInput): Promise<OAuthPollResult>;
-} & Partial<ChatCompletions & Embeddings & Responses & Models & Keepalive>;
+} & Partial<ChatCompletions & Embeddings & Responses & ResponsesCompact & Models & Keepalive>;
 
 export type PluginContext = {
   registerProvider(handler: ProviderHandler): void;

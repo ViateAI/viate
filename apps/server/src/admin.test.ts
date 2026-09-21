@@ -184,6 +184,65 @@ describe("admin API", () => {
     }
   });
 
+  it("lists request logs and returns payload only on detail", async () => {
+    const session = await login(app, "correct-horse");
+    store.insertRequestLog(
+      {
+        id: "req-admin-1",
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        durationMs: 12,
+        ttfbMs: 3,
+        endpoint: "chat.completions",
+        stream: false,
+        status: 200,
+        outcome: "success",
+        requestModel: "demo",
+        upstreamModel: "demo",
+        providerId: "openai-compatible",
+        connectionId: "conn-1",
+        apiKeyId: "key-1",
+        apiKeyPrefix: "viate_abc",
+        attemptCount: 1,
+        inputTokens: 4,
+        outputTokens: 2,
+        cacheReadTokens: 1,
+        cacheWriteTokens: 0,
+        usageSource: "parser",
+        error: null,
+        payloadPath: null,
+        payloadOffset: null,
+        payloadTruncated: false,
+      },
+      [
+        {
+          seq: 1,
+          providerId: "openai-compatible",
+          connectionId: "conn-1",
+          upstreamModel: "demo",
+          status: 200,
+          durationMs: 12,
+          error: null,
+        },
+      ],
+    );
+
+    const listed = await authed(app, session, { method: "GET", url: "/api/admin/requests" });
+    assert.equal(listed.statusCode, 200);
+    const rows = listed.json().requests as Array<{ id: string; request?: unknown }>;
+    assert.equal(rows[0]?.id, "req-admin-1");
+    assert.equal("request" in (rows[0] ?? {}), false);
+
+    const detail = await authed(app, session, { method: "GET", url: "/api/admin/requests/req-admin-1" });
+    assert.equal(detail.statusCode, 200);
+    assert.equal(detail.json().request.id, "req-admin-1");
+    assert.equal(detail.json().attempts[0]?.connectionId, "conn-1");
+
+    const stats = await authed(app, session, { method: "GET", url: "/api/admin/requests/stats?window=1h" });
+    assert.equal(stats.statusCode, 200);
+    assert.equal(typeof stats.json().stats.qps, "number");
+  });
+
   it("creates empty connections, delegates credentials, and activates explicitly", async () => {
     const session = await login(app, "correct-horse");
     const created = await authed(app, session, {

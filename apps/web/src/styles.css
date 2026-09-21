@@ -490,6 +490,8 @@ label {
   border-radius: var(--radius);
   overflow: hidden;
   width: fit-content;
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 
 .segmented button {
