@@ -272,6 +272,7 @@ export class AdminStore {
   private readonly db: DatabaseSync;
   private readonly key: Buffer;
   readonly dataDir: string;
+  private readonly credentialsListeners = new Set<(connectionId: string) => void>();
 
   private constructor(db: DatabaseSync, key: Buffer, dataDir: string) {
     this.db = db;
@@ -408,7 +409,21 @@ export class AdminStore {
   }
 
   close(): void {
+    this.credentialsListeners.clear();
     this.db.close();
+  }
+
+  onCredentialsChanged(listener: (connectionId: string) => void): () => void {
+    this.credentialsListeners.add(listener);
+    return () => {
+      this.credentialsListeners.delete(listener);
+    };
+  }
+
+  private notifyCredentialsChanged(connectionId: string): void {
+    for (const listener of this.credentialsListeners) {
+      listener(connectionId);
+    }
   }
 
   listConnections(): StoredConnection[] {
@@ -460,7 +475,9 @@ export class AdminStore {
          WHERE id = ?`,
       )
       .run(enc, label, now, id);
-    return this.requireConnection(id);
+    const updated = this.requireConnection(id);
+    this.notifyCredentialsChanged(id);
+    return updated;
   }
 
   clearCredentials(id: string): StoredConnection {
@@ -473,7 +490,9 @@ export class AdminStore {
          WHERE id = ?`,
       )
       .run(now, id);
-    return this.requireConnection(id);
+    const updated = this.requireConnection(id);
+    this.notifyCredentialsChanged(id);
+    return updated;
   }
 
   getCredentials(id: string): unknown {
@@ -519,6 +538,7 @@ export class AdminStore {
     if (result.changes === 0) {
       throw Object.assign(new Error("connection not found"), { statusCode: 404 });
     }
+    this.notifyCredentialsChanged(id);
   }
 
   getConnectionModels(id: string): ConnectionModelCatalog {

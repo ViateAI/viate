@@ -79,6 +79,7 @@ export async function dispatchRouted(
   capability: RoutedCapability,
   request: { body: unknown; headers: Record<string, string>; signal: AbortSignal },
   clientAbort: AbortSignal,
+  onAuthFailure?: (connectionId: string) => void,
 ): Promise<RoutedResult> {
   const requestModel = requestModelFromBody(request.body);
   const members = resolvePublishedMembers(store, requestModel, providers.keys());
@@ -144,6 +145,9 @@ export async function dispatchRouted(
         return routed(upstream, requestModel, member, attempts);
       }
       if (isRetryableStatus(upstream.status)) {
+        if (upstream.status === 401 || upstream.status === 403) {
+          onAuthFailure?.(member.connectionId);
+        }
         lastError = `upstream ${upstream.status}`;
         lastExchange = upstream;
         lastMember = member;
@@ -283,11 +287,11 @@ function evictSticky(): void {
 }
 
 function isRetryableStatus(status: number): boolean {
-  return status === 408 || status === 409 || status === 429 || status >= 500;
+  return status === 401 || status === 403 || status === 408 || status === 409 || status === 429 || status >= 500;
 }
 
 function isTerminalClientError(status: number): boolean {
-  return status === 400 || status === 401 || status === 403 || status === 404;
+  return status === 400 || status === 404;
 }
 
 function isAbortError(error: unknown): boolean {

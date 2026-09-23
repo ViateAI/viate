@@ -6,10 +6,8 @@ import {
   OUTBOUND_HEADER_ALLOWLIST,
   pickAllowedHeaders,
   type HttpExchange,
-  type ProviderConnection,
   type ProviderHandler,
 } from "@viateai/sdk";
-import { pluginLoggerFromFastify } from "./plugin-log.js";
 import { dispatchRouted, RouteError } from "./routing.js";
 import {
   classifyOutcome,
@@ -18,6 +16,7 @@ import {
   requestModelFrom,
   type RequestLogRecorder,
 } from "./request-logs.js";
+import { createKeepaliveScheduler } from "./keepalive.js";
 import type { AdminStore, StoredApiKey } from "./store.js";
 import { tapExchange } from "./usage-frames.js";
 
@@ -28,6 +27,7 @@ export type ChatRouteOptions = {
   authenticateClient?: ClientAuthenticator;
   store?: AdminStore;
   requestLogs?: RequestLogRecorder;
+  onUpstreamAuthFailure?: (connectionId: string) => void;
 };
 
 type Capability = "chatCompletions" | "listModels" | "embeddings" | "responses" | "responsesCompact";
@@ -60,7 +60,16 @@ export async function registerChatRoute(app: FastifyInstance, options: ChatRoute
   );
 
   if (options.store) {
-    void startKeepalives(app, options.store, providers).catch((error: unknown) => {
+    const scheduler = createKeepaliveScheduler({
+      store: options.store,
+      providers,
+      log: app.log,
+    });
+    options.onUpstreamAuthFailure = (connectionId) => scheduler.nudge(connectionId, "request");
+    app.addHook("onClose", async () => {
+      scheduler.stop();
+    });
+    void scheduler.start().catch((error: unknown) => {
       app.log.error({ err: error }, "keepalive startup failed");
     });
   }
@@ -108,6 +117,7 @@ async function dispatch(
       capability,
       { body: request.body, headers, signal },
       clientAbort.signal,
+      options.onUpstreamAuthFailure,
     );
     const { exchange, tap } = tapExchange(routed.exchange, startedAt);
     const sent = sendUpstream(reply, exchange);
@@ -182,101 +192,6 @@ async function dispatch(
     }
     return viateError(reply, 500, error instanceof Error ? error.message : String(error));
   }
-}
-
-async function startKeepalives(
-  app: FastifyInstance,
-  store: AdminStore,
-  providers: Map<string, ProviderHandler>,
-): Promise<void> {
-  const timers = new Map<string, NodeJS.Timeout>();
-  const inFlight = new Set<string>();
-
-  const run = async (connection: ProviderConnection): Promise<void> => {
-    const provider = providers.get(connection.providerId);
-    if (!provider?.keepalive) {
-      return;
-    }
-    if (inFlight.has(connection.connectionId)) {
-      return;
-    }
-    inFlight.add(connection.connectionId);
-    clearTimeout(timers.get(connection.connectionId));
-    timers.delete(connection.connectionId);
-    try {
-      const result = await provider.keepalive({
-        connectionId: connection.connectionId,
-        credentials: connection.credentials,
-        signal: AbortSignal.timeout(CORE_TIMEOUT_MS),
-        reason: "timer",
-        log: pluginLoggerFromFastify(app.log).child({
-          plugin: connection.providerId,
-          connectionId: connection.connectionId,
-        }),
-      });
-      if (result.credentials !== undefined || result.displayLabel !== undefined) {
-        store.putCredentials(
-          connection.connectionId,
-          result.credentials === undefined ? connection.credentials : result.credentials,
-          result.displayLabel,
-        );
-      }
-      store.setKeepalive(connection.connectionId, result.status, result.error);
-      if (result.status !== "ok") {
-        app.log.warn(
-          {
-            connectionId: connection.connectionId,
-            providerId: connection.providerId,
-            status: result.status,
-            error: result.error,
-          },
-          "keepalive failed",
-        );
-      }
-      if (result.nextDueMs !== undefined) {
-        clearTimeout(timers.get(connection.connectionId));
-        const timer = setTimeout(() => {
-          timers.delete(connection.connectionId);
-          const stored = store.getConnection(connection.connectionId);
-          if (!stored?.hasCredentials) {
-            return;
-          }
-          const credentials = store.getCredentials(connection.connectionId);
-          void run({ ...connection, credentials });
-        }, result.nextDueMs);
-        timer.unref();
-        timers.set(connection.connectionId, timer);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      store.setKeepalive(
-        connection.connectionId,
-        "failed",
-        message,
-      );
-      app.log.error(
-        {
-          err: error,
-          connectionId: connection.connectionId,
-          providerId: connection.providerId,
-          status: "failed",
-          error: message,
-        },
-        "keepalive failed",
-      );
-    } finally {
-      inFlight.delete(connection.connectionId);
-    }
-  };
-
-  app.addHook("onClose", async () => {
-    for (const timer of timers.values()) {
-      clearTimeout(timer);
-    }
-    timers.clear();
-  });
-
-  await Promise.all(store.listResolvedConnections().map(run));
 }
 
 function clientSecretFrom(request: FastifyRequest): string | undefined {

@@ -763,6 +763,54 @@ describe("core capability dispatcher", () => {
     }
   });
 
+  it("failovers upstream 403 to another connection", async () => {
+    resetRoutingStateForTests();
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-failover-403-"));
+    const store = await AdminStore.open(dataDir);
+    const secret = store.createApiKey("failover403").secret;
+    const openai = store.createConnection("openai-compatible");
+    const anthropic = store.createConnection("anthropic");
+    store.putCredentials(openai.id, { token: "o" }, "openai");
+    store.putCredentials(anthropic.id, { token: "a" }, "anthropic");
+    store.replaceConnectionModels(openai.id, [{ id: "gpt-4o" }]);
+    store.replaceConnectionModels(anthropic.id, [{ id: "gpt-4o" }]);
+    store.setActive(openai.id, true);
+    store.setActive(anthropic.id, true);
+    const seen: string[] = [];
+    const json = (status: number) => ({
+      status,
+      headers: { "content-type": "application/json" },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`{"ok":${status}}`));
+          controller.close();
+        },
+      }),
+    });
+    const app = await buildApp({
+      logger: false,
+      store,
+      providers: [
+        { id: "openai-compatible", async chatCompletions() { seen.push("openai-compatible"); return json(403); } },
+        { id: "anthropic", async chatCompletions() { seen.push("anthropic"); return json(200); } },
+      ],
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: bearer(secret),
+        payload: { model: "gpt-4o", messages: [{ role: "user", content: "auth-miss" }] },
+      });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(seen, ["openai-compatible", "anthropic"]);
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("maps missing model to 400 and provider throw after exhausting the pool to 503", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-capability-errors-"));
     const store = await AdminStore.open(dataDir);
@@ -950,6 +998,209 @@ describe("core capability dispatcher", () => {
       assert.equal(thrownLog?.providerId, "codex");
       assert.equal(thrownLog?.status, "failed");
       assert.equal(thrownLog?.error, "network down");
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries keepalive after a thrown failure", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-keepalive-backoff-"));
+    const store = await AdminStore.open(dataDir);
+    const stored = store.createConnection("refreshing");
+    store.putCredentials(stored.id, { refreshToken: "old" });
+    let calls = 0;
+    const app = await buildApp({
+      logger: false,
+      providers: [{
+        id: "refreshing",
+        async keepalive() {
+          calls += 1;
+          if (calls === 1) {
+            throw new Error("network down");
+          }
+          return { status: "ok", nextDueMs: 60_000 };
+        },
+      }],
+      store,
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+      assert.equal(store.getConnection(stored.id)?.keepaliveStatus, "failed");
+      t.mock.timers.tick(59_999);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+      t.mock.timers.tick(1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 2);
+      assert.equal(store.getConnection(stored.id)?.keepaliveStatus, "ok");
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not retry keepalive after needs_reauth", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-keepalive-reauth-"));
+    const store = await AdminStore.open(dataDir);
+    const stored = store.createConnection("refreshing");
+    store.putCredentials(stored.id, { refreshToken: "old" });
+    let calls = 0;
+    const app = await buildApp({
+      logger: false,
+      providers: [{
+        id: "refreshing",
+        async keepalive() {
+          calls += 1;
+          return { status: "needs_reauth", error: "revoked" };
+        },
+      }],
+      store,
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+      t.mock.timers.tick(5 * 60_000);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reruns keepalive when credentials are replaced", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-keepalive-creds-"));
+    const store = await AdminStore.open(dataDir);
+    const stored = store.createConnection("refreshing");
+    store.putCredentials(stored.id, { refreshToken: "old" });
+    let calls = 0;
+    const seen: unknown[] = [];
+    const app = await buildApp({
+      logger: false,
+      providers: [{
+        id: "refreshing",
+        async keepalive(input) {
+          calls += 1;
+          seen.push(input.credentials);
+          return { status: "ok", nextDueMs: 60_000 };
+        },
+      }],
+      store,
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+      assert.deepEqual(seen, [{ refreshToken: "old" }]);
+      store.putCredentials(stored.id, { refreshToken: "new" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 2);
+      assert.deepEqual(seen, [{ refreshToken: "old" }, { refreshToken: "new" }]);
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("watchdog reruns keepalive when no timer is scheduled", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-keepalive-watchdog-"));
+    const store = await AdminStore.open(dataDir);
+    const stored = store.createConnection("refreshing");
+    store.putCredentials(stored.id, { refreshToken: "old" });
+    let calls = 0;
+    const app = await buildApp({
+      logger: false,
+      providers: [{
+        id: "refreshing",
+        async keepalive() {
+          calls += 1;
+          return { status: "ok" };
+        },
+      }],
+      store,
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+      t.mock.timers.tick(5 * 60_000 - 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+      t.mock.timers.tick(1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(calls, 2);
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("nudges keepalive with reason request after upstream 403", async () => {
+    resetRoutingStateForTests();
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-keepalive-403-"));
+    const store = await AdminStore.open(dataDir);
+    const secret = store.createApiKey("authfail").secret;
+    const openai = store.createConnection("openai-compatible");
+    const anthropic = store.createConnection("anthropic");
+    store.putCredentials(openai.id, { token: "o" }, "openai");
+    store.putCredentials(anthropic.id, { token: "a" }, "anthropic");
+    store.replaceConnectionModels(openai.id, [{ id: "gpt-4o" }]);
+    store.replaceConnectionModels(anthropic.id, [{ id: "gpt-4o" }]);
+    store.setActive(openai.id, true);
+    store.setActive(anthropic.id, true);
+    const reasons: string[] = [];
+    const json = (status: number) => ({
+      status,
+      headers: { "content-type": "application/json" },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("{}"));
+          controller.close();
+        },
+      }),
+    });
+    const app = await buildApp({
+      logger: false,
+      store,
+      providers: [
+        {
+          id: "openai-compatible",
+          async keepalive(input) {
+            reasons.push(input.reason);
+            return { status: "ok", nextDueMs: 60_000 };
+          },
+          async chatCompletions() {
+            return json(403);
+          },
+        },
+        {
+          id: "anthropic",
+          async chatCompletions() {
+            return json(200);
+          },
+        },
+      ],
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(reasons, ["timer"]);
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: bearer(secret),
+        payload: { model: "gpt-4o", messages: [{ role: "user", content: "auth-miss" }] },
+      });
+      assert.equal(response.statusCode, 200);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(reasons, ["timer", "request"]);
     } finally {
       await app.close();
       store.close();
