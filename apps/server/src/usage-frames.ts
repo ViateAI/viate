@@ -151,6 +151,15 @@ function hasUsageInfo(frame: unknown): boolean {
     return true;
   }
   if (
+    record.response &&
+    typeof record.response === "object" &&
+    !Array.isArray(record.response) &&
+    (record.response as Record<string, unknown>).usage &&
+    typeof (record.response as Record<string, unknown>).usage === "object"
+  ) {
+    return true;
+  }
+  if (
     record.message &&
     typeof record.message === "object" &&
     !Array.isArray(record.message) &&

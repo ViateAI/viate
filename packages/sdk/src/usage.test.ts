@@ -50,6 +50,35 @@ describe("parseOpenAIResponsesUsage", () => {
       },
     );
   });
+  it("reads usage nested on response.completed frames", () => {
+    assert.deepEqual(
+      parseOpenAIResponsesUsage([
+        { type: "response.created", response: { id: "resp_1" } },
+        { type: "response.output_text.delta", delta: "hi" },
+        {
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 30119,
+              output_tokens: 728,
+              input_tokens_details: { cached_tokens: 1152 },
+            },
+          },
+        },
+      ]),
+      {
+        inputTokens: 30119,
+        outputTokens: 728,
+        cacheReadTokens: 1152,
+        cacheWriteTokens: 0,
+      },
+    );
+  });
+
+  it("returns null when no usage object is present", () => {
+    assert.equal(parseOpenAIResponsesUsage([{ type: "response.created" }]), null);
+    assert.equal(parseOpenAIResponsesUsage([]), null);
+  });
 });
 
 describe("parseAnthropicUsage", () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseAnthropicUsage, parseOpenAIChatUsage } from "@viateai/sdk";
+import { parseAnthropicUsage, parseOpenAIChatUsage, parseOpenAIResponsesUsage } from "@viateai/sdk";
 import { frameJson, frameSse, tapExchange } from "./usage-frames.js";
 
 describe("frameJson", () => {
@@ -49,6 +49,27 @@ describe("frameSse", () => {
       outputTokens: 25,
       cacheReadTokens: 10,
       cacheWriteTokens: 5,
+    });
+  });
+  it("preserves nested Responses usage after the SSE frame cap", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 100; i += 1) {
+      lines.push(`data: {"type":"response.output_text.delta","delta":"token_${i}"}`, "");
+    }
+    lines.push(
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":40,"output_tokens":12,"input_tokens_details":{"cached_tokens":15}}}}',
+      "",
+    );
+    for (let i = 0; i < 100; i += 1) {
+      lines.push(`data: {"type":"response.output_text.delta","delta":"after_${i}"}`, "");
+    }
+    lines.push("data: [DONE]", "");
+    const frames = frameSse(lines.join("\n"));
+    assert.deepEqual(parseOpenAIResponsesUsage(frames), {
+      inputTokens: 40,
+      outputTokens: 12,
+      cacheReadTokens: 15,
+      cacheWriteTokens: 0,
     });
   });
 });

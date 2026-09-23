@@ -18,8 +18,14 @@ function tokenCount(value: unknown): number {
 function lastUsage(frames: unknown[]): Record<string, unknown> | null {
   for (let i = frames.length - 1; i >= 0; i -= 1) {
     const frame = frames[i];
-    if (isRecord(frame) && isRecord(frame.usage)) {
+    if (!isRecord(frame)) {
+      continue;
+    }
+    if (isRecord(frame.usage)) {
       return frame.usage;
+    }
+    if (isRecord(frame.response) && isRecord(frame.response.usage)) {
+      return frame.response.usage;
     }
   }
   return null;
