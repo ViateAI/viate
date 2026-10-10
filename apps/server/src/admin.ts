@@ -11,6 +11,7 @@ import type {
   OAuthStartResult,
   ProviderHandler,
 } from "@viateai/sdk";
+import { buildSubscriptionViews, type SubscriptionScheduler } from "./subscription.js";
 import { VIATE_PUBLIC_ENDPOINT_TYPES, type ProxyEndpointType } from "./endpoints.js";
 import {
   CSRF_COOKIE,
@@ -40,11 +41,18 @@ export type AdminPluginView = {
   status: "active" | "pending";
   restartRequired: boolean;
   error: string | null;
-  capabilities: Array<"chatCompletions" | "listModels" | "embeddings" | "responses" | "responsesCompact">;
+  capabilities: Array<
+    | "chatCompletions"
+    | "listModels"
+    | "embeddings"
+    | "responses"
+    | "responsesCompact"
+  >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
   hasOAuth: boolean;
   hasKeepalive: boolean;
+  hasSubscription: boolean;
   advertisedEndpointTypes: ProxyEndpointType[];
 };
 
@@ -62,6 +70,7 @@ export type AdminRouteOptions = {
   pluginFailures: PluginLoadFailure[];
   sessions?: SessionStore;
   requestLogs?: RequestLogRecorder;
+  subscriptions?: SubscriptionScheduler;
 };
 
 const SESSION_MAX_AGE = 12 * 60 * 60;
@@ -247,6 +256,22 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
 
   app.get("/api/admin/connections", async () => {
     return { connections: options.store.listConnections() };
+  });
+
+  app.get("/api/admin/subscriptions", async () => {
+    return { subscriptions: buildSubscriptionViews(options.store, providers) };
+  });
+
+  app.post("/api/admin/connections/:id/subscription/refresh", async (request, reply) => {
+    if (!options.subscriptions) {
+      return reply.code(503).send({ error: { message: "subscription scheduler is unavailable", type: "viate_error" } });
+    }
+    const { id } = request.params as { id: string };
+    try {
+      return { subscription: await options.subscriptions.refresh(id) };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
   });
 
   app.post("/api/admin/connections", async (request, reply) => {
@@ -607,6 +632,7 @@ function toPluginViews(
       hasParseCredentials: Boolean(provider?.parseCredentials),
       hasOAuth: Boolean(provider?.startOAuth),
       hasKeepalive: Boolean(provider?.keepalive),
+      hasSubscription: Boolean(provider?.subscription),
       advertisedEndpointTypes: plugin.id
         ? store.getAdvertisedEndpointTypes(plugin.id)
         : [...VIATE_PUBLIC_ENDPOINT_TYPES],

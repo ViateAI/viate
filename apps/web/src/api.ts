@@ -6,11 +6,18 @@ export type AdminPlugin = {
   status: "active" | "pending";
   restartRequired: boolean;
   error: string | null;
-  capabilities: Array<"chatCompletions" | "listModels" | "embeddings" | "responses" | "responsesCompact">;
+  capabilities: Array<
+    | "chatCompletions"
+    | "listModels"
+    | "embeddings"
+    | "responses"
+    | "responsesCompact"
+  >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
   hasOAuth: boolean;
   hasKeepalive: boolean;
+  hasSubscription: boolean;
   advertisedEndpointTypes: Array<"openai" | "openai-response">;
 };
 
@@ -43,6 +50,41 @@ export type Connection = {
   keepaliveAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type SubscriptionLevel = "ok" | "low" | "exhausted" | "unknown";
+
+export type SubscriptionUsageView = {
+  type: string;
+  group: string | null;
+  label: string;
+  unit: "currency" | "percent" | "requests" | "tokens";
+  currency: string | null;
+  used: number | null;
+  limit: number | null;
+  remaining: number | null;
+  resetsAt: string | null;
+  unlimited: boolean;
+  reported: boolean;
+  level: SubscriptionLevel;
+};
+
+export type SubscriptionView = {
+  connectionId: string;
+  providerId: string;
+  displayLabel: string;
+  active: boolean;
+  hasCredentials: boolean;
+  orphan: boolean;
+  support: "supported" | "unsupported";
+  status: "unknown" | "ok" | "failed" | "needs_reauth" | "unsupported";
+  error: string | null;
+  plan: string | null;
+  fetchedAt: string | null;
+  dueAt: string | null;
+  stale: boolean;
+  level: SubscriptionLevel;
+  usages: SubscriptionUsageView[];
 };
 
 export type ConnectionModel = {

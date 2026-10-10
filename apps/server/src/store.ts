@@ -11,6 +11,26 @@ import { decryptSecret, encryptSecret, loadOrCreateCredentialKey } from "./crypt
 
 export type KeepaliveStatus = "idle" | "ok" | "failed" | "needs_reauth";
 
+export type SubscriptionStatus = "unknown" | "ok" | "failed" | "needs_reauth";
+
+export type SubscriptionUnit = "currency" | "percent" | "requests" | "tokens";
+
+export type StoredSubscriptionUsage = {
+  connectionId: string;
+  type: string;
+  position: number;
+  group: string | null;
+  label: string;
+  unit: SubscriptionUnit;
+  currency: string | null;
+  used: number | null;
+  limit: number | null;
+  remaining: number | null;
+  resetsAt: string | null;
+  unlimited: boolean;
+  reported: boolean;
+};
+
 export type StoredConnection = {
   id: string;
   providerId: string;
@@ -20,6 +40,11 @@ export type StoredConnection = {
   keepaliveStatus: KeepaliveStatus;
   keepaliveError: string | null;
   keepaliveAt: string | null;
+  subscriptionStatus: SubscriptionStatus;
+  subscriptionError: string | null;
+  subscriptionAt: string | null;
+  subscriptionDueAt: string | null;
+  subscriptionPlan: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -54,7 +79,12 @@ export type OperationLog = {
   createdAt: string;
 };
 
-export type RequestLogEndpoint = "chat.completions" | "embeddings" | "responses" | "responses.compact";
+export type RequestLogEndpoint =
+  | "chat.completions"
+  | "embeddings"
+  | "responses"
+  | "responses.compact"
+  ;
 
 export type RequestLogOutcome =
   | "success"
@@ -206,6 +236,11 @@ type ConnectionRow = {
   keepalive_status: string;
   keepalive_error: string | null;
   keepalive_at: string | null;
+  subscription_status: string;
+  subscription_error: string | null;
+  subscription_at: string | null;
+  subscription_due_at: string | null;
+  subscription_plan: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -296,6 +331,11 @@ export class AdminStore {
         keepalive_status TEXT NOT NULL DEFAULT 'idle',
         keepalive_error TEXT,
         keepalive_at TEXT,
+        subscription_status TEXT NOT NULL DEFAULT 'unknown',
+        subscription_error TEXT,
+        subscription_at TEXT,
+        subscription_due_at TEXT,
+        subscription_plan TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -405,6 +445,7 @@ export class AdminStore {
     `);
     migrateConnections(db);
     migrateConnectionModels(db);
+    migrateSubscription(db);
     return new AdminStore(db, key, dataDir);
   }
 
@@ -539,6 +580,78 @@ export class AdminStore {
       throw Object.assign(new Error("connection not found"), { statusCode: 404 });
     }
     this.notifyCredentialsChanged(id);
+  }
+
+  listSubscriptionUsages(): StoredSubscriptionUsage[] {
+    const rows = this.db
+      .prepare(
+        `SELECT connection_id, type, position, group_label, label, unit, currency, used, "limit", remaining, resets_at, unlimited, reported
+         FROM connection_usages
+         ORDER BY connection_id, position, type`,
+      )
+      .all() as SubscriptionUsageRow[];
+    return rows.map((row) => toSubscriptionUsage(row));
+  }
+
+  saveSubscriptionSuccess(
+    id: string,
+    input: {
+      plan: string | null;
+      dueAt: string;
+      usages: Array<Omit<StoredSubscriptionUsage, "connectionId">>;
+    },
+  ): void {
+    this.requireRow(id);
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN");
+    try {
+      this.db
+        .prepare(
+          `UPDATE connections
+           SET subscription_status = 'ok', subscription_error = NULL, subscription_at = ?, subscription_due_at = ?, subscription_plan = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(now, input.dueAt, input.plan, now, id);
+      this.db.prepare("DELETE FROM connection_usages WHERE connection_id = ?").run(id);
+      const insert = this.db.prepare(
+        `INSERT INTO connection_usages (
+           connection_id, type, position, group_label, label, unit, currency, used, "limit", remaining, resets_at, unlimited, reported
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const usage of input.usages) {
+        insert.run(
+          id,
+          usage.type,
+          usage.position,
+          usage.group,
+          usage.label,
+          usage.unit,
+          usage.currency,
+          usage.used,
+          usage.limit,
+          usage.remaining,
+          usage.resetsAt,
+          usage.unlimited ? 1 : 0,
+          usage.reported ? 1 : 0,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  saveSubscriptionFailure(id: string, status: "failed" | "needs_reauth", error: string): void {
+    this.requireRow(id);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE connections
+         SET subscription_status = ?, subscription_error = ?, subscription_at = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(status, error, now, now, id);
   }
 
   getConnectionModels(id: string): ConnectionModelCatalog {
@@ -1335,6 +1448,16 @@ export class AdminStore {
       keepaliveStatus: (row.keepalive_status as KeepaliveStatus) || "idle",
       keepaliveError: row.keepalive_error,
       keepaliveAt: row.keepalive_at,
+      subscriptionStatus:
+        row.subscription_status === "ok" ||
+        row.subscription_status === "failed" ||
+        row.subscription_status === "needs_reauth"
+          ? row.subscription_status
+          : "unknown",
+      subscriptionError: row.subscription_error,
+      subscriptionAt: row.subscription_at,
+      subscriptionDueAt: row.subscription_due_at,
+      subscriptionPlan: row.subscription_plan,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1416,4 +1539,79 @@ function migrateConnectionModels(db: DatabaseSync): void {
     return;
   }
   db.exec("ALTER TABLE connection_models ADD COLUMN context_length INTEGER");
+}
+
+function migrateSubscription(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(connections)").all() as Array<{ name: string }>;
+  const names: Record<string, true> = {};
+  for (const column of columns) {
+    names[column.name] = true;
+  }
+  const add = (name: string, definition: string): void => {
+    if (!names[name]) {
+      db.exec(`ALTER TABLE connections ADD COLUMN ${definition}`);
+    }
+  };
+  add("subscription_status", "subscription_status TEXT NOT NULL DEFAULT 'unknown'");
+  add("subscription_error", "subscription_error TEXT");
+  add("subscription_at", "subscription_at TEXT");
+  add("subscription_due_at", "subscription_due_at TEXT");
+  add("subscription_plan", "subscription_plan TEXT");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS connection_usages (
+      connection_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      group_label TEXT,
+      label TEXT NOT NULL,
+      unit TEXT NOT NULL,
+      currency TEXT,
+      used REAL,
+      "limit" REAL,
+      remaining REAL,
+      resets_at TEXT,
+      unlimited INTEGER NOT NULL DEFAULT 0,
+      reported INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (connection_id, type),
+      FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
+    );
+  `);
+}
+
+type SubscriptionUsageRow = {
+  connection_id: string;
+  type: string;
+  position: number;
+  group_label: string | null;
+  label: string;
+  unit: string;
+  currency: string | null;
+  used: number | null;
+  limit: number | null;
+  remaining: number | null;
+  resets_at: string | null;
+  unlimited: number;
+  reported: number;
+};
+
+function toSubscriptionUsage(row: SubscriptionUsageRow): StoredSubscriptionUsage {
+  const unit: SubscriptionUnit =
+    row.unit === "currency" || row.unit === "percent" || row.unit === "requests" || row.unit === "tokens"
+      ? row.unit
+      : "requests";
+  return {
+    connectionId: row.connection_id,
+    type: row.type,
+    position: row.position,
+    group: row.group_label,
+    label: row.label,
+    unit,
+    currency: row.currency,
+    used: row.used,
+    limit: row.limit,
+    remaining: row.remaining,
+    resetsAt: row.resets_at,
+    unlimited: row.unlimited === 1,
+    reported: row.reported === 1,
+  };
 }

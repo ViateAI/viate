@@ -13,9 +13,11 @@ import {
   type CredentialField,
   type OAuthStart,
   type OperationLog,
+  type SubscriptionView,
 } from "./api";
+import { balanceSummary, BalancesPage } from "./balances";
 
-type Page = "plugins" | "connections" | "models" | "api-keys" | "logs";
+type Page = "plugins" | "connections" | "balances" | "models" | "api-keys" | "logs";
 
 type CredentialMode = "form" | "paste" | "oauth";
 
@@ -151,6 +153,8 @@ function Console({ onLogout }: { onLogout: () => void }) {
   const [page, setPage] = useState<Page>("plugins");
   const [notice, setNotice] = useState<string | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
+  const [balanceConnectionId, setBalanceConnectionId] = useState<string | null>(null);
+  const [editConnectionId, setEditConnectionId] = useState<string | null>(null);
 
   return (
     <div className="app-shell">
@@ -165,6 +169,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         <nav className="nav" aria-label="Administration">
           <NavButton page="plugins" current={page} onClick={setPage}>Plugins</NavButton>
           <NavButton page="connections" current={page} onClick={setPage}>Connections</NavButton>
+          <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
           <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
           <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
           <NavButton page="logs" current={page} onClick={setPage}>Logs</NavButton>
@@ -208,6 +213,21 @@ function Console({ onLogout }: { onLogout: () => void }) {
               setSelectedConnectionId(connectionId);
               setPage("models");
             }}
+            onOpenBalance={(connectionId) => {
+              setBalanceConnectionId(connectionId);
+              setPage("balances");
+            }}
+            editConnectionId={editConnectionId}
+            onEditHandled={() => setEditConnectionId(null)}
+          />
+        ) : null}
+        {page === "balances" ? (
+          <BalancesPage
+            focusId={balanceConnectionId}
+            onConfigure={(connectionId) => {
+              setEditConnectionId(connectionId);
+              setPage("connections");
+            }}
           />
         ) : null}
         {page === "models" ? (
@@ -223,6 +243,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
       <nav className="mobile-nav" aria-label="Administration">
         <NavButton page="plugins" current={page} onClick={setPage}>Plugins</NavButton>
         <NavButton page="connections" current={page} onClick={setPage}>Connections</NavButton>
+        <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
         <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
         <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
         <NavButton page="logs" current={page} onClick={setPage}>Logs</NavButton>
@@ -256,6 +277,9 @@ function pageLabel(page: Page): string {
   if (page === "connections") {
     return "Connections";
   }
+  if (page === "balances") {
+    return "Balances";
+  }
   if (page === "models") {
     return "Models";
   }
@@ -271,6 +295,9 @@ function pageDescription(page: Page): string {
   }
   if (page === "connections") {
     return "Store encrypted provider credentials. Enable any number of connections.";
+  }
+  if (page === "balances") {
+    return "Cached upstream subscription remaining. Refresh reads the provider.";
   }
   if (page === "models") {
     return "Sync inventory per connection. Same ids publish as one aggregated /v1/models entry.";
@@ -620,29 +647,49 @@ function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void })
 function ConnectionsPage({
   onNotice,
   onManageModels,
+  onOpenBalance,
+  editConnectionId,
+  onEditHandled,
 }: {
   onNotice: (value: string | null) => void;
   onManageModels: (connectionId: string) => void;
+  onOpenBalance: (connectionId: string) => void;
+  editConnectionId: string | null;
+  onEditHandled: () => void;
 }) {
   const [connections, setConnections] = useState<Connection[] | null>(null);
   const [plugins, setPlugins] = useState<AdminPlugin[] | null>(null);
+  const [subscriptions, setSubscriptions] = useState<SubscriptionView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Connection | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirm, setConfirm] = useState<Connection | null>(null);
 
   async function refresh() {
-    const [connectionResult, pluginResult] = await Promise.all([
+    const [connectionResult, pluginResult, subscriptionResult] = await Promise.all([
       api<{ connections: Connection[] }>("/api/admin/connections"),
       api<{ plugins: AdminPlugin[] }>("/api/admin/plugins"),
+      api<{ subscriptions: SubscriptionView[] }>("/api/admin/subscriptions"),
     ]);
     setConnections(connectionResult.connections);
     setPlugins(pluginResult.plugins);
+    setSubscriptions(subscriptionResult.subscriptions);
   }
 
   useEffect(() => {
     refresh().catch((err) => setError(isApiError(err) ? err.message : "failed to load connections"));
   }, []);
+
+  useEffect(() => {
+    if (!editConnectionId || !connections) {
+      return;
+    }
+    const connection = connections.find((candidate) => candidate.id === editConnectionId);
+    if (connection) {
+      setEditing(connection);
+    }
+    onEditHandled();
+  }, [connections, editConnectionId, onEditHandled]);
 
   return (
     <section className="stack">
@@ -664,6 +711,7 @@ function ConnectionsPage({
           (candidate) => candidate.id === connection.providerId && candidate.status === "active" && !candidate.error,
         );
         const orphan = !provider;
+        const subscription = subscriptions?.find((candidate) => candidate.connectionId === connection.id);
         return (
         <article className="resource" key={connection.id}>
           <div className="resource-main">
@@ -684,6 +732,11 @@ function ConnectionsPage({
               <div className={`status ${connection.keepaliveStatus === "ok" ? "ok" : "warn"}`}>
                 Keepalive {connection.keepaliveStatus}{connection.keepaliveError ? ` · ${connection.keepaliveError}` : ""}
               </div>
+            ) : null}
+            {subscription ? (
+              <button className="ghost balance-link" type="button" onClick={() => onOpenBalance(connection.id)}>
+                {balanceSummary(subscription)}
+              </button>
             ) : null}
           </div>
           <div className="row-actions">

@@ -321,6 +321,7 @@ describe("admin API", () => {
     assert.equal(plugin.hasParseCredentials, true);
     assert.equal(plugin.hasOAuth, true);
     assert.equal(plugin.hasKeepalive, true);
+    assert.equal(plugin.hasSubscription, false);
     assert.deepEqual(plugin.advertisedEndpointTypes, ["openai", "openai-response"]);
 
     const orphan = store.createConnection("uninstalled");

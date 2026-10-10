@@ -4,6 +4,7 @@ import type { PluginLoadFailure } from "@viateai/plugin-manager";
 import { registerAdminRoutes, type PluginOperator } from "./admin.js";
 import { registerChatRoute } from "./chat.js";
 import { registerAdminStatic } from "./static.js";
+import { createSubscriptionScheduler } from "./subscription.js";
 import type { AdminStore } from "./store.js";
 import type { SessionStore } from "./sessions.js";
 import { RequestLogRecorder } from "./request-logs.js";
@@ -69,10 +70,20 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
 
   const store = options.store;
   const requestLogs = store ? new RequestLogRecorder(store) : undefined;
+  const providers = new Map((options.providers ?? []).map((provider) => [provider.id, provider]));
+  const subscriptions = store
+    ? createSubscriptionScheduler({ store, providers, log: app.log })
+    : undefined;
   if (requestLogs) {
     app.addHook("onClose", async () => {
       await requestLogs.close();
     });
+  }
+  if (subscriptions) {
+    app.addHook("onClose", async () => {
+      subscriptions.stop();
+    });
+    subscriptions.start();
   }
 
   await registerChatRoute(app, {
@@ -92,6 +103,7 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
       pluginFailures: options.pluginFailures ?? [],
       sessions: options.sessions,
       requestLogs,
+      subscriptions,
     });
   }
 

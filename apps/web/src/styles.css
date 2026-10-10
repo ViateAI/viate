@@ -113,6 +113,69 @@ button.ghost:hover:not(:disabled) {
   color: var(--foreground);
 }
 
+button.balance-link {
+  justify-content: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  padding-left: 0;
+  text-align: left;
+}
+
+.balance-card {
+  align-items: start;
+}
+
+.usage-group {
+  display: grid;
+  gap: 8px;
+}
+
+.usage-group h3 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+
+.usage-list {
+  display: grid;
+  gap: 10px;
+}
+
+.usage-row {
+  display: grid;
+  gap: 4px;
+}
+
+.usage-label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.usage-meter {
+  height: 6px;
+  border-radius: 99px;
+  background: var(--accent);
+  overflow: hidden;
+}
+
+.usage-meter > span {
+  display: block;
+  height: 100%;
+  background: var(--foreground);
+}
+
+.usage-meter.low > span,
+.usage-meter.exhausted > span {
+  background: var(--warn);
+}
+
+.usage-meter.exhausted > span {
+  background: var(--destructive);
+}
+
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -604,7 +667,7 @@ label {
 
   .app-shell {
     grid-template-columns: 1fr;
-    padding-bottom: 72px;
+    padding-bottom: 128px;
   }
 
   .sidebar { display: none; }
@@ -615,7 +678,7 @@ label {
 
   .mobile-nav {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     position: fixed;
     left: 0;
     right: 0;

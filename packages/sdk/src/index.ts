@@ -134,6 +134,41 @@ export type Keepalive = {
   keepalive(input: KeepaliveInput): Promise<KeepaliveResult>;
 };
 
+export type SubscriptionUnit = "currency" | "percent" | "requests" | "tokens";
+
+export type SubscriptionUsage = {
+  type: string;
+  label: string;
+  group?: string;
+  unit: SubscriptionUnit;
+  currency?: string;
+  used: number | null;
+  limit: number | null;
+  remaining: number | null;
+  resetsAt?: string;
+  unlimited?: boolean;
+  reported?: boolean;
+};
+
+export type SubscriptionInput = {
+  connectionId: string;
+  credentials: unknown;
+  signal: AbortSignal;
+  log: PluginLogger;
+};
+
+export type SubscriptionResult = {
+  status: "ok" | "needs_reauth" | "failed";
+  error?: string;
+  plan?: string;
+  usages?: SubscriptionUsage[];
+  nextDueMs?: number;
+};
+
+export type Subscription = {
+  subscription(input: SubscriptionInput): Promise<SubscriptionResult>;
+};
+
 export type ProviderHandler = {
   id: string;
   credentialsForm?: CredentialField[];
@@ -142,7 +177,9 @@ export type ProviderHandler = {
   startOAuth?(ctx: OAuthStartContext): Promise<OAuthStartResult>;
   exchangeOAuth?(input: OAuthExchangeInput): Promise<CredentialsWrite>;
   pollOAuth?(input: OAuthPollInput): Promise<OAuthPollResult>;
-} & Partial<ChatCompletions & Embeddings & Responses & ResponsesCompact & Models & Keepalive>;
+} & Partial<
+  ChatCompletions & Embeddings & Responses & ResponsesCompact & Models & Keepalive & Subscription
+>;
 
 export type PluginContext = {
   registerProvider(handler: ProviderHandler): void;
