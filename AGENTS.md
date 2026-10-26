@@ -66,7 +66,7 @@ A plugin package.json must include:
 
 The entry exports `definePlugin({ id, register })`. `register` calls `ctx.registerProvider(handler)` once. Duplicate provider ids fail load.
 
-`ProviderHandler` may implement `chatCompletions`, `embeddings`, `responses`, `responsesCompact`, `listModels`, `keepalive`, credential form/normalize, and OAuth start/exchange/poll. Return `HttpExchange` for proxied HTTP; do not invent a second protocol layer.
+`ProviderHandler` may implement `chatCompletions`, `embeddings`, `responses`, `responsesCompact`, `imageGenerations`, `imageEdits`, `listModels`, `keepalive`, credential form/normalize, and OAuth start/exchange/poll. Return `HttpExchange` for proxied HTTP; do not invent a second protocol layer.
 
 Plugins log through SDK `PluginLogger` (`ctx.log`, `KeepaliveInput.log`). Hosts adapt their logger with `createPluginLogger(write)`. Do not import Fastify or `console` from plugins.
 
@@ -91,10 +91,11 @@ Public:
 
 - `GET /health` — open, `{ status: "ok" }`
 - `POST /v1/chat/completions`
-- `GET /v1/models` — OpenAI `{ object: "list", data }` plus proxy fields `supported_endpoint_types` (`openai`, `openai-response`) and optional `name` / `context_length`. Multi-source models keep `children`.
+- `GET /v1/models` — OpenAI `{ object: "list", data }` plus proxy fields `supported_endpoint_types` (`openai`, `openai-response`, `openai-image`) and optional `name` / `context_length`. Multi-source models keep `children`.
 - `POST /v1/embeddings`
 - `POST /v1/responses`
 - `POST /v1/responses/compact` — Codex-style conversation compaction. Routed like `/v1/responses`; plugins that omit `responsesCompact` return 404 `capability not supported`.
+- `POST /v1/images/generations` and `POST /v1/images/edits` — OpenAI Images routes. Edits accept JSON or `multipart/form-data`; the gateway inlines files as `{ images: [{ b64_json, media_type }] }` before routing. Plugins that omit the method return 404 `capability not supported`.
 
 `/v1` requires `Authorization: Bearer` or `x-api-key`. Admin cookies do not authenticate `/v1`. No client keys => `/v1` is 401. Missing/invalid key is 401.
 
@@ -108,7 +109,9 @@ Admin API (`/api/admin/*`) requires `VIATE_ADMIN_PASSWORD`. Absent password disa
 - `GET /api/admin/session`, `POST /api/admin/logout`
 - Plugins: `GET /api/admin/plugins`; `POST /api/admin/plugins/install|update|remove`
 - Providers: `PUT /api/admin/providers/:providerId/advertised-endpoints` `{advertisedEndpointTypes}`. Filters `/v1/models` discovery only; `/v1` request routes stay open.
+  Types are `openai`, `openai-response`, and `openai-image`. Unset providers advertise the first two.
 - Logs: `GET /api/admin/logs`
+- Requests: `GET /api/admin/requests` (filters, `before` cursor, no bodies) and `GET /api/admin/requests/:id`. `GET /api/admin/requests/stats` keeps `?window=` unless `from`, `to`, or a dimension filter is set, then aggregates that range from `request_logs`.
 - Connections: `GET/POST /api/admin/connections`; `PUT/DELETE /api/admin/connections/:id`; activate/deactivate; OAuth start/poll/callback; per-connection model sync
 - Client keys: `GET/POST /api/admin/api-keys`; `DELETE /api/admin/api-keys/:id`. Secret shown once as `viate_…`; list returns prefix. Store HMAC-SHA256 only.
 

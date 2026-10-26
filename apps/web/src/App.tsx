@@ -16,8 +16,9 @@ import {
   type SubscriptionView,
 } from "./api";
 import { balanceSummary, BalancesPage } from "./balances";
+import { RequestsPage } from "./requests";
 
-type Page = "plugins" | "connections" | "balances" | "models" | "api-keys" | "logs";
+type Page = "plugins" | "connections" | "balances" | "models" | "api-keys" | "requests" | "logs";
 
 type CredentialMode = "form" | "paste" | "oauth";
 
@@ -172,6 +173,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
           <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
           <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
+          <NavButton page="requests" current={page} onClick={setPage}>Requests</NavButton>
           <NavButton page="logs" current={page} onClick={setPage}>Logs</NavButton>
         </nav>
         <div className="sidebar-footer">
@@ -238,6 +240,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           />
         ) : null}
         {page === "api-keys" ? <ApiKeysPage onNotice={setNotice} /> : null}
+        {page === "requests" ? <RequestsPage /> : null}
         {page === "logs" ? <LogsPage /> : null}
       </main>
       <nav className="mobile-nav" aria-label="Administration">
@@ -246,6 +249,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
         <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
         <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
+        <NavButton page="requests" current={page} onClick={setPage}>Requests</NavButton>
         <NavButton page="logs" current={page} onClick={setPage}>Logs</NavButton>
       </nav>
     </div>
@@ -286,6 +290,9 @@ function pageLabel(page: Page): string {
   if (page === "api-keys") {
     return "Client API keys";
   }
+  if (page === "requests") {
+    return "Requests";
+  }
   return "Operation logs";
 }
 
@@ -304,6 +311,9 @@ function pageDescription(page: Page): string {
   }
   if (page === "api-keys") {
     return "Issue hashed client keys for /v1. Secrets are shown once.";
+  }
+  if (page === "requests") {
+    return "Per-request cache, first token, TPS, and token usage. Statistics use the same filters. Detail is kept for 7 days.";
   }
   return "Install, update, and remove operations.";
 }
@@ -338,14 +348,14 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
 
   async function updateAdvertisedEndpoints(
     plugin: AdminPlugin,
-    type: "openai" | "openai-response",
+    type: "openai" | "openai-response" | "openai-image",
     enabled: boolean,
   ) {
     if (!plugin.id) {
       return;
     }
     const current = plugin.advertisedEndpointTypes ?? [];
-    const next = (["openai", "openai-response"] as const).filter((value) =>
+    const next = (["openai", "openai-response", "openai-image"] as const).filter((value) =>
       value === type ? enabled : current.includes(value),
     );
     setBusy(true);
@@ -460,6 +470,17 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
                     }}
                   />
                   Responses
+                </label>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={plugin.advertisedEndpointTypes.includes("openai-image")}
+                    disabled={busy}
+                    onChange={(event) => {
+                      void updateAdvertisedEndpoints(plugin, "openai-image", event.target.checked);
+                    }}
+                  />
+                  Images
                 </label>
               </div>
             ) : null}

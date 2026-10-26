@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { createHmac } from "node:crypto";
 import {
   parseAdvertisedEndpointTypes,
+  VIATE_DEFAULT_ENDPOINT_TYPES,
   VIATE_PUBLIC_ENDPOINT_TYPES,
   type ProxyEndpointType,
 } from "./endpoints.js";
@@ -84,7 +85,8 @@ export type RequestLogEndpoint =
   | "embeddings"
   | "responses"
   | "responses.compact"
-  ;
+  | "images.generations"
+  | "images.edits";
 
 export type RequestLogOutcome =
   | "success"
@@ -157,9 +159,62 @@ export type RequestLogListQuery = {
   to?: string;
   model?: string;
   connectionId?: string;
+  providerId?: string;
   keyId?: string;
+  endpoint?: string;
   outcome?: RequestLogOutcome;
+  before?: string;
   limit?: number;
+};
+
+export type RequestLogPage = {
+  requests: RequestLogRecord[];
+  nextBefore: string | null;
+};
+
+export type RequestLogRangeQuery = {
+  from: string;
+  to: string;
+  model?: string;
+  connectionId?: string;
+  providerId?: string;
+  keyId?: string;
+  endpoint?: string;
+  outcome?: RequestLogOutcome;
+};
+
+export type RequestLogTokenBreakdown = {
+  requests: number;
+  errors: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+
+export type RequestLogRangeStats = {
+  from: string;
+  to: string;
+  requests: number;
+  errors: number;
+  aborted: number;
+  errorRate: number;
+  rpm: number;
+  tpm: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  inputTpm: number;
+  outputTpm: number;
+  cacheReadTpm: number;
+  cacheWriteTpm: number;
+  avgDurationMs: number | null;
+  avgTtfbMs: number | null;
+  outputTps: number | null;
+  series: Array<{ t: string } & RequestLogTokenBreakdown>;
+  byModel: Array<{ model: string } & RequestLogTokenBreakdown>;
+  byConnection: Array<{ connectionId: string; providerId: string } & RequestLogTokenBreakdown>;
 };
 
 export type StoredApiKey = {
@@ -803,18 +858,18 @@ export class AdminStore {
   getAdvertisedEndpointTypes(providerId: string): ProxyEndpointType[] {
     const id = providerId.trim();
     if (!id) {
-      return [...VIATE_PUBLIC_ENDPOINT_TYPES];
+      return [...VIATE_DEFAULT_ENDPOINT_TYPES];
     }
     const row = this.db
       .prepare("SELECT endpoint_types FROM provider_advertised_endpoints WHERE provider_id = ?")
       .get(id) as { endpoint_types: string } | undefined;
     if (!row) {
-      return [...VIATE_PUBLIC_ENDPOINT_TYPES];
+      return [...VIATE_DEFAULT_ENDPOINT_TYPES];
     }
     try {
       return parseAdvertisedEndpointTypes(JSON.parse(row.endpoint_types) as unknown);
     } catch {
-      return [...VIATE_PUBLIC_ENDPOINT_TYPES];
+      return [...VIATE_DEFAULT_ENDPOINT_TYPES];
     }
   }
 
@@ -1228,38 +1283,21 @@ export class AdminStore {
   }
 
   listRequestLogs(query: RequestLogListQuery = {}): RequestLogRecord[] {
-    const clauses: string[] = [];
-    const params: Array<string | number> = [];
-    if (query.from) {
-      clauses.push("started_at >= ?");
-      params.push(query.from);
-    }
-    if (query.to) {
-      clauses.push("started_at <= ?");
-      params.push(query.to);
-    }
-    if (query.model) {
-      clauses.push("request_model = ?");
-      params.push(query.model);
-    }
-    if (query.connectionId) {
-      clauses.push("connection_id = ?");
-      params.push(query.connectionId);
-    }
-    if (query.keyId) {
-      clauses.push("api_key_id = ?");
-      params.push(query.keyId);
-    }
-    if (query.outcome) {
-      clauses.push("outcome = ?");
-      params.push(query.outcome);
-    }
+    return this.listRequestLogPage(query).requests;
+  }
+
+  listRequestLogPage(query: RequestLogListQuery = {}): RequestLogPage {
+    const { sql, params } = requestLogWhere(query);
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
-    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.db
-      .prepare(`SELECT * FROM request_logs ${where} ORDER BY started_at DESC, id DESC LIMIT ?`)
+      .prepare(`SELECT * FROM request_logs ${sql} ORDER BY started_at DESC, id DESC LIMIT ?`)
       .all(...params, limit) as RequestLogRow[];
-    return rows.map((row) => this.toRequestLog(row));
+    const requests = rows.map((row) => this.toRequestLog(row));
+    const last = requests.length === limit ? requests[requests.length - 1] : undefined;
+    return {
+      requests,
+      nextBefore: last ? `${last.startedAt}|${last.id}` : null,
+    };
   }
 
   getRequestLog(id: string): { record: RequestLogRecord; attempts: RequestAttemptRecord[] } | null {
@@ -1355,6 +1393,102 @@ export class AdminStore {
       cacheReadTokens: totals.cacheReadTokens,
       cacheWriteTokens: totals.cacheWriteTokens,
       series,
+    };
+  }
+
+  queryRequestLogStats(query: RequestLogRangeQuery): RequestLogRangeStats {
+    const { sql, params } = requestLogWhere(query);
+    const totals = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) AS requests,
+           COALESCE(SUM(CASE WHEN outcome NOT IN ('success', 'aborted') THEN 1 ELSE 0 END), 0) AS errors,
+           COALESCE(SUM(CASE WHEN outcome = 'aborted' THEN 1 ELSE 0 END), 0) AS aborted,
+           COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS input_tokens,
+           COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS output_tokens,
+           COALESCE(SUM(COALESCE(cache_read_tokens, 0)), 0) AS cache_read_tokens,
+           COALESCE(SUM(COALESCE(cache_write_tokens, 0)), 0) AS cache_write_tokens,
+           COALESCE(SUM(duration_ms), 0) AS duration_ms_sum,
+           COALESCE(SUM(ttfb_ms), 0) AS ttfb_sum,
+           COUNT(ttfb_ms) AS ttfb_count
+         FROM request_logs ${sql}`,
+      )
+      .get(...params) as RequestLogAggregateRow;
+    const requests = numberFrom(totals.requests);
+    const errors = numberFrom(totals.errors);
+    const aborted = numberFrom(totals.aborted);
+    const inputTokens = numberFrom(totals.input_tokens);
+    const outputTokens = numberFrom(totals.output_tokens);
+    const cacheReadTokens = numberFrom(totals.cache_read_tokens);
+    const cacheWriteTokens = numberFrom(totals.cache_write_tokens);
+    const durationSum = numberFrom(totals.duration_ms_sum);
+    const ttfbCount = numberFrom(totals.ttfb_count);
+    const completed = Math.max(0, requests - aborted);
+    const spanMs = Date.parse(query.to) - Date.parse(query.from);
+    const minutes = !Number.isFinite(spanMs) || spanMs <= 0 ? 1 : spanMs / 60_000;
+    const bucket = requestLogBucket(spanMs);
+    const series = (
+      this.db
+        .prepare(
+          `SELECT ${bucketExpression(bucket)} AS t, ${REQUEST_LOG_BREAKDOWN_COLUMNS}
+           FROM request_logs ${sql}
+           GROUP BY t
+           ORDER BY t ASC`,
+        )
+        .all(...params) as RequestLogAggregateRow[]
+    ).map((row) => ({ t: String(row.t), ...tokenBreakdown(row) }));
+    const byModel = (
+      this.db
+        .prepare(
+          `SELECT COALESCE(request_model, '') AS model, ${REQUEST_LOG_BREAKDOWN_COLUMNS}
+           FROM request_logs ${sql}
+           GROUP BY 1
+           ORDER BY requests DESC, model ASC
+           LIMIT 20`,
+        )
+        .all(...params) as RequestLogAggregateRow[]
+    ).map((row) => ({ model: String(row.model), ...tokenBreakdown(row) }));
+    const byConnection = (
+      this.db
+        .prepare(
+          `SELECT
+             COALESCE(connection_id, '') AS connection_id,
+             COALESCE(provider_id, '') AS provider_id,
+             ${REQUEST_LOG_BREAKDOWN_COLUMNS}
+           FROM request_logs ${sql}
+           GROUP BY 1, 2
+           ORDER BY requests DESC, connection_id ASC
+           LIMIT 20`,
+        )
+        .all(...params) as RequestLogAggregateRow[]
+    ).map((row) => ({
+      connectionId: String(row.connection_id),
+      providerId: String(row.provider_id),
+      ...tokenBreakdown(row),
+    }));
+    return {
+      from: query.from,
+      to: query.to,
+      requests,
+      errors,
+      aborted,
+      errorRate: completed === 0 ? 0 : errors / completed,
+      rpm: requests / minutes,
+      tpm: (inputTokens + outputTokens) / minutes,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      inputTpm: inputTokens / minutes,
+      outputTpm: outputTokens / minutes,
+      cacheReadTpm: cacheReadTokens / minutes,
+      cacheWriteTpm: cacheWriteTokens / minutes,
+      avgDurationMs: requests === 0 ? null : durationSum / requests,
+      avgTtfbMs: ttfbCount === 0 ? null : numberFrom(totals.ttfb_sum) / ttfbCount,
+      outputTps: outputTokens > 0 && durationSum > 0 ? outputTokens / (durationSum / 1000) : null,
+      series,
+      byModel,
+      byConnection,
     };
   }
 
@@ -1614,4 +1748,124 @@ function toSubscriptionUsage(row: SubscriptionUsageRow): StoredSubscriptionUsage
     unlimited: row.unlimited === 1,
     reported: row.reported === 1,
   };
+}
+
+type RequestLogAggregateRow = {
+  t?: unknown;
+  model?: unknown;
+  connection_id?: unknown;
+  provider_id?: unknown;
+  requests: number | bigint;
+  errors: number | bigint;
+  aborted?: number | bigint;
+  input_tokens: number | bigint;
+  output_tokens: number | bigint;
+  cache_read_tokens: number | bigint;
+  cache_write_tokens: number | bigint;
+  duration_ms_sum?: number | bigint;
+  ttfb_sum?: number | bigint | null;
+  ttfb_count?: number | bigint;
+};
+
+function numberFrom(value: number | bigint | null | undefined): number {
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+  return value ?? 0;
+}
+
+const REQUEST_LOG_BREAKDOWN_COLUMNS = `
+  COUNT(*) AS requests,
+  COALESCE(SUM(CASE WHEN outcome NOT IN ('success', 'aborted') THEN 1 ELSE 0 END), 0) AS errors,
+  COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS input_tokens,
+  COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS output_tokens,
+  COALESCE(SUM(COALESCE(cache_read_tokens, 0)), 0) AS cache_read_tokens,
+  COALESCE(SUM(COALESCE(cache_write_tokens, 0)), 0) AS cache_write_tokens
+`;
+
+function tokenBreakdown(row: RequestLogAggregateRow): RequestLogTokenBreakdown {
+  return {
+    requests: numberFrom(row.requests),
+    errors: numberFrom(row.errors),
+    inputTokens: numberFrom(row.input_tokens),
+    outputTokens: numberFrom(row.output_tokens),
+    cacheReadTokens: numberFrom(row.cache_read_tokens),
+    cacheWriteTokens: numberFrom(row.cache_write_tokens),
+  };
+}
+
+function requestLogBucket(spanMs: number): "minute" | "hour" | "day" {
+  if (!Number.isFinite(spanMs) || spanMs <= 2 * 60 * 60 * 1000) {
+    return "minute";
+  }
+  if (spanMs <= 48 * 60 * 60 * 1000) {
+    return "hour";
+  }
+  return "day";
+}
+
+function bucketExpression(bucket: "minute" | "hour" | "day"): string {
+  if (bucket === "minute") {
+    return "substr(started_at, 1, 16) || ':00.000Z'";
+  }
+  if (bucket === "hour") {
+    return "substr(started_at, 1, 13) || ':00:00.000Z'";
+  }
+  return "substr(started_at, 1, 10) || 'T00:00:00.000Z'";
+}
+
+function requestLogWhere(query: {
+  from?: string;
+  to?: string;
+  model?: string;
+  connectionId?: string;
+  providerId?: string;
+  keyId?: string;
+  endpoint?: string;
+  outcome?: string;
+  before?: string;
+}): { sql: string; params: string[] } {
+  const clauses: string[] = [];
+  const params: string[] = [];
+  if (query.from) {
+    clauses.push("started_at >= ?");
+    params.push(query.from);
+  }
+  if (query.to) {
+    clauses.push("started_at <= ?");
+    params.push(query.to);
+  }
+  if (query.model !== undefined) {
+    clauses.push("COALESCE(request_model, '') = ?");
+    params.push(query.model);
+  }
+  if (query.connectionId !== undefined) {
+    clauses.push("COALESCE(connection_id, '') = ?");
+    params.push(query.connectionId);
+  }
+  if (query.providerId !== undefined) {
+    clauses.push("COALESCE(provider_id, '') = ?");
+    params.push(query.providerId);
+  }
+  if (query.keyId !== undefined) {
+    clauses.push("COALESCE(api_key_id, '') = ?");
+    params.push(query.keyId);
+  }
+  if (query.endpoint) {
+    clauses.push("endpoint = ?");
+    params.push(query.endpoint);
+  }
+  if (query.outcome) {
+    clauses.push("outcome = ?");
+    params.push(query.outcome);
+  }
+  if (query.before) {
+    const split = query.before.indexOf("|");
+    if (split <= 0 || split === query.before.length - 1) {
+      throw Object.assign(new Error("invalid before cursor"), { statusCode: 400 });
+    }
+    clauses.push("(started_at < ? OR (started_at = ? AND id < ?))");
+    params.push(query.before.slice(0, split), query.before.slice(0, split), query.before.slice(split + 1));
+  }
+  return { sql: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "", params };
 }

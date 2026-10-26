@@ -19,6 +19,7 @@ import {
 import { createKeepaliveScheduler } from "./keepalive.js";
 import type { AdminStore, StoredApiKey } from "./store.js";
 import { tapExchange } from "./usage-frames.js";
+import { redactImagePayload } from "./images.js";
 
 export type ClientAuthenticator = (secret: string | undefined) => StoredApiKey | null;
 
@@ -30,7 +31,14 @@ export type ChatRouteOptions = {
   onUpstreamAuthFailure?: (connectionId: string) => void;
 };
 
-type Capability = "chatCompletions" | "listModels" | "embeddings" | "responses" | "responsesCompact";
+type Capability =
+  | "chatCompletions"
+  | "listModels"
+  | "embeddings"
+  | "responses"
+  | "responsesCompact"
+  | "imageGenerations"
+  | "imageEdits";
 
 const CORE_TIMEOUT_MS = 10 * 60 * 1_000;
 
@@ -57,6 +65,12 @@ export async function registerChatRoute(app: FastifyInstance, options: ChatRoute
   );
   app.post("/v1/responses/compact", (request, reply) =>
     dispatch(request, reply, "responsesCompact", options, providers),
+  );
+  app.post("/v1/images/generations", (request, reply) =>
+    dispatch(request, reply, "imageGenerations", options, providers),
+  );
+  app.post("/v1/images/edits", (request, reply) =>
+    dispatch(request, reply, "imageEdits", options, providers),
   );
 
   if (options.store) {
@@ -144,8 +158,8 @@ async function dispatch(
           usage: result.usage,
           error: exchange.status >= 400 ? `upstream ${exchange.status}` : null,
           ttfbMs: result.ttfbMs,
-          requestBody: request.body,
-          responseBody: result.responseBody,
+          requestBody: redactImagePayload(request.body),
+          responseBody: redactImagePayload(result.responseBody),
           payloadTruncated: result.truncated,
         });
       })
@@ -176,7 +190,7 @@ async function dispatch(
         usage: null,
         error: aborted ? "aborted" : message,
         ttfbMs: null,
-        requestBody: request.body,
+        requestBody: redactImagePayload(request.body),
         responseBody: null,
         payloadTruncated: false,
       });

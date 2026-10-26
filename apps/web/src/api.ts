@@ -12,13 +12,15 @@ export type AdminPlugin = {
     | "embeddings"
     | "responses"
     | "responsesCompact"
+    | "imageGenerations"
+    | "imageEdits"
   >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
   hasOAuth: boolean;
   hasKeepalive: boolean;
   hasSubscription: boolean;
-  advertisedEndpointTypes: Array<"openai" | "openai-response">;
+  advertisedEndpointTypes: Array<"openai" | "openai-response" | "openai-image">;
 };
 
 export type CredentialField = {

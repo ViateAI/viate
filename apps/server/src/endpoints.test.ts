@@ -8,6 +8,7 @@ describe("parseAdvertisedEndpointTypes", () => {
       "openai",
       "openai-response",
     ]);
+    assert.deepEqual(parseAdvertisedEndpointTypes(["openai-image", "openai"]), ["openai", "openai-image"]);
     assert.deepEqual(parseAdvertisedEndpointTypes([]), []);
     assert.throws(() => parseAdvertisedEndpointTypes(["anthropic"]), /unsupported endpoint type/);
     assert.throws(() => parseAdvertisedEndpointTypes(undefined), /advertisedEndpointTypes is required/);

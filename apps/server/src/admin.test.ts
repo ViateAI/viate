@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -241,6 +241,190 @@ describe("admin API", () => {
     const stats = await authed(app, session, { method: "GET", url: "/api/admin/requests/stats?window=1h" });
     assert.equal(stats.statusCode, 200);
     assert.equal(typeof stats.json().stats.qps, "number");
+  });
+
+  it("filters request stats, rejects a bad outcome, and keeps list bodies off the page", async () => {
+    const session = await login(app, "correct-horse");
+    const marker = "payload-marker-should-not-list";
+    await mkdir(join(dataDir, "request-logs"), { recursive: true });
+    await writeFile(
+      join(dataDir, "request-logs", "marker.jsonl"),
+      `${JSON.stringify({
+        id: "req-http-stream",
+        request: { marker },
+        response: { status: 200, body: { marker } },
+      })}\n`,
+    );
+    store.insertRequestLog(
+      {
+        id: "req-http-stream",
+        startedAt: "2026-08-01T00:10:00.000Z",
+        endedAt: "2026-08-01T00:10:02.000Z",
+        durationMs: 2000,
+        ttfbMs: 180,
+        endpoint: "chat.completions",
+        stream: true,
+        status: 200,
+        outcome: "success",
+        requestModel: "http-alpha",
+        upstreamModel: "http-alpha",
+        providerId: "prov-a",
+        connectionId: "conn-a",
+        apiKeyId: "key-a",
+        apiKeyPrefix: "viate_aaa",
+        attemptCount: 1,
+        inputTokens: 10,
+        outputTokens: 4,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 1,
+        usageSource: "parser",
+        error: null,
+        payloadPath: "request-logs/marker.jsonl",
+        payloadOffset: 0,
+        payloadTruncated: false,
+      },
+      [],
+    );
+    store.insertRequestLog(
+      {
+        id: "req-http-error",
+        startedAt: "2026-08-01T00:20:00.000Z",
+        endedAt: "2026-08-01T00:20:00.500Z",
+        durationMs: 500,
+        ttfbMs: null,
+        endpoint: "embeddings",
+        stream: false,
+        status: 502,
+        outcome: "upstream_error",
+        requestModel: "http-beta",
+        upstreamModel: "http-beta",
+        providerId: "prov-b",
+        connectionId: "conn-b",
+        apiKeyId: "key-b",
+        apiKeyPrefix: "viate_bbb",
+        attemptCount: 1,
+        inputTokens: 2,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        usageSource: "missing",
+        error: "upstream failed",
+        payloadPath: null,
+        payloadOffset: null,
+        payloadTruncated: false,
+      },
+      [],
+    );
+
+    const range = "from=2026-08-01T00:00:00.000Z&to=2026-08-01T01:00:00.000Z";
+    const filtered = await authed(app, session, { method: "GET", url: `/api/admin/requests/stats?${range}` });
+    assert.equal(filtered.statusCode, 200);
+    const stats = filtered.json().stats as {
+      from: string;
+      to: string;
+      requests: number;
+      errors: number;
+      errorRate: number;
+      rpm: number;
+      outputTps: number;
+      series: Array<{ t: string }>;
+      byModel: Array<{ model: string }>;
+      byConnection: Array<{ connectionId: string }>;
+      qps?: number;
+    };
+    assert.equal(stats.from, "2026-08-01T00:00:00.000Z");
+    assert.equal(stats.to, "2026-08-01T01:00:00.000Z");
+    assert.equal(stats.requests, 2);
+    assert.equal(stats.errors, 1);
+    assert.equal(stats.errorRate, 0.5);
+    assert.equal(stats.rpm, 2 / 60);
+    assert.equal(stats.outputTps, 4 / (2500 / 1000));
+    assert.equal(stats.series[0]?.t, "2026-08-01T00:10:00.000Z");
+    assert.equal(stats.byModel.length, 2);
+    assert.equal(stats.byConnection.length, 2);
+    assert.equal(stats.qps, undefined);
+
+    const narrowed = await authed(app, session, {
+      method: "GET",
+      url: `/api/admin/requests/stats?${range}&model=http-alpha`,
+    });
+    assert.equal(narrowed.json().stats.requests, 1);
+
+    const listed = await authed(app, session, { method: "GET", url: "/api/admin/requests?model=http-alpha" });
+    assert.equal(listed.statusCode, 200);
+    const body = listed.json() as { requests: Array<Record<string, unknown>>; nextBefore?: string };
+    assert.equal(body.requests[0]?.id, "req-http-stream");
+    assert.equal("request" in (body.requests[0] ?? {}), false);
+    assert.equal("response" in (body.requests[0] ?? {}), false);
+    assert.equal(JSON.stringify(body).includes(marker), false);
+    assert.equal(body.nextBefore, undefined);
+
+    const detail = await authed(app, session, { method: "GET", url: "/api/admin/requests/req-http-stream" });
+    assert.equal(detail.statusCode, 200);
+    assert.equal(JSON.stringify(detail.json()).includes(marker), true);
+
+    const bad = await authed(app, session, { method: "GET", url: "/api/admin/requests?outcome=nope" });
+    assert.equal(bad.statusCode, 400);
+    assert.match(bad.json().error.message, /invalid outcome/);
+
+    const windowed = await authed(app, session, { method: "GET", url: "/api/admin/requests/stats?window=1h" });
+    assert.equal(windowed.statusCode, 200);
+    assert.equal(typeof windowed.json().stats.qps, "number");
+    assert.equal(windowed.json().stats.from, undefined);
+  });
+
+  it("matches list bounds after canonicalizing non-millisecond timestamps", async () => {
+    const session = await login(app, "correct-horse");
+    store.insertRequestLog(
+      {
+        id: "req-bound-exact",
+        startedAt: "2026-08-01T00:00:00.000Z",
+        endedAt: "2026-08-01T00:00:00.000Z",
+        durationMs: 1,
+        ttfbMs: null,
+        endpoint: "chat.completions",
+        stream: false,
+        status: 200,
+        outcome: "success",
+        requestModel: "bound-model",
+        upstreamModel: null,
+        providerId: "prov",
+        connectionId: "conn",
+        apiKeyId: null,
+        apiKeyPrefix: null,
+        attemptCount: 0,
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        usageSource: "missing",
+        error: null,
+        payloadPath: null,
+        payloadOffset: null,
+        payloadTruncated: false,
+      },
+      [],
+    );
+
+    const listed = await authed(app, session, {
+      method: "GET",
+      url: "/api/admin/requests?from=2026-08-01T00:00:00Z&to=2026-08-01T00:00:00Z",
+    });
+    assert.equal(listed.statusCode, 200);
+    const ids = (listed.json().requests as Array<{ id: string }>).map((row) => row.id);
+    assert.equal(ids.includes("req-bound-exact"), true);
+
+    const reversed = await authed(app, session, {
+      method: "GET",
+      url: "/api/admin/requests?from=2026-08-02T00:00:00.000Z&to=2026-08-01T00:00:00.000Z",
+    });
+    assert.equal(reversed.statusCode, 400);
+
+    const endpoint = await authed(app, session, {
+      method: "GET",
+      url: "/api/admin/requests?endpoint=not-an-endpoint",
+    });
+    assert.equal(endpoint.statusCode, 400);
   });
 
   it("creates empty connections, delegates credentials, and activates explicitly", async () => {

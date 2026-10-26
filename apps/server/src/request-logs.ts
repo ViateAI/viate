@@ -52,7 +52,13 @@ type RingBucket = {
 };
 
 export function endpointForCapability(
-  capability: "chatCompletions" | "embeddings" | "responses" | "responsesCompact",
+  capability:
+    | "chatCompletions"
+    | "embeddings"
+    | "responses"
+    | "responsesCompact"
+    | "imageGenerations"
+    | "imageEdits",
 ): RequestLogEndpoint {
   if (capability === "chatCompletions") {
     return "chat.completions";
@@ -62,6 +68,12 @@ export function endpointForCapability(
   }
   if (capability === "responsesCompact") {
     return "responses.compact";
+  }
+  if (capability === "imageGenerations") {
+    return "images.generations";
+  }
+  if (capability === "imageEdits") {
+    return "images.edits";
   }
   return "responses";
 }

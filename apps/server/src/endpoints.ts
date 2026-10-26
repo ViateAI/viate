@@ -1,10 +1,13 @@
-export const VIATE_PUBLIC_ENDPOINT_TYPES = ["openai", "openai-response"] as const;
+export const VIATE_PUBLIC_ENDPOINT_TYPES = ["openai", "openai-response", "openai-image"] as const;
 
 export type ProxyEndpointType = (typeof VIATE_PUBLIC_ENDPOINT_TYPES)[number];
+
+export const VIATE_DEFAULT_ENDPOINT_TYPES = ["openai", "openai-response"] as const satisfies readonly ProxyEndpointType[];
 
 const ENDPOINT_TYPE_BY_ID: Record<string, ProxyEndpointType> = {
   openai: "openai",
   "openai-response": "openai-response",
+  "openai-image": "openai-image",
 };
 
 export function filterPublicEndpointTypes(values: unknown): ProxyEndpointType[] {

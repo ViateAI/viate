@@ -8,6 +8,7 @@ import { createSubscriptionScheduler } from "./subscription.js";
 import type { AdminStore } from "./store.js";
 import type { SessionStore } from "./sessions.js";
 import { RequestLogRecorder } from "./request-logs.js";
+import { multipartImageBody } from "./images.js";
 
 export type HealthResponse = {
   status: "ok";
@@ -47,6 +48,14 @@ export function createApp(options: Pick<BuildAppOptions, "logger"> = {}): App {
       return;
     }
     done(null, body);
+  });
+  app.addContentTypeParser("multipart/form-data", { parseAs: "buffer" }, (request, body, done) => {
+    try {
+      const contentType = request.headers["content-type"];
+      done(null, multipartImageBody(Array.isArray(contentType) ? contentType[0] : contentType, body as Buffer));
+    } catch (error) {
+      done(error as Error, undefined);
+    }
   });
   return app;
 }

@@ -12,7 +12,7 @@ import type {
   ProviderHandler,
 } from "@viateai/sdk";
 import { buildSubscriptionViews, type SubscriptionScheduler } from "./subscription.js";
-import { VIATE_PUBLIC_ENDPOINT_TYPES, type ProxyEndpointType } from "./endpoints.js";
+import { VIATE_DEFAULT_ENDPOINT_TYPES, type ProxyEndpointType } from "./endpoints.js";
 import {
   CSRF_COOKIE,
   SESSION_COOKIE,
@@ -24,7 +24,14 @@ import {
 } from "./sessions.js";
 import { LoginRateLimiter } from "./rate-limit.js";
 import { readRequestPayload, type RequestLogRecorder } from "./request-logs.js";
-import type { AdminStore, OperationLog, RequestLogOutcome, RequestLogStatsWindow } from "./store.js";
+import type {
+  AdminStore,
+  OperationLog,
+  RequestLogListQuery,
+  RequestLogOutcome,
+  RequestLogRangeQuery,
+  RequestLogStatsWindow,
+} from "./store.js";
 
 export type PluginOperator = {
   list(): Promise<ListedPlugin[]>;
@@ -47,6 +54,8 @@ export type AdminPluginView = {
     | "embeddings"
     | "responses"
     | "responsesCompact"
+    | "imageGenerations"
+    | "imageEdits"
   >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
@@ -170,23 +179,25 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     return { logs: options.store.listOperationLogs() };
   });
 
-  app.get("/api/admin/requests", async (request) => {
+  app.get("/api/admin/requests", async (request, reply) => {
     const query = request.query as Record<string, string | undefined>;
-    const limit = query.limit ? Number(query.limit) : undefined;
-    const logs = options.store.listRequestLogs({
-      from: query.from,
-      to: query.to,
-      model: query.model,
-      connectionId: query.connectionId,
-      keyId: query.keyId,
-      outcome: query.outcome as RequestLogOutcome | undefined,
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    return { requests: logs };
+    const parsed = parseRequestListQuery(query);
+    if ("error" in parsed) {
+      return reply.code(400).send({ error: { message: parsed.error, type: "viate_error" } });
+    }
+    const page = options.store.listRequestLogPage(parsed.query);
+    return page.nextBefore ? { requests: page.requests, nextBefore: page.nextBefore } : { requests: page.requests };
   });
 
-  app.get("/api/admin/requests/stats", async (request) => {
+  app.get("/api/admin/requests/stats", async (request, reply) => {
     const query = request.query as Record<string, string | undefined>;
+    if (hasRequestRangeFilter(query)) {
+      const parsed = parseRequestRangeQuery(query);
+      if ("error" in parsed) {
+        return reply.code(400).send({ error: { message: parsed.error, type: "viate_error" } });
+      }
+      return { stats: options.store.queryRequestLogStats(parsed.query) };
+    }
     const window = query.window === "5m" || query.window === "1h" || query.window === "24h" ? query.window : "1m";
     if (window === "1m" && options.requestLogs) {
       return { stats: options.requestLogs.liveStats() };
@@ -619,6 +630,8 @@ function toPluginViews(
     if (provider?.embeddings) capabilities.push("embeddings");
     if (provider?.responses) capabilities.push("responses");
     if (provider?.responsesCompact) capabilities.push("responsesCompact");
+    if (provider?.imageGenerations) capabilities.push("imageGenerations");
+    if (provider?.imageEdits) capabilities.push("imageEdits");
     return {
       name: plugin.name,
       version: plugin.version,
@@ -635,7 +648,7 @@ function toPluginViews(
       hasSubscription: Boolean(provider?.subscription),
       advertisedEndpointTypes: plugin.id
         ? store.getAdvertisedEndpointTypes(plugin.id)
-        : [...VIATE_PUBLIC_ENDPOINT_TYPES],
+        : [...VIATE_DEFAULT_ENDPOINT_TYPES],
     };
   });
 }
@@ -710,4 +723,162 @@ function sendInputError(reply: FastifyReply, error: unknown) {
       : 400;
   const message = error instanceof Error ? error.message : "invalid input";
   return reply.code(status || 400).send({ error: { message, type: "viate_error" } });
+}
+
+const REQUEST_OUTCOMES: Record<string, RequestLogOutcome> = {
+  success: "success",
+  upstream_error: "upstream_error",
+  client_error: "client_error",
+  aborted: "aborted",
+  timeout: "timeout",
+  auth_error: "auth_error",
+};
+
+const REQUEST_ENDPOINTS: Record<string, true> = {
+  "chat.completions": true,
+  embeddings: true,
+  responses: true,
+  "responses.compact": true,
+  "images.generations": true,
+  "images.edits": true,
+};
+
+function hasRequestRangeFilter(query: Record<string, string | undefined>): boolean {
+  if (["model", "connectionId", "providerId", "keyId"].some((key) => query[key] !== undefined)) {
+    return true;
+  }
+  return ["from", "to", "endpoint", "outcome"].some((key) => Boolean(query[key]?.trim()));
+}
+
+function parseRequestListQuery(
+  query: Record<string, string | undefined>,
+): { error: string } | { query: RequestLogListQuery } {
+  const outcome = checkedOutcome(query.outcome);
+  if ("error" in outcome) {
+    return outcome;
+  }
+  const endpoint = checkedEndpoint(query.endpoint);
+  if ("error" in endpoint) {
+    return endpoint;
+  }
+  const from = query.from?.trim();
+  const to = query.to?.trim();
+  const rangeError = checkedRange(from, to);
+  if (rangeError) {
+    return { error: rangeError };
+  }
+  const fromIso = from ? new Date(Date.parse(from)).toISOString() : undefined;
+  const toIso = to ? new Date(Date.parse(to)).toISOString() : undefined;
+  const before = query.before?.trim();
+  if (before && !validBefore(before)) {
+    return { error: "invalid before cursor" };
+  }
+  const limitText = query.limit?.trim();
+  let limit: number | undefined;
+  if (limitText) {
+    limit = Number(limitText);
+    if (!Number.isFinite(limit)) {
+      return { error: "invalid limit" };
+    }
+  }
+  return {
+    query: {
+      from: fromIso,
+      to: toIso,
+      ...exactFilters(query),
+      endpoint: endpoint.value,
+      outcome: outcome.value,
+      before,
+      limit,
+    },
+  };
+}
+
+function parseRequestRangeQuery(
+  query: Record<string, string | undefined>,
+): { error: string } | { query: RequestLogRangeQuery } {
+  const outcome = checkedOutcome(query.outcome);
+  if ("error" in outcome) {
+    return outcome;
+  }
+  const endpoint = checkedEndpoint(query.endpoint);
+  if ("error" in endpoint) {
+    return endpoint;
+  }
+  const now = Date.now();
+  const toText = query.to?.trim();
+  const fromText = query.from?.trim();
+  const toMs = toText ? Date.parse(toText) : now;
+  if (Number.isNaN(toMs)) {
+    return { error: "invalid to" };
+  }
+  const fromMs = fromText ? Date.parse(fromText) : toMs - 24 * 60 * 60 * 1000;
+  if (Number.isNaN(fromMs)) {
+    return { error: "invalid from" };
+  }
+  if (fromMs > toMs) {
+    return { error: "from is after to" };
+  }
+  return {
+    query: {
+      from: new Date(fromMs).toISOString(),
+      to: new Date(toMs).toISOString(),
+      ...exactFilters(query),
+      endpoint: endpoint.value,
+      outcome: outcome.value,
+    },
+  };
+}
+
+function exactFilters(query: Record<string, string | undefined>): Pick<
+  RequestLogListQuery,
+  "model" | "connectionId" | "providerId" | "keyId"
+> {
+  return {
+    model: query.model === undefined ? undefined : query.model.trim(),
+    connectionId: query.connectionId === undefined ? undefined : query.connectionId.trim(),
+    providerId: query.providerId === undefined ? undefined : query.providerId.trim(),
+    keyId: query.keyId === undefined ? undefined : query.keyId.trim(),
+  };
+}
+
+function checkedOutcome(value: string | undefined): { error: string } | { value: RequestLogOutcome | undefined } {
+  const outcome = value?.trim();
+  if (!outcome) {
+    return { value: undefined };
+  }
+  const known = REQUEST_OUTCOMES[outcome];
+  if (!known) {
+    return { error: "invalid outcome" };
+  }
+  return { value: known };
+}
+
+function checkedEndpoint(value: string | undefined): { error: string } | { value: string | undefined } {
+  const endpoint = value?.trim();
+  if (!endpoint) {
+    return { value: undefined };
+  }
+  if (!REQUEST_ENDPOINTS[endpoint]) {
+    return { error: "invalid endpoint" };
+  }
+  return { value: endpoint };
+}
+
+function checkedRange(from: string | undefined, to: string | undefined): string | null {
+  if (from && Number.isNaN(Date.parse(from))) {
+    return "invalid from";
+  }
+  if (to && Number.isNaN(Date.parse(to))) {
+    return "invalid to";
+  }
+  if (from && to && Date.parse(from) > Date.parse(to)) {
+    return "from is after to";
+  }
+  return null;
+}
+
+function validBefore(before: string): boolean {
+  const split = before.indexOf("|");
+  return split > 0 && split < before.length - 1 && !Number.isNaN(Date.parse(before.slice(0, split)));
 }

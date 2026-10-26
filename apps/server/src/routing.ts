@@ -14,7 +14,13 @@ type StickyEntry = {
 
 const stickyMap = new Map<string, StickyEntry>();
 
-export type RoutedCapability = "chatCompletions" | "embeddings" | "responses" | "responsesCompact";
+export type RoutedCapability =
+  | "chatCompletions"
+  | "embeddings"
+  | "responses"
+  | "responsesCompact"
+  | "imageGenerations"
+  | "imageEdits";
 
 export type RoutedResult = {
   exchange: HttpExchange;
@@ -42,28 +48,21 @@ export function resetRoutingStateForTests(): void {
 
 export function deriveMessageHash(body: unknown): string | null {
   const turns = normalizeTurns(body);
-  if (!turns) {
-    return null;
+  let text = "";
+  if (turns) {
+    const first = turns.find((turn) => turn?.role === "user");
+    if (typeof first?.content === "string") {
+      text = first.content;
+    } else if (Array.isArray(first?.content)) {
+      text = first.content
+        .filter((part): part is { text?: unknown } => Boolean(part) && typeof part === "object")
+        .map((part) => (typeof part.text === "string" ? part.text : ""))
+        .join("");
+    }
+  } else if (body && typeof body === "object" && "prompt" in body && typeof body.prompt === "string") {
+    text = body.prompt;
   }
-  const first = turns.find((turn) => turn?.role === "user");
-  if (!first) {
-    return null;
-  }
-  let text: string;
-  if (typeof first.content === "string") {
-    text = first.content;
-  } else if (Array.isArray(first.content)) {
-    text = first.content
-      .filter((part): part is { text?: unknown } => Boolean(part) && typeof part === "object")
-      .map((part) => (typeof part.text === "string" ? part.text : ""))
-      .join("");
-  } else {
-    return null;
-  }
-  if (!text) {
-    return null;
-  }
-  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+  return text ? createHash("sha256").update(text).digest("hex").slice(0, 16) : null;
 }
 
 export function orderPool(

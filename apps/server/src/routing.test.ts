@@ -33,6 +33,12 @@ describe("deriveMessageHash", () => {
     assert.equal(deriveMessageHash({ messages: [{ role: "assistant", content: "hi" }] }), null);
     assert.equal(deriveMessageHash({}), null);
   });
+
+  it("hashes an image prompt when there is no chat turn", () => {
+    assert.equal(deriveMessageHash({ prompt: "a lighthouse" })?.length, 16);
+    assert.equal(deriveMessageHash({ prompt: "a lighthouse" }), deriveMessageHash({ prompt: "a lighthouse" }));
+    assert.notEqual(deriveMessageHash({ prompt: "a lighthouse" }), deriveMessageHash({ prompt: "a harbor" }));
+  });
 });
 
 describe("orderPool", () => {

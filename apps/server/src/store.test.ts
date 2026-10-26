@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { AdminStore } from "./store.js";
+import { AdminStore, type RequestLogRecord } from "./store.js";
 
 describe("AdminStore connections", () => {
   let dataDir = "";
@@ -407,3 +407,229 @@ describe("AdminStore public catalog proxy fields", () => {
     }
   });
 });
+
+describe("AdminStore request log browsing", () => {
+  let dataDir = "";
+  let store: AdminStore;
+
+  before(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), "viate-request-browse-"));
+    store = await AdminStore.open(dataDir);
+    insertLog(store, { id: "filter-alpha", startedAt: "2026-07-01T00:00:00.000Z", requestModel: "alpha-filter" });
+    insertLog(store, {
+      id: "filter-conn",
+      startedAt: "2026-07-01T01:00:00.000Z",
+      requestModel: "other-filter",
+      connectionId: "conn-b",
+      providerId: "prov-b",
+    });
+    insertLog(store, {
+      id: "filter-key",
+      startedAt: "2026-07-01T02:00:00.000Z",
+      apiKeyId: "key-special",
+      outcome: "timeout",
+      status: 504,
+    });
+    insertLog(store, {
+      id: "filter-embed",
+      startedAt: "2026-07-01T03:00:00.000Z",
+      endpoint: "embeddings",
+      outcome: "client_error",
+      status: 400,
+    });
+    insertLog(store, { id: "filter-early", startedAt: "2026-07-02T00:00:00.000Z", requestModel: "windowed" });
+    insertLog(store, { id: "filter-late", startedAt: "2026-07-02T06:00:00.000Z", requestModel: "windowed" });
+    insertLog(store, { id: "page-c", startedAt: "2026-06-01T03:00:00.000Z", requestModel: "cursor-time" });
+    insertLog(store, { id: "page-b", startedAt: "2026-06-01T02:00:00.000Z", requestModel: "cursor-time" });
+    insertLog(store, { id: "page-a", startedAt: "2026-06-01T01:00:00.000Z", requestModel: "cursor-time" });
+    insertLog(store, { id: "tie-z", startedAt: "2026-06-02T00:00:00.000Z", requestModel: "cursor-tie" });
+    insertLog(store, { id: "tie-m", startedAt: "2026-06-02T00:00:00.000Z", requestModel: "cursor-tie" });
+    insertLog(store, {
+      id: "stats-alpha-1",
+      startedAt: "2026-09-18T00:10:15.000Z",
+      requestModel: "alpha",
+      connectionId: "conn-a",
+      providerId: "prov-a",
+      durationMs: 2000,
+      ttfbMs: 400,
+      stream: true,
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 4,
+    });
+    insertLog(store, {
+      id: "stats-beta-err",
+      startedAt: "2026-09-18T00:20:00.000Z",
+      requestModel: "beta",
+      connectionId: "conn-b",
+      providerId: "prov-b",
+      endpoint: "embeddings",
+      outcome: "upstream_error",
+      status: 502,
+      durationMs: 1000,
+      ttfbMs: null,
+      inputTokens: 20,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      error: "upstream failed",
+    });
+    insertLog(store, {
+      id: "stats-alpha-abort",
+      startedAt: "2026-09-18T00:30:00.000Z",
+      requestModel: "alpha",
+      connectionId: "conn-a",
+      providerId: "prov-a",
+      outcome: "aborted",
+      status: 499,
+      durationMs: 500,
+      ttfbMs: 50,
+      inputTokens: 5,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 2,
+    });
+    insertLog(store, {
+      id: "stats-outside",
+      startedAt: "2026-09-18T02:00:00.000Z",
+      requestModel: "alpha",
+      inputTokens: 1000,
+      outputTokens: 1000,
+    });
+  });
+
+  after(async () => {
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it("filters request logs by model, connection, key, outcome, endpoint, and time", () => {
+    assert.deepEqual(ids(store, { model: "alpha-filter" }), ["filter-alpha"]);
+    assert.deepEqual(ids(store, { connectionId: "conn-b", from: "2026-07-01T00:00:00.000Z", to: "2026-07-01T23:00:00.000Z" }), [
+      "filter-conn",
+    ]);
+    assert.deepEqual(ids(store, { providerId: "prov-b", from: "2026-07-01T00:00:00.000Z", to: "2026-07-01T23:00:00.000Z" }), [
+      "filter-conn",
+    ]);
+    assert.deepEqual(ids(store, { keyId: "key-special" }), ["filter-key"]);
+    assert.deepEqual(ids(store, { outcome: "timeout" }), ["filter-key"]);
+    assert.deepEqual(ids(store, { endpoint: "embeddings", from: "2026-07-01T00:00:00.000Z", to: "2026-07-01T23:00:00.000Z" }), [
+      "filter-embed",
+    ]);
+    assert.deepEqual(
+      ids(store, { model: "windowed", from: "2026-07-02T05:00:00.000Z", to: "2026-07-02T07:00:00.000Z" }),
+      ["filter-late"],
+    );
+  });
+
+  it("pages older than the cursor and sets nextBefore only for a full page", () => {
+    const first = store.listRequestLogPage({ model: "cursor-time", limit: 2 });
+    assert.deepEqual(first.requests.map((row) => row.id), ["page-c", "page-b"]);
+    assert.equal(first.nextBefore, "2026-06-01T02:00:00.000Z|page-b");
+
+    const second = store.listRequestLogPage({ model: "cursor-time", limit: 2, before: first.nextBefore ?? "" });
+    assert.deepEqual(second.requests.map((row) => row.id), ["page-a"]);
+    assert.equal(second.requests.some((row) => row.id === "page-b"), false);
+    assert.equal(second.nextBefore, null);
+
+    const all = store.listRequestLogPage({ model: "cursor-time", limit: 50 });
+    assert.equal(all.requests.length, 3);
+    assert.equal(all.nextBefore, null);
+
+    const tied = store.listRequestLogPage({
+      model: "cursor-tie",
+      before: "2026-06-02T00:00:00.000Z|tie-z",
+    });
+    assert.deepEqual(tied.requests.map((row) => row.id), ["tie-m"]);
+  });
+
+  it("aggregates filtered stats, error rate, rpm, buckets, and model order", () => {
+    const from = "2026-09-18T00:00:00.000Z";
+    const to = "2026-09-18T01:00:00.000Z";
+    const stats = store.queryRequestLogStats({ from, to });
+    assert.equal(stats.from, from);
+    assert.equal(stats.to, to);
+    assert.equal(stats.requests, 3);
+    assert.equal(stats.errors, 1);
+    assert.equal(stats.aborted, 1);
+    assert.equal(stats.errorRate, 0.5);
+    assert.equal(stats.rpm, 3 / 60);
+    assert.equal(stats.inputTokens, 125);
+    assert.equal(stats.outputTokens, 51);
+    assert.equal(stats.cacheReadTokens, 10);
+    assert.equal(stats.cacheWriteTokens, 6);
+    assert.equal(stats.tpm, 176 / 60);
+    assert.equal(stats.inputTpm, 125 / 60);
+    assert.equal(stats.outputTpm, 51 / 60);
+    assert.equal(stats.cacheReadTpm, 10 / 60);
+    assert.equal(stats.cacheWriteTpm, 6 / 60);
+    assert.equal(stats.avgDurationMs, 3500 / 3);
+    assert.equal(stats.avgTtfbMs, 225);
+    assert.equal(stats.outputTps, 51 / (3500 / 1000));
+    assert.deepEqual(stats.series.map((row) => row.t), [
+      "2026-09-18T00:10:00.000Z",
+      "2026-09-18T00:20:00.000Z",
+      "2026-09-18T00:30:00.000Z",
+    ]);
+    assert.equal(stats.series[1]?.errors, 1);
+    assert.equal(stats.series[0]?.cacheReadTokens, 10);
+    assert.deepEqual(stats.byModel.map((row) => row.model), ["alpha", "beta"]);
+    assert.equal(stats.byModel[0]?.requests, 2);
+    assert.equal(stats.byModel[1]?.errors, 1);
+    assert.deepEqual(stats.byConnection.map((row) => [row.connectionId, row.requests]), [
+      ["conn-a", 2],
+      ["conn-b", 1],
+    ]);
+
+    const hour = store.queryRequestLogStats({ from, to: "2026-09-18T03:00:00.000Z" });
+    assert.equal(hour.series[0]?.t, "2026-09-18T00:00:00.000Z");
+    const minuteBoundary = store.queryRequestLogStats({ from, to: "2026-09-18T02:00:00.000Z" });
+    assert.equal(minuteBoundary.series[0]?.t, "2026-09-18T00:10:00.000Z");
+    const day = store.queryRequestLogStats({ from: "2026-09-16T00:00:00.000Z", to });
+    assert.equal(day.series[0]?.t, "2026-09-18T00:00:00.000Z");
+
+    const instant = store.queryRequestLogStats({
+      from: "2026-09-18T00:10:15.000Z",
+      to: "2026-09-18T00:10:15.000Z",
+    });
+    assert.equal(instant.requests, 1);
+    assert.equal(instant.rpm, 1);
+  });
+});
+
+function insertLog(store: AdminStore, overrides: Partial<RequestLogRecord> & { id: string; startedAt: string }): void {
+  store.insertRequestLog(
+    {
+      endedAt: overrides.startedAt,
+      durationMs: 100,
+      ttfbMs: null,
+      endpoint: "chat.completions",
+      stream: false,
+      status: 200,
+      outcome: "success",
+      requestModel: "demo",
+      upstreamModel: "demo",
+      providerId: "prov",
+      connectionId: "conn",
+      apiKeyId: "key",
+      apiKeyPrefix: "viate_x",
+      attemptCount: 1,
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      usageSource: "parser",
+      error: null,
+      payloadPath: null,
+      payloadOffset: null,
+      payloadTruncated: false,
+      ...overrides,
+    },
+    [],
+  );
+}
+
+function ids(store: AdminStore, query: Parameters<AdminStore["listRequestLogs"]>[0]): string[] {
+  return store.listRequestLogs(query).map((row) => row.id);
+}
