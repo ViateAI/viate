@@ -12,6 +12,8 @@ export type HttpExchange = {
   headers: Record<string, string>;
   body: ReadableStream<Uint8Array> | null;
   parseUsage?: UsageParser;
+  /** Model id actually sent upstream, when it differs from the catalog id. */
+  upstreamModel?: string;
 };
 
 export type JsonPostRequest = {

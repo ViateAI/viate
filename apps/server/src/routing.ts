@@ -135,7 +135,7 @@ export async function dispatchRouted(
         seq: attempts.length + 1,
         providerId: member.providerId,
         connectionId: member.connectionId,
-        upstreamModel: member.modelId,
+        upstreamModel: reportedUpstreamModel(upstream, member.modelId),
         status: upstream.status,
         durationMs: Date.now() - attemptStarted,
         error: upstream.status >= 400 ? `upstream ${upstream.status}` : null,
@@ -200,11 +200,17 @@ function routed(
   return {
     exchange,
     requestModel,
-    upstreamModel: member?.modelId ?? attempts.at(-1)?.upstreamModel ?? null,
+    upstreamModel: reportedUpstreamModel(exchange, member?.modelId) ?? attempts.at(-1)?.upstreamModel ?? null,
     providerId: member?.providerId ?? attempts.at(-1)?.providerId ?? null,
     connectionId: member?.connectionId ?? attempts.at(-1)?.connectionId ?? null,
     attempts,
   };
+}
+
+function reportedUpstreamModel(exchange: HttpExchange, catalogModelId: string | undefined): string | null {
+  const reported = exchange.upstreamModel?.trim();
+  if (reported) return reported;
+  return catalogModelId ?? null;
 }
 
 function requestModelFromBody(body: unknown): string {
