@@ -420,11 +420,6 @@ textarea {
   min-width: min(100%, 240px);
 }
 
-.model-list {
-  display: grid;
-  gap: 8px;
-}
-
 .toggle {
   display: inline-flex;
   align-items: center;
@@ -450,24 +445,188 @@ textarea {
   width: fit-content;
 }
 
-.section-title {
-  margin: 8px 0 0;
-  font-size: 0.92rem;
- }
+.models-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
+  gap: 16px;
+  align-items: start;
+}
 
-.published-list,
+.models-pane {
+  min-width: 0;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  overflow: hidden;
+}
+
+.models-pane-head {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-pane-title {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 2px 12px;
+  min-width: 0;
+}
+
+.models-pane-title h2 {
+  font-size: 0.92rem;
+}
+
+.models-pane-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 180px;
+  width: auto;
+  min-width: 0;
+}
+
+.model-filter input {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-scroll {
+  max-height: min(68dvh, 720px);
+  overflow: auto;
+}
+
+.model-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.model-table th,
+.model-table td {
+  padding: 0;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 12px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.model-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.model-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 2px 12px;
+  cursor: pointer;
+}
+
+.model-line input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  accent-color: var(--primary);
+  flex: 0 0 auto;
+}
+
+.model-line:hover {
+  background: var(--muted);
+}
+
+.model-table tr.is-enabled .model-line {
+  background: color-mix(in srgb, var(--ok) 7%, var(--background));
+  box-shadow: inset 3px 0 0 var(--ok);
+}
+
+.model-table tr.is-enabled .model-line:hover {
+  background: color-mix(in srgb, var(--ok) 12%, var(--background));
+}
+
+.model-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.model-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.published-row {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.published-row:last-child {
+  border-bottom: 0;
+}
+
+.published-row-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .published-providers {
   display: grid;
   gap: 8px;
 }
 
 .published-provider {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
 }
+
+.published-provider code {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: start;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.published-provider .row-actions {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.published-provider .meta {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
 .banner, .status {
   border-radius: var(--radius);
   padding: 10px 12px;
@@ -562,6 +721,7 @@ label {
   border-radius: 0;
   min-height: 32px;
   background: var(--background);
+  white-space: nowrap;
 }
 
 .segmented button + button {
@@ -876,6 +1036,12 @@ label {
   display: none;
 }
 
+@media (max-width: 1100px) {
+  .models-workspace {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 800px) {
   button, input, select {
     min-height: 44px;
@@ -922,6 +1088,25 @@ label {
 
   .resource {
     flex-direction: column;
+  }
+
+  .model-line {
+    min-height: 44px;
+  }
+
+  .model-scroll {
+    max-height: calc(100dvh - 460px);
+  }
+
+  .models-pane-tools,
+  .model-filter,
+  .models-pane-tools .segmented {
+    width: 100%;
+  }
+
+  .models-pane-tools .segmented button {
+    flex: 1;
+    min-height: 44px;
   }
 
   .log-row {

@@ -1137,6 +1137,7 @@ function ModelsPage({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
+  const [visibility, setVisibility] = useState<"all" | "enabled" | "disabled">("all");
   const [published, setPublished] = useState<AdminPublishedModel[] | null>(null);
 
   const selected = connections?.find((connection) => connection.id === selectedConnectionId) ?? null;
@@ -1180,6 +1181,7 @@ function ModelsPage({
       return;
     }
     let cancelled = false;
+    setCatalog(null);
     api<ConnectionModelCatalog>(`/api/admin/connections/${selectedConnectionId}/models`)
       .then((result) => {
         if (!cancelled) {
@@ -1200,13 +1202,25 @@ function ModelsPage({
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     const models = catalog?.models ?? [];
-    if (!needle) {
-      return models;
-    }
-    return models.filter((model) =>
-      model.id.toLowerCase().includes(needle) || model.name.toLowerCase().includes(needle),
-    );
-  }, [catalog, query]);
+    return models.filter((model) => {
+      if (visibility === "enabled" && !model.enabled) {
+        return false;
+      }
+      if (visibility === "disabled" && model.enabled) {
+        return false;
+      }
+      if (!needle) {
+        return true;
+      }
+      return model.id.toLowerCase().includes(needle) || model.name.toLowerCase().includes(needle);
+    });
+  }, [catalog, query, visibility]);
+  const totals = useMemo(() => {
+    const models = catalog?.models ?? [];
+    const enabled = models.filter((model) => model.enabled).length;
+    return { total: models.length, enabled, disabled: models.length - enabled };
+  }, [catalog]);
+  const filtering = query.trim().length > 0 || visibility !== "all";
 
   async function movePublishedProvider(model: AdminPublishedModel, index: number, delta: number): Promise<void> {
     const next = index + delta;
@@ -1228,6 +1242,24 @@ function ModelsPage({
       setPublished(result.models);
     } catch (err) {
       setError(isApiError(err) ? err.message : "reorder failed");
+    }
+  }
+
+  async function setModelEnabled(modelId: string, enabled: boolean): Promise<void> {
+    if (!selected) {
+      return;
+    }
+    setError(null);
+    try {
+      const result = await api<ConnectionModelCatalog>(
+        `/api/admin/connections/${selected.id}/models/${encodeURIComponent(modelId)}`,
+        { method: "PUT", body: JSON.stringify({ enabled }) },
+      );
+      setCatalog(result);
+      const publishedResult = await api<{ models: AdminPublishedModel[] }>("/api/admin/published-models");
+      setPublished(publishedResult.models);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "update failed");
     }
   }
 
@@ -1292,132 +1324,165 @@ function ModelsPage({
       {selected && selected.hasCredentials && selectedPlugin && !selectedPlugin.capabilities.includes("listModels") ? (
         <p className="banner warn">This provider does not implement listModels.</p>
       ) : null}
-      {selected && catalog ? (
-        <>
-          <label>
-            Filter models
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="gpt-4o"
-              type="search"
-            />
-          </label>
-          <p className="meta">
-            {catalog.syncedAt ? `Last synced ${new Date(catalog.syncedAt).toLocaleString()}. ` : "Not synced yet. "}
-            {catalog.models.filter((model) => model.enabled).length} enabled of {catalog.models.length}.
-          </p>
-          {catalog.models.length === 0 ? (
-            <div className="empty">
-              <strong>No models yet</strong>
-              Sync this connection to fetch the provider catalog.
+      {connections && connections.length > 0 ? (
+        <div className="models-workspace">
+          <section className="models-pane" aria-labelledby="model-inventory-title">
+            <div className="models-pane-head">
+              <div className="models-pane-title">
+                <h2 id="model-inventory-title">Inventory</h2>
+                <p className="meta">
+                  {!catalog
+                    ? "Loading this connection."
+                    : `${catalog.syncedAt ? `Last synced ${new Date(catalog.syncedAt).toLocaleString()}.` : "Not synced yet."} ${totals.enabled} enabled of ${totals.total}.${filtering ? ` Showing ${filtered.length}.` : ""}`}
+                </p>
+              </div>
+              <div className="models-pane-tools">
+                <label className="model-filter">
+                  Filter
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="name or id"
+                    type="search"
+                  />
+                </label>
+                <div className="segmented" role="group" aria-label="Model status">
+                  <button type="button" aria-pressed={visibility === "all"} onClick={() => setVisibility("all")}>
+                    All {totals.total}
+                  </button>
+                  <button type="button" aria-pressed={visibility === "enabled"} onClick={() => setVisibility("enabled")}>
+                    Enabled {totals.enabled}
+                  </button>
+                  <button type="button" aria-pressed={visibility === "disabled"} onClick={() => setVisibility("disabled")}>
+                    Disabled {totals.disabled}
+                  </button>
+                </div>
+              </div>
             </div>
-          ) : null}
-          {catalog.models.length > 0 && filtered.length === 0 ? (
-            <div className="empty">
-              <strong>No matching models</strong>
-              Try a different filter.
+            <div className="model-scroll">
+              {!catalog ? (
+                <p className="empty">Loading models…</p>
+              ) : catalog.models.length === 0 ? (
+                <div className="empty">
+                  <strong>No models yet</strong>
+                  Sync this connection to fetch the provider catalog.
+                </div>
+              ) : filtered.length === 0 ? (
+                <div className="empty">
+                  <strong>No matching models</strong>
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={() => {
+                      setQuery("");
+                      setVisibility("all");
+                    }}
+                  >
+                    Clear filter
+                  </button>
+                </div>
+              ) : (
+                <table className="model-table">
+                  <caption className="visually-hidden">
+                    Models for {selected?.displayLabel || selected?.providerId || "this connection"}
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Model</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map((model) => (
+                      <tr key={model.id} className={model.enabled ? "is-enabled" : undefined}>
+                        <td>
+                          <label className="model-line">
+                            <input
+                              type="checkbox"
+                              checked={model.enabled}
+                              aria-label={`${model.enabled ? "Disable" : "Enable"} ${model.name}`}
+                              onChange={(event) => {
+                                void setModelEnabled(model.id, event.target.checked);
+                              }}
+                            />
+                            <span className="model-name">
+                              <span className={model.name === model.id ? "model-id" : undefined}>{model.name}</span>
+                              {model.name !== model.id ? <code>{model.id}</code> : null}
+                            </span>
+                          </label>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
-          ) : null}
-          {filtered.length > 0 ? (
-            <div className="model-list" role="list">
-              {filtered.map((model) => (
-                <article className="resource model-row" key={model.id} role="listitem">
-                  <div className="resource-main">
-                    <div className="resource-title-row">
-                      <h2>{model.name}</h2>
-                      <StatusBadge tone={model.enabled ? "ok" : "neutral"}>
-                        {model.enabled ? "enabled" : "disabled"}
-                      </StatusBadge>
-                    </div>
-                    {model.name !== model.id ? <div className="meta"><code>{model.id}</code></div> : null}
+          </section>
+          <section className="models-pane" aria-labelledby="published-models-title">
+            <div className="models-pane-head">
+              <div className="models-pane-title">
+                <h2 id="published-models-title">Published</h2>
+                <p className="meta">
+                  {published === null
+                    ? "Loading public catalog."
+                    : published.length === 0
+                      ? "Nothing is on /v1/models yet."
+                      : `${published.length} public id${published.length === 1 ? "" : "s"}.`}
+                  {published?.some((model) => model.providers.length > 1)
+                    ? " First provider is the default route."
+                    : ""}
+                </p>
+              </div>
+            </div>
+            <div className="model-scroll">
+              {published === null ? (
+                <p className="empty">Loading published models…</p>
+              ) : published.length === 0 ? (
+                <div className="empty">
+                  <strong>No published models</strong>
+                  Enable models on an active connection.
+                </div>
+              ) : published.map((model) => (
+                <article className="published-row" key={model.publicId}>
+                  <div className="published-row-main">
+                    <code>{model.publicId}</code>
+                    <span className="meta">
+                      {model.providers.length === 1 ? model.providers[0]?.providerId : model.ownedBy}
+                    </span>
                   </div>
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={model.enabled}
-                      onChange={async (event) => {
-                        const enabled = event.target.checked;
-                        setError(null);
-                        try {
-                          const result = await api<ConnectionModelCatalog>(
-                            `/api/admin/connections/${selected.id}/models/${encodeURIComponent(model.id)}`,
-                            {
-                              method: "PUT",
-                              body: JSON.stringify({ enabled }),
-                            },
-                          );
-                          setCatalog(result);
-                          const publishedResult = await api<{ models: AdminPublishedModel[] }>("/api/admin/published-models");
-                          setPublished(publishedResult.models);
-                        } catch (err) {
-                          setError(isApiError(err) ? err.message : "update failed");
-                        }
-                      }}
-                    />
-                    {model.enabled ? "Enabled" : "Disabled"}
-                  </label>
+                  {model.providers.length > 1 ? (
+                    <div className="published-providers">
+                      {model.providers.map((provider, index) => (
+                        <div className="published-provider" key={provider.providerId}>
+                          <code>{provider.providerId}/{model.publicId}</code>
+                          <span className="meta">
+                            {provider.connections.map((connection) => connection.displayLabel).join(", ")}
+                          </span>
+                          <div className="row-actions">
+                            <button
+                              type="button"
+                              disabled={index === 0}
+                              onClick={() => void movePublishedProvider(model, index, -1)}
+                            >
+                              Up
+                            </button>
+                            <button
+                              type="button"
+                              disabled={index === model.providers.length - 1}
+                              onClick={() => void movePublishedProvider(model, index, 1)}
+                            >
+                              Down
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </article>
               ))}
             </div>
-          ) : null}
-        </>
+          </section>
+        </div>
       ) : null}
-      {published === null ? null : published.length === 0 ? (
-        <div className="empty">
-          <strong>No published models</strong>
-          Enable a connection and sync models.
-        </div>
-      ) : (
-        <div className="published-list">
-          <h2 className="section-title">Published</h2>
-          {published.map((model) => (
-            <article className="resource" key={model.publicId}>
-              <div className="resource-main">
-                <div className="resource-title-row">
-                  <h2>{model.publicId}</h2>
-                  <StatusBadge tone="ok">{model.ownedBy}</StatusBadge>
-                </div>
-                {model.providers.length > 1 ? (
-                  <p className="meta">
-                    Pin <code>{model.providers[0] ? `${model.providers[0].providerId}/${model.publicId}` : ""}</code> to force a provider.
-                  </p>
-                ) : null}
-              </div>
-              {model.providers.length > 1 ? (
-                <div className="published-providers">
-                  {model.providers.map((provider, index) => (
-                    <div className="published-provider" key={provider.providerId}>
-                      <code>{provider.providerId}/{model.publicId}</code>
-                      <span className="meta">
-                        {provider.connections.map((connection) => connection.displayLabel).join(", ")}
-                      </span>
-                      <div className="row-actions">
-                        <button
-                          type="button"
-                          disabled={index === 0}
-                          onClick={() => void movePublishedProvider(model, index, -1)}
-                        >
-                          Up
-                        </button>
-                        <button
-                          type="button"
-                          disabled={index === model.providers.length - 1}
-                          onClick={() => void movePublishedProvider(model, index, 1)}
-                        >
-                          Down
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="meta">{model.providers[0] ? model.providers[0].providerId : ""}</p>
-              )}
-            </article>
-          ))}
-        </div>
-      )}
     </section>
   );
 }
