@@ -32,7 +32,7 @@ export function multipartImageBody(contentType: string | undefined, raw: Buffer)
 
 export function redactImagePayload(value: unknown): unknown {
   if (typeof value === "string") {
-    return value.startsWith("data:") ? `«${value.length} chars»` : value;
+    return isDataUrl(value) ? `«${value.length} chars»` : value;
   }
   if (Array.isArray(value)) {
     return value.map(redactImagePayload);
@@ -42,13 +42,17 @@ export function redactImagePayload(value: unknown): unknown {
   }
   const out: Record<string, unknown> = {};
   for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof nested === "string" && (key === "b64_json" || ((key === "url" || key === "image_url") && nested.startsWith("data:")))) {
+    if (typeof nested === "string" && (key === "b64_json" || ((key === "url" || key === "image_url") && isDataUrl(nested)))) {
       out[key] = `«${nested.length} chars»`;
       continue;
     }
     out[key] = redactImagePayload(nested);
   }
   return out;
+}
+
+function isDataUrl(value: string): boolean {
+  return /^data:[a-z0-9.+-]+\/[a-z0-9.+-]+(?:;[^,]*)?,/i.test(value);
 }
 
 type MultipartPart = { name: string; mediaType: string; body: Buffer };

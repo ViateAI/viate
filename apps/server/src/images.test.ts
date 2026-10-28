@@ -51,6 +51,12 @@ describe("image request normalization", () => {
       },
     );
   });
+
+  it("keeps SSE response bodies that start with data:", () => {
+    const sse = 'data: {"type":"response.completed","response":{"status":"completed"}}\n\n';
+    assert.equal(redactImagePayload(sse), sse);
+    assert.equal(redactImagePayload("data:image/png;base64,abcdef"), "«28 chars»");
+  });
 });
 
 describe("POST /v1/images", () => {
