@@ -14,13 +14,15 @@ export type AdminPlugin = {
     | "responsesCompact"
     | "imageGenerations"
     | "imageEdits"
+    | "audioTranscriptions"
+    | "audioSpeech"
   >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
   hasOAuth: boolean;
   hasKeepalive: boolean;
   hasSubscription: boolean;
-  advertisedEndpointTypes: Array<"openai" | "openai-response" | "openai-image">;
+  advertisedEndpointTypes: Array<"openai" | "openai-response" | "openai-image" | "openai-audio">;
 };
 
 export type CredentialField = {

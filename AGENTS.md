@@ -66,7 +66,7 @@ A plugin package.json must include:
 
 The entry exports `definePlugin({ id, register })`. `register` calls `ctx.registerProvider(handler)` once. Duplicate provider ids fail load.
 
-`ProviderHandler` may implement `chatCompletions`, `embeddings`, `responses`, `responsesCompact`, `imageGenerations`, `imageEdits`, `listModels`, `keepalive`, credential form/normalize, and OAuth start/exchange/poll. Return `HttpExchange` for proxied HTTP; do not invent a second protocol layer.
+`ProviderHandler` may implement `chatCompletions`, `embeddings`, `responses`, `responsesCompact`, `imageGenerations`, `imageEdits`, `audioTranscriptions`, `audioSpeech`, `listModels`, `keepalive`, credential form/normalize, and OAuth start/exchange/poll. Return `HttpExchange` for proxied HTTP; do not invent a second protocol layer.
 
 Plugins log through SDK `PluginLogger` (`ctx.log`, `KeepaliveInput.log`). Hosts adapt their logger with `createPluginLogger(write)`. Do not import Fastify or `console` from plugins.
 
@@ -91,11 +91,12 @@ Public:
 
 - `GET /health` — open, `{ status: "ok" }`
 - `POST /v1/chat/completions`
-- `GET /v1/models` — OpenAI `{ object: "list", data }` plus proxy fields `supported_endpoint_types` (`openai`, `openai-response`, `openai-image`) and optional `name` / `context_length`. Multi-source models keep `children`.
+- `GET /v1/models` — OpenAI `{ object: "list", data }` plus proxy fields `supported_endpoint_types` (`openai`, `openai-response`, `openai-image`, `openai-audio`) and optional `name` / `context_length`. Multi-source models keep `children`.
 - `POST /v1/embeddings`
 - `POST /v1/responses`
 - `POST /v1/responses/compact` — Codex-style conversation compaction. Routed like `/v1/responses`; plugins that omit `responsesCompact` return 404 `capability not supported`.
 - `POST /v1/images/generations` and `POST /v1/images/edits` — OpenAI Images routes. Edits accept JSON or `multipart/form-data`; the gateway inlines files as `{ images: [{ b64_json, media_type }] }` before routing. Plugins that omit the method return 404 `capability not supported`.
+- `POST /v1/audio/transcriptions` and `POST /v1/audio/speech` — OpenAI speech routes. Transcriptions accept `multipart/form-data`; the gateway inlines the file as `{ file: { b64_json, media_type } }` plus `model`, `language`, and other text fields before routing. Missing file or model is 400. Speech accepts JSON `{ model, input, voice, response_format?, speed? }`. Missing `model`, `input`, or `voice` is 400. Plugins that omit `audioTranscriptions` or `audioSpeech` return 404 `capability not supported`. Responses are upstream bytes (transcription JSON or `text/plain`, speech audio) forwarded with status and content-type. Request logs redact audio bytes the same way image logs redact `b64_json`.
 
 `/v1` requires `Authorization: Bearer` or `x-api-key`. Admin cookies do not authenticate `/v1`. No client keys => `/v1` is 401. Missing/invalid key is 401.
 
@@ -109,7 +110,7 @@ Admin API (`/api/admin/*`) requires `VIATE_ADMIN_PASSWORD`. Absent password disa
 - `GET /api/admin/session`, `POST /api/admin/logout`
 - Plugins: `GET /api/admin/plugins`; `POST /api/admin/plugins/install|update|remove`
 - Providers: `PUT /api/admin/providers/:providerId/advertised-endpoints` `{advertisedEndpointTypes}`. Filters `/v1/models` discovery only; `/v1` request routes stay open.
-  Types are `openai`, `openai-response`, and `openai-image`. Unset providers advertise the first two.
+  Types are `openai`, `openai-response`, `openai-image`, and `openai-audio`. Unset providers advertise the first two.
 - Logs: `GET /api/admin/logs`
 - Requests: `GET /api/admin/requests` (filters, `before` cursor, no bodies) and `GET /api/admin/requests/:id`. `GET /api/admin/requests/stats` keeps `?window=` unless `from`, `to`, or a dimension filter is set, then aggregates that range from `request_logs`.
 - Connections: `GET/POST /api/admin/connections`; `PUT/DELETE /api/admin/connections/:id`; activate/deactivate; OAuth start/poll/callback; per-connection model sync
@@ -117,7 +118,7 @@ Admin API (`/api/admin/*`) requires `VIATE_ADMIN_PASSWORD`. Absent password disa
 
 ## Routing And Secrets
 
-Many connections may be enabled. `/v1/models` aggregates enabled models by upstream id. Chat/embeddings/responses/compact route by request model with last-known-good plus session stickiness and failover.
+Many connections may be enabled. `/v1/models` aggregates enabled models by upstream id. Chat, embeddings, responses, compact, images, and audio route by request model with last-known-good plus session stickiness and failover.
 
 Connection secrets live in SQLite, AES-256-GCM, key file `$VIATE_DATA_DIR/credential.key` mode `0600`. API never returns `apiKey`. Omitted `apiKey` on update keeps the saved secret.
 

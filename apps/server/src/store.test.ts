@@ -339,6 +339,14 @@ describe("AdminStore public catalog proxy fields", () => {
       owned_by: "codex",
       supported_endpoint_types: ["openai-response"],
     });
+    assert.deepEqual(store.setAdvertisedEndpointTypes("codex", ["openai", "openai-audio"]), [
+      "openai",
+      "openai-audio",
+    ]);
+    assert.deepEqual(
+      store.listPublicCatalog().data.find((model) => model.id === "gpt-5.5")?.supported_endpoint_types,
+      ["openai", "openai-audio"],
+    );
     assert.deepEqual(store.setAdvertisedEndpointTypes("codex", []), []);
     assert.deepEqual(
       store.listPublicCatalog().data.find((model) => model.id === "gpt-5.5")?.supported_endpoint_types,

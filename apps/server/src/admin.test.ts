@@ -775,6 +775,15 @@ describe("admin connection models", () => {
     const catalog = store.listPublicCatalog().data[0];
     assert.deepEqual(catalog?.supported_endpoint_types, ["openai-response"]);
 
+    const withAudio = await authed(app, session, {
+      method: "PUT",
+      url: "/api/admin/providers/openai-compatible/advertised-endpoints",
+      payload: { advertisedEndpointTypes: ["openai-audio", "openai"] },
+    });
+    assert.equal(withAudio.statusCode, 200);
+    assert.deepEqual(withAudio.json().plugins[0]?.advertisedEndpointTypes, ["openai", "openai-audio"]);
+    assert.deepEqual(store.listPublicCatalog().data[0]?.supported_endpoint_types, ["openai", "openai-audio"]);
+
     const empty = await authed(app, session, {
       method: "PUT",
       url: "/api/admin/providers/openai-compatible/advertised-endpoints",

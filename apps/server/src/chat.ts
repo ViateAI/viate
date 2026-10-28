@@ -19,7 +19,7 @@ import {
 import { createKeepaliveScheduler } from "./keepalive.js";
 import type { AdminStore, StoredApiKey } from "./store.js";
 import { tapExchange } from "./usage-frames.js";
-import { redactImagePayload } from "./images.js";
+import { assertAudioRequest, loggedRequestBody, loggedResponseBody } from "./audio.js";
 
 export type ClientAuthenticator = (secret: string | undefined) => StoredApiKey | null;
 
@@ -38,7 +38,9 @@ type Capability =
   | "responses"
   | "responsesCompact"
   | "imageGenerations"
-  | "imageEdits";
+  | "imageEdits"
+  | "audioTranscriptions"
+  | "audioSpeech";
 
 const CORE_TIMEOUT_MS = 10 * 60 * 1_000;
 
@@ -71,6 +73,12 @@ export async function registerChatRoute(app: FastifyInstance, options: ChatRoute
   );
   app.post("/v1/images/edits", (request, reply) =>
     dispatch(request, reply, "imageEdits", options, providers),
+  );
+  app.post("/v1/audio/transcriptions", (request, reply) =>
+    dispatch(request, reply, "audioTranscriptions", options, providers),
+  );
+  app.post("/v1/audio/speech", (request, reply) =>
+    dispatch(request, reply, "audioSpeech", options, providers),
   );
 
   if (options.store) {
@@ -125,6 +133,9 @@ async function dispatch(
       cleanup();
       return viateError(reply, 404, "unknown model");
     }
+    if (capability === "audioTranscriptions" || capability === "audioSpeech") {
+      assertAudioRequest(capability, request.body);
+    }
     const routed = await dispatchRouted(
       options.store,
       providers,
@@ -158,8 +169,8 @@ async function dispatch(
           usage: result.usage,
           error: exchange.status >= 400 ? `upstream ${exchange.status}` : null,
           ttfbMs: result.ttfbMs,
-          requestBody: redactImagePayload(request.body),
-          responseBody: redactImagePayload(result.responseBody),
+          requestBody: loggedRequestBody(request.body),
+          responseBody: loggedResponseBody(capability, exchange.headers["content-type"], result.responseBody),
           payloadTruncated: result.truncated,
         });
       })
@@ -190,7 +201,7 @@ async function dispatch(
         usage: null,
         error: aborted ? "aborted" : message,
         ttfbMs: null,
-        requestBody: redactImagePayload(request.body),
+        requestBody: loggedRequestBody(request.body),
         responseBody: null,
         payloadTruncated: false,
       });

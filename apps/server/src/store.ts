@@ -86,7 +86,9 @@ export type RequestLogEndpoint =
   | "responses"
   | "responses.compact"
   | "images.generations"
-  | "images.edits";
+  | "images.edits"
+  | "audio.transcriptions"
+  | "audio.speech";
 
 export type RequestLogOutcome =
   | "success"

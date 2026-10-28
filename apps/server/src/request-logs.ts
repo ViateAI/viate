@@ -58,7 +58,9 @@ export function endpointForCapability(
     | "responses"
     | "responsesCompact"
     | "imageGenerations"
-    | "imageEdits",
+    | "imageEdits"
+    | "audioTranscriptions"
+    | "audioSpeech",
 ): RequestLogEndpoint {
   if (capability === "chatCompletions") {
     return "chat.completions";
@@ -74,6 +76,12 @@ export function endpointForCapability(
   }
   if (capability === "imageEdits") {
     return "images.edits";
+  }
+  if (capability === "audioTranscriptions") {
+    return "audio.transcriptions";
+  }
+  if (capability === "audioSpeech") {
+    return "audio.speech";
   }
   return "responses";
 }

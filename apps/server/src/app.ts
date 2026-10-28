@@ -8,6 +8,7 @@ import { createSubscriptionScheduler } from "./subscription.js";
 import type { AdminStore } from "./store.js";
 import type { SessionStore } from "./sessions.js";
 import { RequestLogRecorder } from "./request-logs.js";
+import { multipartAudioBody } from "./audio.js";
 import { multipartImageBody } from "./images.js";
 
 export type HealthResponse = {
@@ -52,7 +53,13 @@ export function createApp(options: Pick<BuildAppOptions, "logger"> = {}): App {
   app.addContentTypeParser("multipart/form-data", { parseAs: "buffer" }, (request, body, done) => {
     try {
       const contentType = request.headers["content-type"];
-      done(null, multipartImageBody(Array.isArray(contentType) ? contentType[0] : contentType, body as Buffer));
+      const header = Array.isArray(contentType) ? contentType[0] : contentType;
+      const path = request.url.split("?")[0] ?? "";
+      const parsed =
+        path === "/v1/audio/transcriptions"
+          ? multipartAudioBody(header, body as Buffer)
+          : multipartImageBody(header, body as Buffer);
+      done(null, parsed);
     } catch (error) {
       done(error as Error, undefined);
     }

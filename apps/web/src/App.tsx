@@ -348,14 +348,14 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
 
   async function updateAdvertisedEndpoints(
     plugin: AdminPlugin,
-    type: "openai" | "openai-response" | "openai-image",
+    type: "openai" | "openai-response" | "openai-image" | "openai-audio",
     enabled: boolean,
   ) {
     if (!plugin.id) {
       return;
     }
     const current = plugin.advertisedEndpointTypes ?? [];
-    const next = (["openai", "openai-response", "openai-image"] as const).filter((value) =>
+    const next = (["openai", "openai-response", "openai-image", "openai-audio"] as const).filter((value) =>
       value === type ? enabled : current.includes(value),
     );
     setBusy(true);
@@ -481,6 +481,17 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
                     }}
                   />
                   Images
+                </label>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={plugin.advertisedEndpointTypes.includes("openai-audio")}
+                    disabled={busy}
+                    onChange={(event) => {
+                      void updateAdvertisedEndpoints(plugin, "openai-audio", event.target.checked);
+                    }}
+                  />
+                  Audio
                 </label>
               </div>
             ) : null}

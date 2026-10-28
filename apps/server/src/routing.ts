@@ -20,7 +20,9 @@ export type RoutedCapability =
   | "responses"
   | "responsesCompact"
   | "imageGenerations"
-  | "imageEdits";
+  | "imageEdits"
+  | "audioTranscriptions"
+  | "audioSpeech";
 
 export type RoutedResult = {
   exchange: HttpExchange;

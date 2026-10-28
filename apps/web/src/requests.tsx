@@ -116,6 +116,8 @@ const ENDPOINTS = [
   "responses.compact",
   "images.generations",
   "images.edits",
+  "audio.transcriptions",
+  "audio.speech",
 ] as const;
 
 export function RequestsPage() {

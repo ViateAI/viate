@@ -136,6 +136,14 @@ export type ImageEdits = {
   imageEdits(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
 };
 
+export type AudioTranscriptions = {
+  audioTranscriptions(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
+};
+
+export type AudioSpeech = {
+  audioSpeech(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
+};
+
 export type Models = {
   listModels(request: JsonGetRequest, connection: ProviderConnection): Promise<ModelList>;
 };
@@ -188,7 +196,17 @@ export type ProviderHandler = {
   exchangeOAuth?(input: OAuthExchangeInput): Promise<CredentialsWrite>;
   pollOAuth?(input: OAuthPollInput): Promise<OAuthPollResult>;
 } & Partial<
-  ChatCompletions & Embeddings & Responses & ResponsesCompact & ImageGenerations & ImageEdits & Models & Keepalive & Subscription
+  ChatCompletions &
+    Embeddings &
+    Responses &
+    ResponsesCompact &
+    ImageGenerations &
+    ImageEdits &
+    AudioTranscriptions &
+    AudioSpeech &
+    Models &
+    Keepalive &
+    Subscription
 >;
 
 export type PluginContext = {

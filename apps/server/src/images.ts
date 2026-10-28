@@ -1,12 +1,8 @@
 export function multipartImageBody(contentType: string | undefined, raw: Buffer): Record<string, unknown> {
-  const boundary = boundaryFrom(contentType ?? "");
-  if (!boundary) {
-    throw Object.assign(new Error("multipart boundary is required"), { statusCode: 400 });
-  }
   const fields: Record<string, unknown> = {};
   const images: Array<{ b64_json: string; media_type: string }> = [];
   let mask: { b64_json: string; media_type: string } | undefined;
-  for (const part of splitMultipart(raw, boundary)) {
+  for (const part of readMultipart(contentType, raw)) {
     if (!part.name) {
       continue;
     }
@@ -56,6 +52,14 @@ export function redactImagePayload(value: unknown): unknown {
 }
 
 type MultipartPart = { name: string; mediaType: string; body: Buffer };
+
+export function readMultipart(contentType: string | undefined, raw: Buffer): MultipartPart[] {
+  const boundary = boundaryFrom(contentType ?? "");
+  if (!boundary) {
+    throw Object.assign(new Error("multipart boundary is required"), { statusCode: 400 });
+  }
+  return splitMultipart(raw, boundary);
+}
 
 function boundaryFrom(contentType: string): string | null {
   const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);

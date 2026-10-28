@@ -56,6 +56,8 @@ export type AdminPluginView = {
     | "responsesCompact"
     | "imageGenerations"
     | "imageEdits"
+    | "audioTranscriptions"
+    | "audioSpeech"
   >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
@@ -632,6 +634,8 @@ function toPluginViews(
     if (provider?.responsesCompact) capabilities.push("responsesCompact");
     if (provider?.imageGenerations) capabilities.push("imageGenerations");
     if (provider?.imageEdits) capabilities.push("imageEdits");
+    if (provider?.audioTranscriptions) capabilities.push("audioTranscriptions");
+    if (provider?.audioSpeech) capabilities.push("audioSpeech");
     return {
       name: plugin.name,
       version: plugin.version,
@@ -741,6 +745,8 @@ const REQUEST_ENDPOINTS: Record<string, true> = {
   "responses.compact": true,
   "images.generations": true,
   "images.edits": true,
+  "audio.transcriptions": true,
+  "audio.speech": true,
 };
 
 function hasRequestRangeFilter(query: Record<string, string | undefined>): boolean {
