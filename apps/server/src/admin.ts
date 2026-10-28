@@ -562,8 +562,15 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     if (!name) {
       return reply.code(400).send({ error: { message: "name is required", type: "viate_error" } });
     }
+    let userId: string | null = null;
+    if (body.userId !== undefined && body.userId !== null) {
+      if (typeof body.userId !== "string" || !body.userId.trim()) {
+        return reply.code(400).send({ error: { message: "userId is invalid", type: "viate_error" } });
+      }
+      userId = body.userId.trim();
+    }
     try {
-      return options.store.createApiKey(name);
+      return options.store.createApiKey(name, userId);
     } catch (error) {
       return sendStoreError(reply, error);
     }
@@ -574,6 +581,78 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     try {
       options.store.deleteApiKey(id);
       return { ok: true };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.post("/api/admin/users", async (request, reply) => {
+    const body = asRecord(request.body);
+    try {
+      const user = options.store.createUser({
+        email: typeof body.email === "string" ? body.email : "",
+        name: typeof body.name === "string" ? body.name : "",
+        password: typeof body.password === "string" ? body.password : "",
+      });
+      return { user };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.get("/api/admin/users", async () => {
+    return { users: options.store.listUsers() };
+  });
+
+  app.patch("/api/admin/users/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = asRecord(request.body);
+    const patch: { name?: string; status?: string; password?: string } = {};
+    if (body.name !== undefined) {
+      if (typeof body.name !== "string") {
+        return reply.code(400).send({ error: { message: "name is invalid", type: "viate_error" } });
+      }
+      patch.name = body.name;
+    }
+    if (body.status !== undefined) {
+      if (typeof body.status !== "string") {
+        return reply.code(400).send({ error: { message: "status is invalid", type: "viate_error" } });
+      }
+      patch.status = body.status;
+    }
+    if (body.password !== undefined) {
+      if (typeof body.password !== "string") {
+        return reply.code(400).send({ error: { message: "password is invalid", type: "viate_error" } });
+      }
+      patch.password = body.password;
+    }
+    try {
+      return { user: options.store.updateUser(id, patch) };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.post("/api/admin/users/:id/tokens", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = asRecord(request.body);
+    if (typeof body.delta !== "number") {
+      return reply.code(400).send({ error: { message: "delta must be a non-zero integer", type: "viate_error" } });
+    }
+    if (body.note !== undefined && body.note !== null && typeof body.note !== "string") {
+      return reply.code(400).send({ error: { message: "note is invalid", type: "viate_error" } });
+    }
+    try {
+      return options.store.grantTokens(id, body.delta, typeof body.note === "string" ? body.note : null);
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.get("/api/admin/users/:id/ledger", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return { ledger: options.store.listLedger(id, 50) };
     } catch (error) {
       return sendStoreError(reply, error);
     }
@@ -671,7 +750,7 @@ function passwordMatches(expected: string, provided: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-function sameOrigin(request: FastifyRequest): boolean {
+export function sameOrigin(request: FastifyRequest): boolean {
   const origin = headerValue(request.headers.origin);
   const host = headerValue(request.headers.host);
   if (!host) {

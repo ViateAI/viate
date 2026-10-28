@@ -90,6 +90,7 @@ CLI and admin share `PluginManager`. Pending means restart required. Load failur
 Public:
 
 - `GET /health` — open, `{ status: "ok" }`
+- `GET /` and `HEAD /` — 302 to `/portal`, preserving the query string. Registered only when the admin UI dist is present.
 - `POST /v1/chat/completions`
 - `GET /v1/models` — OpenAI `{ object: "list", data }` plus proxy fields `supported_endpoint_types` (`openai`, `openai-response`, `openai-image`, `openai-audio`) and optional `name` / `context_length`. Multi-source models keep `children`.
 - `POST /v1/embeddings`
@@ -98,7 +99,7 @@ Public:
 - `POST /v1/images/generations` and `POST /v1/images/edits` — OpenAI Images routes. Edits accept JSON or `multipart/form-data`; the gateway inlines files as `{ images: [{ b64_json, media_type }] }` before routing. Plugins that omit the method return 404 `capability not supported`.
 - `POST /v1/audio/transcriptions` and `POST /v1/audio/speech` — OpenAI speech routes. Transcriptions accept `multipart/form-data`; the gateway inlines the file as `{ file: { b64_json, media_type } }` plus `model`, `language`, and other text fields before routing. Missing file or model is 400. Speech accepts JSON `{ model, input, voice, response_format?, speed? }`. Missing `model`, `input`, or `voice` is 400. Plugins that omit `audioTranscriptions` or `audioSpeech` return 404 `capability not supported`. Responses are upstream bytes (transcription JSON or `text/plain`, speech audio) forwarded with status and content-type. Request logs redact audio bytes the same way image logs redact `b64_json`.
 
-`/v1` requires `Authorization: Bearer` or `x-api-key`. Admin cookies do not authenticate `/v1`. No client keys => `/v1` is 401. Missing/invalid key is 401.
+`/v1` requires `Authorization: Bearer` or `x-api-key`. Admin cookies do not authenticate `/v1`. No client keys => `/v1` is 401. Missing/invalid key is 401. Keys with `user_id` NULL stay unbound: no balance check. A bound key on `GET /v1/models` only checks that the user is active (balance 0 may list models; disabled is 403). A registered `/v1` route other than models admits one in-flight call after the body is accepted, and after audio fields validate, when `balance_tokens > inflight` (402 `insufficient token balance`, 403 `user disabled`). Rejected JSON and unknown `/v1` paths do not reserve a slot. Admission holds until usage is settled from the consumed upstream response, not merely when headers are sent. Settlement deducts actual input+output tokens once per request id and ignores cache tokens. One in-flight response may drive the balance negative.
 
 Admin UI: `GET /admin` (SPA from `VIATE_ADMIN_UI_DIST` or a discovered `apps/web/dist`).
 
@@ -115,6 +116,8 @@ Admin API (`/api/admin/*`) requires `VIATE_ADMIN_PASSWORD`. Absent password disa
 - Requests: `GET /api/admin/requests` (filters, `before` cursor, no bodies) and `GET /api/admin/requests/:id`. `GET /api/admin/requests/stats` keeps `?window=` unless `from`, `to`, or a dimension filter is set, then aggregates that range from `request_logs`.
 - Connections: `GET/POST /api/admin/connections`; `PUT/DELETE /api/admin/connections/:id`; activate/deactivate; OAuth start/poll/callback; per-connection model sync
 - Client keys: `GET/POST /api/admin/api-keys`; `DELETE /api/admin/api-keys/:id`. Secret shown once as `viate_…`; list returns prefix. Store HMAC-SHA256 only.
+- Users: `POST /api/admin/users` `{email,name,password}`; `GET /api/admin/users`; `PATCH /api/admin/users/:id` `{name?,status?,password?}`; `POST /api/admin/users/:id/tokens` `{delta,note?}`; `GET /api/admin/users/:id/ledger`. The admin password provisions customers. No public signup and no customer delete. `POST /api/admin/api-keys` accepts optional `userId`; list rows include `userId`.
+- Customer portal page: `GET /portal` and `GET /portal/*` serve the admin `index.html` shell. Assets stay at `/admin/assets/`. `/admin/portal` is not a portal alias. API is `/api/portal/login|logout|session|password|keys|usage`. Cookies `viate_user` and `viate_user_csrf` (HttpOnly, SameSite=Strict, 12h). Portal does not require `VIATE_ADMIN_PASSWORD`. Login is rate limited per IP. Mutations need Origin/Referer match plus `X-Viate-Csrf`. A customer sees balance, ledger, recent request logs, and only their own keys. Portal cannot grant tokens.
 
 ## Routing And Secrets
 

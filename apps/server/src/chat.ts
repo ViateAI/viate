@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   INBOUND_HEADER_ALLOWLIST,
@@ -44,13 +45,21 @@ type Capability =
 
 const CORE_TIMEOUT_MS = 10 * 60 * 1_000;
 
+type AuthenticatedRequest = FastifyRequest & { viateV1?: { apiKey: StoredApiKey } };
+
 export async function registerChatRoute(app: FastifyInstance, options: ChatRouteOptions): Promise<void> {
   const providers = new Map(options.providers.map((provider) => [provider.id, provider]));
 
   app.addHook("onRequest", async (request, reply) => {
-    if (request.url.startsWith("/v1/") && !options.authenticateClient?.(clientSecretFrom(request))) {
+    const path = request.url.split("?")[0] ?? request.url;
+    if (!path.startsWith("/v1/")) {
+      return;
+    }
+    const apiKey = options.authenticateClient?.(clientSecretFrom(request)) ?? null;
+    if (!apiKey) {
       return viateError(reply, 401, "invalid api key");
     }
+    (request as AuthenticatedRequest).viateV1 = { apiKey };
   });
 
   app.post("/v1/chat/completions", (request, reply) =>
@@ -122,10 +131,27 @@ async function dispatch(
   const signal = AbortSignal.any([clientAbort.signal, AbortSignal.timeout(CORE_TIMEOUT_MS)]);
   const headers = pickAllowedHeaders(request.headers, INBOUND_HEADER_ALLOWLIST);
   const startedAt = Date.now();
-  const apiKey = options.authenticateClient?.(clientSecretFrom(request)) ?? null;
+  const apiKey = (request as AuthenticatedRequest).viateV1?.apiKey ?? null;
+  const billUserId = apiKey?.userId ?? null;
+  let admitted = false;
+  let billRequestId: string | null = null;
+  const settle = (inputTokens: number, outputTokens: number) => {
+    if (!admitted || !billRequestId || !billUserId || !options.store) {
+      return;
+    }
+    options.store.settleUsage({
+      userId: billUserId,
+      requestId: billRequestId,
+      inputTokens,
+      outputTokens,
+    });
+  };
 
   try {
     if (capability === "listModels") {
+      if (billUserId && options.store) {
+        options.store.assertUserActive(billUserId);
+      }
       cleanup();
       return reply.code(200).send(options.store?.listPublicCatalog() ?? { object: "list", data: [] });
     }
@@ -135,6 +161,11 @@ async function dispatch(
     }
     if (capability === "audioTranscriptions" || capability === "audioSpeech") {
       assertAudioRequest(capability, request.body);
+    }
+    if (billUserId && options.store) {
+      options.store.admitUser(billUserId);
+      admitted = true;
+      billRequestId = randomUUID();
     }
     const routed = await dispatchRouted(
       options.store,
@@ -148,7 +179,9 @@ async function dispatch(
     const sent = sendUpstream(reply, exchange);
     void tap
       .then((result) => {
+        settle(result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
         options.requestLogs?.record({
+          id: billRequestId ?? undefined,
           startedAt,
           endedAt: Date.now(),
           endpoint: endpointForCapability(capability),
@@ -165,6 +198,7 @@ async function dispatch(
           connectionId: routed.connectionId,
           apiKeyId: apiKey?.id ?? null,
           apiKeyPrefix: apiKey?.prefix ?? null,
+          userId: billUserId,
           attempts: routed.attempts,
           usage: result.usage,
           error: exchange.status >= 400 ? `upstream ${exchange.status}` : null,
@@ -174,17 +208,25 @@ async function dispatch(
           payloadTruncated: result.truncated,
         });
       })
-      .catch(() => {});
+      .catch(() => {
+        settle(0, 0);
+      });
     return sent;
   } catch (error) {
     cleanup();
+    settle(0, 0);
     const aborted = clientAbort.signal.aborted || isAbortError(error);
     const timedOut = signal.aborted && !clientAbort.signal.aborted;
-    const status = aborted ? 499 : error instanceof RouteError ? error.statusCode : 500;
+    const statusFromError =
+      typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number"
+        ? error.statusCode
+        : undefined;
+    const status = aborted ? 499 : statusFromError ?? 500;
     const message = error instanceof Error ? error.message : String(error);
     const lastAttempt = error instanceof RouteError ? error.attempts.at(-1) : undefined;
     if (capability !== "listModels") {
       options.requestLogs?.record({
+        id: billRequestId ?? undefined,
         startedAt,
         endedAt: Date.now(),
         endpoint: endpointForCapability(capability),
@@ -197,6 +239,7 @@ async function dispatch(
         connectionId: lastAttempt?.connectionId ?? null,
         apiKeyId: apiKey?.id ?? null,
         apiKeyPrefix: apiKey?.prefix ?? null,
+        userId: billUserId,
         attempts: error instanceof RouteError ? error.attempts : [],
         usage: null,
         error: aborted ? "aborted" : message,
@@ -212,10 +255,10 @@ async function dispatch(
       }
       return;
     }
-    if (error instanceof RouteError) {
-      return viateError(reply, error.statusCode, error.message);
+    if (statusFromError) {
+      return viateError(reply, statusFromError, message);
     }
-    return viateError(reply, 500, error instanceof Error ? error.message : String(error));
+    return viateError(reply, 500, message);
   }
 }
 

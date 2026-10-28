@@ -11,14 +11,17 @@ import {
   type Connection,
   type ConnectionModelCatalog,
   type CredentialField,
+  type GatewayUser,
   type OAuthStart,
   type OperationLog,
   type SubscriptionView,
 } from "./api";
 import { balanceSummary, BalancesPage } from "./balances";
+import { PortalApp } from "./portal";
 import { RequestsPage } from "./requests";
+import { UsersPage } from "./users";
 
-type Page = "plugins" | "connections" | "balances" | "models" | "api-keys" | "requests" | "logs";
+type Page = "plugins" | "connections" | "balances" | "models" | "users" | "api-keys" | "requests" | "logs";
 
 type CredentialMode = "form" | "paste" | "oauth";
 
@@ -37,6 +40,14 @@ function credentialModes(provider: AdminPlugin | null): CredentialMode[] {
 }
 
 export function App() {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/portal" || path.startsWith("/portal/")) {
+    return <PortalApp />;
+  }
+  return <AdminApp />;
+}
+
+function AdminApp() {
   const [ready, setReady] = useState(false);
   const [authed, setAuthed] = useState(false);
   const [disabled, setDisabled] = useState(false);
@@ -172,6 +183,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <NavButton page="connections" current={page} onClick={setPage}>Connections</NavButton>
           <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
           <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
+          <NavButton page="users" current={page} onClick={setPage}>Users</NavButton>
           <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
           <NavButton page="requests" current={page} onClick={setPage}>Requests</NavButton>
           <NavButton page="logs" current={page} onClick={setPage}>Logs</NavButton>
@@ -239,6 +251,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
             onSelectConnection={setSelectedConnectionId}
           />
         ) : null}
+        {page === "users" ? <UsersPage onNotice={setNotice} /> : null}
         {page === "api-keys" ? <ApiKeysPage onNotice={setNotice} /> : null}
         {page === "requests" ? <RequestsPage /> : null}
         {page === "logs" ? <LogsPage /> : null}
@@ -248,6 +261,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         <NavButton page="connections" current={page} onClick={setPage}>Connections</NavButton>
         <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
         <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
+        <NavButton page="users" current={page} onClick={setPage}>Users</NavButton>
         <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
         <NavButton page="requests" current={page} onClick={setPage}>Requests</NavButton>
         <NavButton page="logs" current={page} onClick={setPage}>Logs</NavButton>
@@ -287,6 +301,9 @@ function pageLabel(page: Page): string {
   if (page === "models") {
     return "Models";
   }
+  if (page === "users") {
+    return "Users";
+  }
   if (page === "api-keys") {
     return "Client API keys";
   }
@@ -309,8 +326,11 @@ function pageDescription(page: Page): string {
   if (page === "models") {
     return "Sync inventory per connection. Same ids publish as one aggregated /v1/models entry.";
   }
+  if (page === "users") {
+    return "Provision customers and grant tokens. Customers sign in at /portal.";
+  }
   if (page === "api-keys") {
-    return "Issue hashed client keys for /v1. Secrets are shown once.";
+    return "Issue hashed client keys for /v1. Optionally bind a key to a customer. Secrets are shown once.";
   }
   if (page === "requests") {
     return "Per-request cache, first token, TPS, and token usage. Statistics use the same filters. Detail is kept for 7 days.";
@@ -565,15 +585,21 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
 
 function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void }) {
   const [keys, setKeys] = useState<ClientApiKey[] | null>(null);
+  const [users, setUsers] = useState<GatewayUser[]>([]);
   const [name, setName] = useState("");
+  const [userId, setUserId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<{ name: string; secret: string } | null>(null);
   const [confirm, setConfirm] = useState<ClientApiKey | null>(null);
 
   async function refresh() {
-    const result = await api<{ apiKeys: ClientApiKey[] }>("/api/admin/api-keys");
-    setKeys(result.apiKeys);
+    const [keyResult, userResult] = await Promise.all([
+      api<{ apiKeys: ClientApiKey[] }>("/api/admin/api-keys"),
+      api<{ users: GatewayUser[] }>("/api/admin/users"),
+    ]);
+    setKeys(keyResult.apiKeys);
+    setUsers(userResult.users);
   }
 
   useEffect(() => {
@@ -592,9 +618,10 @@ function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void })
           try {
             const result = await api<{ apiKey: ClientApiKey; secret: string }>("/api/admin/api-keys", {
               method: "POST",
-              body: JSON.stringify({ name }),
+              body: JSON.stringify(userId ? { name, userId } : { name }),
             });
             setName("");
+            setUserId("");
             setRevealed({ name: result.apiKey.name, secret: result.secret });
             await refresh();
             onNotice("Copy this key now. It will not be shown again.");
@@ -617,6 +644,17 @@ function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void })
             placeholder="codex"
             required
           />
+        </label>
+        <label>
+          Customer
+          <select value={userId} onChange={(event) => setUserId(event.target.value)}>
+            <option value="">Unbound</option>
+            {users.map((user) => (
+              <option key={user.id} value={user.id}>
+                {user.email}
+              </option>
+            ))}
+          </select>
         </label>
         <button className="primary" type="submit" disabled={busy || !name.trim()}>
           {busy ? "Creating…" : "Create API key"}
@@ -645,6 +683,9 @@ function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void })
               <StatusBadge>{key.prefix}…</StatusBadge>
             </div>
             <div className="meta">Created {new Date(key.createdAt).toLocaleString()}</div>
+            {key.userId ? (
+              <div className="meta">{users.find((user) => user.id === key.userId)?.email ?? key.userId}</div>
+            ) : null}
           </div>
           <div className="row-actions">
             <button className="danger" type="button" onClick={() => setConfirm(key)}>

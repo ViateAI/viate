@@ -138,6 +138,38 @@ export type ClientApiKey = {
   name: string;
   prefix: string;
   createdAt: string;
+  userId: string | null;
+};
+
+export type GatewayUser = {
+  id: string;
+  email: string;
+  name: string;
+  status: "active" | "disabled";
+  balanceTokens: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TokenLedgerEntry = {
+  id: string;
+  userId: string;
+  delta: number;
+  balanceAfter: number;
+  reason: "grant" | "adjust" | "usage";
+  requestId: string | null;
+  note: string | null;
+  createdAt: string;
+};
+
+export type UserUsageRequest = {
+  id: string;
+  startedAt: string;
+  endpoint: string;
+  requestModel: string | null;
+  status: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
 };
 
 export type ApiError = {

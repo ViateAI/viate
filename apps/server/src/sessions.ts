@@ -8,17 +8,19 @@ export type SessionRecord = {
   id: string;
   csrf: string;
   expiresAt: number;
+  subject?: string;
 };
 
 export class SessionStore {
   private readonly sessions = new Map<string, SessionRecord>();
 
-  create(): SessionRecord {
+  create(subject?: string): SessionRecord {
     this.purge();
     const record: SessionRecord = {
       id: randomBytes(32).toString("hex"),
       csrf: randomBytes(32).toString("hex"),
       expiresAt: Date.now() + SESSION_TTL_MS,
+      ...(subject === undefined ? {} : { subject }),
     };
     this.sessions.set(record.id, record);
     return record;

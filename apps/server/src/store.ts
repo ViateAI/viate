@@ -9,6 +9,7 @@ import {
   type ProxyEndpointType,
 } from "./endpoints.js";
 import { decryptSecret, encryptSecret, loadOrCreateCredentialKey } from "./crypto.js";
+import { hashPassword, verifyPassword } from "./passwords.js";
 
 export type KeepaliveStatus = "idle" | "ok" | "failed" | "needs_reauth";
 
@@ -124,6 +125,7 @@ export type RequestLogRecord = {
   connectionId: string | null;
   apiKeyId: string | null;
   apiKeyPrefix: string | null;
+  userId?: string | null;
   attemptCount: number;
   inputTokens: number | null;
   outputTokens: number | null;
@@ -224,11 +226,49 @@ export type StoredApiKey = {
   name: string;
   prefix: string;
   createdAt: string;
+  userId: string | null;
 };
 
 export type CreatedApiKey = {
   apiKey: StoredApiKey;
   secret: string;
+};
+
+export type GatewayUser = {
+  id: string;
+  email: string;
+  name: string;
+  status: "active" | "disabled";
+  balanceTokens: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LedgerEntry = {
+  id: string;
+  userId: string;
+  delta: number;
+  balanceAfter: number;
+  reason: "grant" | "adjust" | "usage";
+  requestId: string | null;
+  note: string | null;
+  createdAt: string;
+};
+
+export type UserUsageRequest = {
+  id: string;
+  startedAt: string;
+  endpoint: string;
+  requestModel: string | null;
+  status: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+};
+
+export type UserUsage = {
+  user: GatewayUser;
+  ledger: LedgerEntry[];
+  requests: UserUsageRequest[];
 };
 
 export type PublishedMember = {
@@ -319,6 +359,7 @@ type ApiKeyRow = {
   prefix: string;
   key_hash: string;
   created_at: string;
+  user_id: string | null;
 };
 
 type RequestLogRow = {
@@ -337,6 +378,7 @@ type RequestLogRow = {
   connection_id: string | null;
   api_key_id: string | null;
   api_key_prefix: string | null;
+  user_id: string | null;
   attempt_count: number;
   input_tokens: number | null;
   output_tokens: number | null;
@@ -503,6 +545,8 @@ export class AdminStore {
     migrateConnections(db);
     migrateConnectionModels(db);
     migrateSubscription(db);
+    migrateUsers(db);
+    db.exec("UPDATE users SET inflight = 0");
     return new AdminStore(db, key, dataDir);
   }
 
@@ -1139,27 +1183,33 @@ export class AdminStore {
     return rows.filter((row) => row.credentials_enc).map((row) => this.toResolved(row));
   }
 
-  listApiKeys(): StoredApiKey[] {
-    const rows = this.db
-      .prepare("SELECT * FROM api_keys ORDER BY created_at DESC, id")
-      .all() as ApiKeyRow[];
+  listApiKeys(userId?: string): StoredApiKey[] {
+    const rows = (
+      userId === undefined
+        ? this.db.prepare("SELECT * FROM api_keys ORDER BY created_at DESC, id").all()
+        : this.db.prepare("SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id").all(userId)
+    ) as ApiKeyRow[];
     return rows.map((row) => this.toApiKey(row));
   }
 
-  createApiKey(name: string): CreatedApiKey {
+  createApiKey(name: string, userId?: string | null): CreatedApiKey {
     const trimmed = name.trim();
     if (!trimmed) {
       throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const ownerId = userId ?? null;
+    if (ownerId && !this.db.prepare("SELECT id FROM users WHERE id = ?").get(ownerId)) {
+      throw Object.assign(new Error("user not found"), { statusCode: 404 });
     }
     const secret = `viate_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const prefix = secret.slice(0, 12);
     this.db
-      .prepare("INSERT INTO api_keys (id, name, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(id, trimmed, prefix, createHmac("sha256", this.key).update(secret).digest("hex"), createdAt);
+      .prepare("INSERT INTO api_keys (id, name, prefix, key_hash, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(id, trimmed, prefix, createHmac("sha256", this.key).update(secret).digest("hex"), createdAt, ownerId);
     return {
-      apiKey: { id, name: trimmed, prefix, createdAt },
+      apiKey: { id, name: trimmed, prefix, createdAt, userId: ownerId },
       secret,
     };
   }
@@ -1179,6 +1229,247 @@ export class AdminStore {
     if (result.changes === 0) {
       throw Object.assign(new Error("api key not found"), { statusCode: 404 });
     }
+  }
+
+  createUser(input: { email: string; name: string; password: string }): GatewayUser {
+    const email = normalizeEmail(input.email);
+    const name = normalizeName(input.name);
+    const password = normalizePassword(input.password);
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO users (
+            id, email, name, password_hash, status, balance_tokens, inflight, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'active', 0, 0, ?, ?)`,
+        )
+        .run(id, email, name, hashPassword(password), now, now);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+        throw Object.assign(new Error("email already exists"), { statusCode: 409 });
+      }
+      throw error;
+    }
+    return this.requireUser(id);
+  }
+
+  listUsers(): GatewayUser[] {
+    const rows = this.db.prepare("SELECT * FROM users ORDER BY created_at DESC, id DESC").all() as UserRow[];
+    return rows.map((row) => this.toUser(row));
+  }
+
+  getUser(id: string): GatewayUser | null {
+    const row = this.db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined;
+    return row ? this.toUser(row) : null;
+  }
+
+  updateUser(id: string, patch: { name?: string; status?: string; password?: string }): GatewayUser {
+    const row = this.requireUserRow(id);
+    const name = patch.name === undefined ? row.name : normalizeName(patch.name);
+    let status = row.status;
+    if (patch.status !== undefined) {
+      if (patch.status !== "active" && patch.status !== "disabled") {
+        throw Object.assign(new Error("invalid status"), { statusCode: 400 });
+      }
+      status = patch.status;
+    }
+    const now = new Date().toISOString();
+    if (patch.password !== undefined) {
+      this.db
+        .prepare("UPDATE users SET name = ?, status = ?, password_hash = ?, updated_at = ? WHERE id = ?")
+        .run(name, status, hashPassword(normalizePassword(patch.password)), now, id);
+    } else {
+      this.db.prepare("UPDATE users SET name = ?, status = ?, updated_at = ? WHERE id = ?").run(name, status, now, id);
+    }
+    return this.requireUser(id);
+  }
+
+  authenticateUser(email: string, password: string): GatewayUser {
+    const canonical = canonicalEmail(email);
+    const row = canonical
+      ? (this.db.prepare("SELECT * FROM users WHERE email = ?").get(canonical) as UserRow | undefined)
+      : undefined;
+    const matches = verifyPassword(password, row?.password_hash ?? null);
+    if (!row || !matches) {
+      throw Object.assign(new Error("invalid email or password"), { statusCode: 401 });
+    }
+    if (row.status !== "active") {
+      throw Object.assign(new Error("user disabled"), { statusCode: 403 });
+    }
+    return this.toUser(row);
+  }
+
+  changeUserPassword(id: string, currentPassword: string, newPassword: string): void {
+    const row = this.requireUserRow(id);
+    if (!verifyPassword(currentPassword, row.password_hash)) {
+      throw Object.assign(new Error("invalid password"), { statusCode: 401 });
+    }
+    const next = normalizePassword(newPassword);
+    this.db
+      .prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+      .run(hashPassword(next), new Date().toISOString(), id);
+  }
+
+  grantTokens(userId: string, delta: number, note?: string | null): { user: GatewayUser; entry: LedgerEntry } {
+    if (!Number.isSafeInteger(delta) || delta === 0) {
+      throw Object.assign(new Error("delta must be a non-zero integer"), { statusCode: 400 });
+    }
+    const cleanNote = cleanLedgerNote(note);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as UserRow | undefined;
+      if (!row) {
+        throw Object.assign(new Error("user not found"), { statusCode: 404 });
+      }
+      const balance = numberFrom(row.balance_tokens);
+      if (delta < 0 && balance + delta < 0) {
+        throw Object.assign(new Error("balance cannot be negative"), { statusCode: 400 });
+      }
+      const balanceAfter = balance + delta;
+      const now = new Date().toISOString();
+      const reason = delta > 0 ? "grant" : "adjust";
+      const id = crypto.randomUUID();
+      this.db.prepare("UPDATE users SET balance_tokens = ?, updated_at = ? WHERE id = ?").run(balanceAfter, now, userId);
+      this.db
+        .prepare(
+          `INSERT INTO token_ledger (id, user_id, delta, balance_after, reason, request_id, note, created_at)
+           VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+        )
+        .run(id, userId, delta, balanceAfter, reason, cleanNote, now);
+      this.db.exec("COMMIT");
+      return {
+        user: this.toUser({ ...row, balance_tokens: balanceAfter, updated_at: now }),
+        entry: {
+          id,
+          userId,
+          delta,
+          balanceAfter,
+          reason,
+          requestId: null,
+          note: cleanNote,
+          createdAt: now,
+        },
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listLedger(userId: string, limit = 50): LedgerEntry[] {
+    this.requireUser(userId);
+    const rows = this.db
+      .prepare("SELECT * FROM token_ledger WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(userId, limit) as LedgerRow[];
+    return rows.map((row) => this.toLedger(row));
+  }
+
+  assertUserActive(userId: string): void {
+    const row = this.db.prepare("SELECT status FROM users WHERE id = ?").get(userId) as { status: string } | undefined;
+    if (!row) {
+      throw Object.assign(new Error("user not found"), { statusCode: 404 });
+    }
+    if (row.status !== "active") {
+      throw Object.assign(new Error("user disabled"), { statusCode: 403 });
+    }
+  }
+
+  admitUser(userId: string): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE users SET inflight = inflight + 1, updated_at = ?
+         WHERE id = ? AND status = 'active' AND balance_tokens > inflight`,
+      )
+      .run(now, userId);
+    if (Number(result.changes) !== 0) {
+      return;
+    }
+    const row = this.db.prepare("SELECT status FROM users WHERE id = ?").get(userId) as { status: string } | undefined;
+    if (!row) {
+      throw Object.assign(new Error("user not found"), { statusCode: 404 });
+    }
+    if (row.status !== "active") {
+      throw Object.assign(new Error("user disabled"), { statusCode: 403 });
+    }
+    throw Object.assign(new Error("insufficient token balance"), { statusCode: 402 });
+  }
+
+  settleUsage(input: { userId: string; requestId: string; inputTokens: number; outputTokens: number }): void {
+    const tokens = countedTokens(input.inputTokens) + countedTokens(input.outputTokens);
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const inserted = this.db
+        .prepare("INSERT OR IGNORE INTO user_usage_settlements (request_id, user_id, tokens, created_at) VALUES (?, ?, ?, ?)")
+        .run(input.requestId, input.userId, tokens, now);
+      if (Number(inserted.changes) === 0) {
+        this.db.exec("COMMIT");
+        return;
+      }
+      this.db
+        .prepare(
+          `UPDATE users
+           SET inflight = CASE WHEN inflight > 0 THEN inflight - 1 ELSE 0 END,
+               balance_tokens = balance_tokens - ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(tokens, now, input.userId);
+      if (tokens > 0) {
+        const row = this.db.prepare("SELECT balance_tokens FROM users WHERE id = ?").get(input.userId) as
+          | { balance_tokens: number | bigint }
+          | undefined;
+        if (row) {
+          this.db
+            .prepare(
+              `INSERT INTO token_ledger (id, user_id, delta, balance_after, reason, request_id, note, created_at)
+               VALUES (?, ?, ?, ?, 'usage', ?, NULL, ?)`,
+            )
+            .run(crypto.randomUUID(), input.userId, -tokens, numberFrom(row.balance_tokens), input.requestId, now);
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  usageForUser(userId: string): UserUsage {
+    const user = this.requireUser(userId);
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT id, started_at, endpoint, request_model, status, input_tokens, output_tokens
+         FROM request_logs
+         WHERE user_id = ? AND started_at >= ?
+         ORDER BY started_at DESC, id DESC
+         LIMIT 50`,
+      )
+      .all(userId, since) as Array<{
+      id: string;
+      started_at: string;
+      endpoint: string;
+      request_model: string | null;
+      status: number;
+      input_tokens: number | null;
+      output_tokens: number | null;
+    }>;
+    return {
+      user,
+      ledger: this.listLedger(userId, 50),
+      requests: rows.map((row) => ({
+        id: row.id,
+        startedAt: row.started_at,
+        endpoint: row.endpoint,
+        requestModel: row.request_model,
+        status: row.status,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+      })),
+    };
   }
 
   addOperationLog(entry: Omit<OperationLog, "id" | "createdAt">): OperationLog {
@@ -1228,9 +1519,9 @@ export class AdminStore {
           `INSERT INTO request_logs (
             id, started_at, ended_at, duration_ms, ttfb_ms, endpoint, stream, status, outcome,
             request_model, upstream_model, provider_id, connection_id, api_key_id, api_key_prefix,
-            attempt_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+            user_id, attempt_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
             usage_source, error, payload_path, payload_offset, payload_truncated
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           record.id,
@@ -1248,6 +1539,7 @@ export class AdminStore {
           record.connectionId,
           record.apiKeyId,
           record.apiKeyPrefix,
+          record.userId ?? null,
           record.attemptCount,
           record.inputTokens,
           record.outputTokens,
@@ -1553,6 +1845,7 @@ export class AdminStore {
       connectionId: row.connection_id,
       apiKeyId: row.api_key_id,
       apiKeyPrefix: row.api_key_prefix,
+      userId: row.user_id ?? null,
       attemptCount: row.attempt_count,
       inputTokens: row.input_tokens,
       outputTokens: row.output_tokens,
@@ -1604,6 +1897,49 @@ export class AdminStore {
       id: row.id,
       name: row.name,
       prefix: row.prefix,
+      createdAt: row.created_at,
+      userId: row.user_id ?? null,
+    };
+  }
+
+  private requireUser(id: string): GatewayUser {
+    const user = this.getUser(id);
+    if (!user) {
+      throw Object.assign(new Error("user not found"), { statusCode: 404 });
+    }
+    return user;
+  }
+
+  private requireUserRow(id: string): UserRow {
+    const row = this.db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined;
+    if (!row) {
+      throw Object.assign(new Error("user not found"), { statusCode: 404 });
+    }
+    return row;
+  }
+
+  private toUser(row: UserRow): GatewayUser {
+    return {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      status: row.status === "disabled" ? "disabled" : "active",
+      balanceTokens: numberFrom(row.balance_tokens),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private toLedger(row: LedgerRow): LedgerEntry {
+    const reason = row.reason === "grant" || row.reason === "adjust" || row.reason === "usage" ? row.reason : "adjust";
+    return {
+      id: row.id,
+      userId: row.user_id,
+      delta: numberFrom(row.delta),
+      balanceAfter: numberFrom(row.balance_after),
+      reason,
+      requestId: row.request_id,
+      note: row.note,
       createdAt: row.created_at,
     };
   }
@@ -1714,6 +2050,49 @@ function migrateSubscription(db: DatabaseSync): void {
   `);
 }
 
+function migrateUsers(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      balance_tokens INTEGER NOT NULL DEFAULT 0,
+      inflight INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS token_ledger (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      delta INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      request_id TEXT UNIQUE,
+      note TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS token_ledger_user_created ON token_ledger(user_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS user_usage_settlements (
+      request_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      tokens INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+  if (!apiKeyColumns.some((column) => column.name === "user_id")) {
+    db.exec("ALTER TABLE api_keys ADD COLUMN user_id TEXT REFERENCES users(id)");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS api_keys_user_id ON api_keys(user_id)");
+  const logColumns = db.prepare("PRAGMA table_info(request_logs)").all() as Array<{ name: string }>;
+  if (!logColumns.some((column) => column.name === "user_id")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN user_id TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS request_logs_user_started ON request_logs(user_id, started_at DESC)");
+}
+
 type SubscriptionUsageRow = {
   connection_id: string;
   type: string;
@@ -1774,6 +2153,83 @@ function numberFrom(value: number | bigint | null | undefined): number {
     return Number(value);
   }
   return value ?? 0;
+}
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+type UserRow = {
+  id: string;
+  email: string;
+  name: string;
+  password_hash: string;
+  status: string;
+  balance_tokens: number | bigint;
+  inflight: number | bigint;
+  created_at: string;
+  updated_at: string;
+};
+
+type LedgerRow = {
+  id: string;
+  user_id: string;
+  delta: number | bigint;
+  balance_after: number | bigint;
+  reason: string;
+  request_id: string | null;
+  note: string | null;
+  created_at: string;
+};
+
+function normalizeEmail(email: string): string {
+  const normalized = canonicalEmail(email);
+  if (!normalized) {
+    throw Object.assign(new Error("invalid email"), { statusCode: 400 });
+  }
+  return normalized;
+}
+
+function canonicalEmail(email: string): string | null {
+  const normalized = email.trim().toLowerCase();
+  if (normalized.length === 0 || normalized.length > 254 || !EMAIL_PATTERN.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+function normalizeName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length < 1 || trimmed.length > 80) {
+    throw Object.assign(new Error("name must be 1..80 characters"), { statusCode: 400 });
+  }
+  return trimmed;
+}
+
+function normalizePassword(password: string): string {
+  if (password.length < 8 || password.length > 200) {
+    throw Object.assign(new Error("password must be 8..200 characters"), { statusCode: 400 });
+  }
+  return password;
+}
+
+function cleanLedgerNote(note: string | null | undefined): string | null {
+  if (note === undefined || note === null) {
+    return null;
+  }
+  const trimmed = note.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.length > 200) {
+    throw Object.assign(new Error("note is too long"), { statusCode: 400 });
+  }
+  return trimmed;
+}
+
+function countedTokens(value: number): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return 0;
+  }
+  return value;
 }
 
 const REQUEST_LOG_BREAKDOWN_COLUMNS = `

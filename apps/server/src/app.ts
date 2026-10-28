@@ -4,6 +4,7 @@ import type { PluginLoadFailure } from "@viateai/plugin-manager";
 import { registerAdminRoutes, type PluginOperator } from "./admin.js";
 import { registerChatRoute } from "./chat.js";
 import { registerAdminStatic } from "./static.js";
+import { registerPortalRoutes } from "./portal.js";
 import { createSubscriptionScheduler } from "./subscription.js";
 import type { AdminStore } from "./store.js";
 import type { SessionStore } from "./sessions.js";
@@ -121,6 +122,10 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
       requestLogs,
       subscriptions,
     });
+  }
+
+  if (store) {
+    await registerPortalRoutes(app, { store });
   }
 
   await registerAdminStatic(app, options.adminUiDist ?? null);

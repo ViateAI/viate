@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { access, constants, stat } from "node:fs/promises";
 import { extname, join, normalize, relative, resolve, sep } from "node:path";
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -26,6 +26,10 @@ export async function registerAdminStatic(app: FastifyInstance, distDir: string 
     return;
   }
 
+  app.get("/", async (request, reply) => redirectToPortal(request, reply));
+  app.get("/portal", async (_request, reply) => sendFile(reply, join(distDir, "index.html")));
+  app.get("/portal/*", async (_request, reply) => sendFile(reply, join(distDir, "index.html")));
+
   await app.register(
     async (scope) => {
       scope.get("/", async (_request, reply) => sendFile(reply, join(distDir, "index.html")));
@@ -48,6 +52,12 @@ export async function registerAdminStatic(app: FastifyInstance, distDir: string 
     },
     { prefix: "/admin" },
   );
+}
+
+function redirectToPortal(request: FastifyRequest, reply: FastifyReply) {
+  const queryIndex = request.url.indexOf("?");
+  const query = queryIndex === -1 ? "" : request.url.slice(queryIndex);
+  return reply.code(302).header("location", `/portal${query}`).send();
 }
 
 function isInside(root: string, candidate: string): boolean {

@@ -31,6 +31,7 @@ export type RequestLogEvent = {
   connectionId: string | null;
   apiKeyId: string | null;
   apiKeyPrefix: string | null;
+  userId?: string | null;
   attempts: RequestAttemptRecord[];
   usage: RequestUsage | null;
   error: string | null;
@@ -282,6 +283,7 @@ export class RequestLogRecorder {
       connectionId: event.connectionId,
       apiKeyId: event.apiKeyId,
       apiKeyPrefix: event.apiKeyPrefix,
+      userId: event.userId ?? null,
       attemptCount: event.attempts.length,
       inputTokens: usage?.inputTokens ?? null,
       outputTokens: usage?.outputTokens ?? null,

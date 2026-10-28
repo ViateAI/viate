@@ -32,4 +32,28 @@ describe("GET /admin", () => {
     assert.equal(asset.statusCode, 200);
     assert.match(asset.body, /console\.log/);
   });
+
+  it("redirects / to the portal shell and does not read portal paths from disk", async () => {
+    const root = await app.inject({ method: "GET", url: "/" });
+    assert.equal(root.statusCode, 302);
+    assert.equal(root.headers.location, "/portal");
+
+    const query = await app.inject({ method: "GET", url: "/?x=1" });
+    assert.equal(query.statusCode, 302);
+    assert.equal(query.headers.location, "/portal?x=1");
+
+    const head = await app.inject({ method: "HEAD", url: "/" });
+    assert.equal(head.statusCode, 302);
+    assert.equal(head.headers.location, "/portal");
+
+    const portal = await app.inject({ method: "GET", url: "/portal" });
+    assert.equal(portal.statusCode, 200);
+    assert.match(String(portal.headers["content-type"]), /text\/html/);
+    assert.match(portal.body, /Viate Admin/);
+
+    const nested = await app.inject({ method: "GET", url: "/portal/keys" });
+    assert.equal(nested.statusCode, 200);
+    assert.match(String(nested.headers["content-type"]), /text\/html/);
+    assert.match(nested.body, /Viate Admin/);
+  });
 });
