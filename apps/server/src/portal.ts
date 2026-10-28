@@ -225,9 +225,10 @@ function sendStoreError(reply: FastifyReply, error: unknown) {
 
 function portalModelView(store: AdminStore, userId: string) {
   const choice = store.userModelChoice(userId);
+  const providers = store.userProviderChoice(userId);
   return {
     mode: choice.mode,
-    published: store.listPublicCatalog().data.map((model) => ({
+    published: store.listPublicCatalog(providers.mode === "only" ? providers.providerIds : null).data.map((model) => ({
       id: model.id,
       name: model.name?.trim() || model.id,
     })),

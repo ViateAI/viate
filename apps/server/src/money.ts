@@ -1,5 +1,6 @@
 const NANO_PER_USD = 1_000_000_000n;
 const USD_TEXT = /^-?(?:0|[1-9]\d*)(?:\.\d{1,9})?$/;
+const RATE_TEXT = /^(?:0|[1-9]\d*)(?:\.\d{1,9})?$/;
 
 export function asNano(value: number | bigint | null | undefined): bigint {
   if (typeof value === "bigint") {
@@ -47,6 +48,19 @@ export function parseUsdToNano(usd: string): bigint {
     throw Object.assign(new Error("usd amount is too large"), { statusCode: 400 });
   }
   return signed;
+}
+
+export function parseRateUsdToNano(usd: string): bigint {
+  const trimmed = usd.trim();
+  if (!RATE_TEXT.test(trimmed)) {
+    throw Object.assign(new Error("price must be a non-negative decimal"), { statusCode: 400 });
+  }
+  const [whole, fraction = ""] = trimmed.split(".");
+  const nano = BigInt(whole ?? "0") * NANO_PER_USD + BigInt(fraction.padEnd(9, "0"));
+  if (nano > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw Object.assign(new Error("price is too large"), { statusCode: 400 });
+  }
+  return nano;
 }
 
 export function nanoPerMillionFromUsd(usdPerMillion: unknown): number | null {

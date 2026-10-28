@@ -24,6 +24,8 @@ import {
 } from "./sessions.js";
 import { LoginRateLimiter } from "./rate-limit.js";
 import { readRequestPayload, type RequestLogRecorder } from "./request-logs.js";
+import type { ModelPriceLookup } from "./chat.js";
+import { formatUsd } from "./money.js";
 import type {
   AdminStore,
   OperationLog,
@@ -82,6 +84,7 @@ export type AdminRouteOptions = {
   sessions?: SessionStore;
   requestLogs?: RequestLogRecorder;
   subscriptions?: SubscriptionScheduler;
+  modelPrices?: ModelPriceLookup;
 };
 
 const SESSION_MAX_AGE = 12 * 60 * 60;
@@ -633,6 +636,80 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     const { id } = request.params as { id: string };
     try {
       return { ledger: options.store.listLedger(id, 50) };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.get("/api/admin/users/:id/providers", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      const choice = options.store.userProviderChoice(id);
+      return {
+        mode: choice.mode,
+        providerIds: choice.mode === "only" ? choice.providerIds : [],
+        available: options.store.listConnectionProviderIds(),
+      };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.put("/api/admin/users/:id/providers", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = asRecord(request.body);
+    if (!Object.hasOwn(body, "providerIds") || (body.providerIds !== null && !Array.isArray(body.providerIds))) {
+      return reply.code(400).send({ error: { message: "providerIds is required", type: "viate_error" } });
+    }
+    try {
+      options.store.setUserProviders(id, body.providerIds as string[] | null);
+      const choice = options.store.userProviderChoice(id);
+      return {
+        mode: choice.mode,
+        providerIds: choice.mode === "only" ? choice.providerIds : [],
+        available: options.store.listConnectionProviderIds(),
+      };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.get("/api/admin/model-prices", async () => {
+    const overrides = options.store.listModelPriceOverrides().map((row) => ({
+      modelId: row.modelId,
+      mode: row.perRequestNano == null ? "tokens" : "request",
+      inputUsdPerMillion: formatUsd(row.inputNanoPerMillion),
+      outputUsdPerMillion: formatUsd(row.outputNanoPerMillion),
+      usdPerRequest: row.perRequestNano == null ? null : formatUsd(row.perRequestNano),
+      updatedAt: row.updatedAt,
+    }));
+    const overridden = new Set(overrides.map((row) => row.modelId));
+    const unpriced = options.store
+      .listPublicCatalog()
+      .data.map((model) => model.id)
+      .filter((modelId) => !overridden.has(modelId) && !options.modelPrices?.lookup(modelId));
+    return { overrides, unpriced };
+  });
+
+  app.put("/api/admin/model-prices", async (request, reply) => {
+    const body = asRecord(request.body);
+    const modelId = typeof body.modelId === "string" ? body.modelId : "";
+    const inputUsdPerMillion = typeof body.inputUsdPerMillion === "string" ? body.inputUsdPerMillion : "";
+    const outputUsdPerMillion = typeof body.outputUsdPerMillion === "string" ? body.outputUsdPerMillion : "";
+    const usdPerRequest = typeof body.usdPerRequest === "string" ? body.usdPerRequest : null;
+    try {
+      options.store.setModelPriceOverride(modelId, inputUsdPerMillion, outputUsdPerMillion, usdPerRequest);
+      return { ok: true };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.delete("/api/admin/model-prices/*", async (request, reply) => {
+    const modelId = decodeURIComponent((request.params as { "*": string })["*"] ?? "");
+    try {
+      options.store.deleteModelPriceOverride(modelId);
+      return { ok: true };
     } catch (error) {
       return sendStoreError(reply, error);
     }

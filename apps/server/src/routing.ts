@@ -81,10 +81,17 @@ export async function dispatchRouted(
   request: { body: unknown; headers: Record<string, string>; signal: AbortSignal },
   clientAbort: AbortSignal,
   onAuthFailure?: (connectionId: string) => void,
+  allowedProviderIds?: ReadonlySet<string> | null,
 ): Promise<RoutedResult> {
   const requestModel = requestModelFromBody(request.body);
-  const members = resolvePublishedMembers(store, requestModel, providers.keys());
+  const published = resolvePublishedMembers(store, requestModel, providers.keys());
+  const members = allowedProviderIds
+    ? published.filter((member) => allowedProviderIds.has(member.providerId))
+    : published;
   if (members.length === 0) {
+    if (allowedProviderIds && published.length > 0) {
+      throw new RouteError(403, "provider not available");
+    }
     throw new RouteError(404, `unknown model: ${requestModel}`);
   }
 

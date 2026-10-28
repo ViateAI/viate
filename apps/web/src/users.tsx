@@ -181,6 +181,7 @@ function UserEditor({
           Ledger
         </button>
       </div>
+      <ProviderAccess userId={user.id} busy={busy} onError={onError} onNotice={onNotice} />
       <form
         className="form"
         onSubmit={(event) => {
@@ -279,4 +280,94 @@ function UserEditor({
 
 function StatusBadge({ children, tone = "neutral" }: { children: string; tone?: "neutral" | "ok" | "warn" }) {
   return <span className={`badge ${tone}`}>{children}</span>;
+}
+
+type ProviderAccessView = {
+  mode: "all" | "only";
+  providerIds: string[];
+  available: string[];
+};
+
+function ProviderAccess({
+  userId,
+  busy,
+  onError,
+  onNotice,
+}: {
+  userId: string;
+  busy: boolean;
+  onError: (value: string | null) => void;
+  onNotice: (value: string | null) => void;
+}) {
+  const [access, setAccess] = useState<ProviderAccessView | null>(null);
+  const [checked, setChecked] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api<ProviderAccessView>(`/api/admin/users/${userId}/providers`)
+      .then((result) => {
+        setAccess(result);
+        setChecked(result.mode === "all" ? result.available : result.providerIds);
+      })
+      .catch((err) => onError(isApiError(err) ? err.message : "failed to load providers"));
+  }, [onError, userId]);
+
+  async function save(providerIds: string[] | null) {
+    setSaving(true);
+    onError(null);
+    onNotice(null);
+    try {
+      const result = await api<ProviderAccessView>(`/api/admin/users/${userId}/providers`, {
+        method: "PUT",
+        body: JSON.stringify({ providerIds }),
+      });
+      setAccess(result);
+      setChecked(result.mode === "all" ? result.available : result.providerIds);
+      onNotice(providerIds === null ? "Customer can use every provider." : "Provider access saved.");
+    } catch (err) {
+      onError(isApiError(err) ? err.message : "save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="stack">
+      <div className="panel-header">
+        <h2>Providers</h2>
+        <p className="meta">
+          {access?.mode === "only"
+            ? "Only checked providers are visible. Unchecked ones, such as a private test provider, stay hidden."
+            : "Every provider is available, including ones you add later. Save a selection to hide the rest."}
+        </p>
+      </div>
+      {access === null ? <p className="meta">Loading providers…</p> : null}
+      {access && access.available.length === 0 ? <p className="meta">No connections yet.</p> : null}
+      <div className="protocol-toggles">
+        {access?.available.map((providerId) => (
+          <label className="toggle" key={providerId}>
+            <input
+              type="checkbox"
+              checked={checked.includes(providerId)}
+              disabled={busy || saving}
+              onChange={(event) => {
+                setChecked((current) =>
+                  event.target.checked ? [...current, providerId] : current.filter((id) => id !== providerId),
+                );
+              }}
+            />
+            {providerId}
+          </label>
+        ))}
+      </div>
+      <div className="row-actions">
+        <button className="ghost" type="button" disabled={busy || saving || access === null} onClick={() => void save(null)}>
+          Use all providers
+        </button>
+        <button className="primary" type="button" disabled={busy || saving || access === null} onClick={() => void save(checked)}>
+          Save providers
+        </button>
+      </div>
+    </div>
+  );
 }

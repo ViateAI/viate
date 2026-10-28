@@ -123,6 +123,7 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
       sessions: options.sessions,
       requestLogs,
       subscriptions,
+      modelPrices: options.modelPrices,
     });
   }
 

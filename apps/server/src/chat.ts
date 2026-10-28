@@ -10,6 +10,7 @@ import {
   type ProviderHandler,
 } from "@viateai/sdk";
 import { dispatchRouted, RouteError } from "./routing.js";
+import { resolvePublishedMembers } from "./catalog.js";
 import {
   classifyOutcome,
   endpointForCapability,
@@ -25,7 +26,11 @@ import { assertAudioRequest, loggedRequestBody, loggedResponseBody } from "./aud
 export type ClientAuthenticator = (secret: string | undefined) => StoredApiKey | null;
 
 export type ModelPriceLookup = {
-  lookup(modelId: string): { inputNanoPerMillion: number; outputNanoPerMillion: number } | null;
+  lookup(modelId: string): {
+    inputNanoPerMillion: number;
+    outputNanoPerMillion: number;
+    perRequestNano?: number;
+  } | null;
   ready: boolean;
 };
 
@@ -142,7 +147,8 @@ async function dispatch(
   let admitted = false;
   let billRequestId: string | null = null;
   let billedRates: { inputNanoPerMillion: number; outputNanoPerMillion: number } | null = null;
-  const settle = (inputTokens: number, outputTokens: number) => {
+  let billedPerRequestNano = 0;
+  const settle = (inputTokens: number, outputTokens: number, includePerRequest = false) => {
     if (!admitted || !billRequestId || !billUserId || !options.store) {
       return;
     }
@@ -154,6 +160,7 @@ async function dispatch(
       outputTokens,
       inputNanoPerMillion: rates?.inputNanoPerMillion ?? 0,
       outputNanoPerMillion: rates?.outputNanoPerMillion ?? 0,
+      perRequestNano: includePerRequest ? billedPerRequestNano : 0,
     });
   };
 
@@ -178,9 +185,13 @@ async function dispatch(
         const requested = requestModelFrom(request.body);
         if (requested && !choice.modelIds.includes(requested)) {
           throw Object.assign(new Error("model not available"), { statusCode: 403 });
-    }
-    }
+        }
+      }
+      const allowedProviderIds = allowedProviders(options.store, billUserId);
       const model = requestModelFrom(request.body);
+      if (model && allowedProviderIds && !providerVisible(options.store, model, allowedProviderIds, providers.keys())) {
+        throw Object.assign(new Error("provider not available"), { statusCode: 403 });
+      }
       if (model) {
         const catalog = options.modelPrices;
         if (!catalog?.ready) {
@@ -194,6 +205,7 @@ async function dispatch(
           inputNanoPerMillion: rate.inputNanoPerMillion,
           outputNanoPerMillion: rate.outputNanoPerMillion,
         };
+        billedPerRequestNano = rate.perRequestNano ?? 0;
       }
     }
     if (billUserId && options.store) {
@@ -208,12 +220,14 @@ async function dispatch(
       { body: request.body, headers, signal },
       clientAbort.signal,
       options.onUpstreamAuthFailure,
+      billUserId && options.store ? allowedProviders(options.store, billUserId) : null,
     );
     const { exchange, tap } = tapExchange(routed.exchange, startedAt);
     const sent = sendUpstream(reply, exchange);
     void tap
       .then((result) => {
-        settle(result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
+        const succeeded = exchange.status >= 200 && exchange.status < 300;
+        settle(result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0, succeeded);
         options.requestLogs?.record({
           id: billRequestId ?? undefined,
           startedAt,
@@ -318,7 +332,8 @@ function publicCatalogFor(
   if (!store) {
     return { object: "list", data: [] };
   }
-  const catalog = store.listPublicCatalog();
+  const providerChoice = userId ? store.userProviderChoice(userId) : null;
+  const catalog = store.listPublicCatalog(providerChoice?.mode === "only" ? providerChoice.providerIds : null);
   if (!userId) {
     return catalog;
   }
@@ -328,6 +343,24 @@ function publicCatalogFor(
   }
   const allowed = new Set(choice.modelIds);
   return { object: "list", data: catalog.data.filter((model) => allowed.has(model.id)) };
+}
+
+function allowedProviders(store: AdminStore, userId: string): ReadonlySet<string> | null {
+  const choice = store.userProviderChoice(userId);
+  if (choice.mode === "all") {
+    return null;
+  }
+  return new Set(choice.providerIds);
+}
+
+function providerVisible(
+  store: AdminStore,
+  model: string,
+  allowed: ReadonlySet<string>,
+  loadedProviderIds: Iterable<string>,
+): boolean {
+  const published = resolvePublishedMembers(store, model, loadedProviderIds);
+  return published.length === 0 || published.some((member) => allowed.has(member.providerId));
 }
 
 function sendUpstream(reply: FastifyReply, upstream: HttpExchange): FastifyReply {

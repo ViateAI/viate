@@ -9,6 +9,7 @@ const VENDOR_PROVIDER_IDS = ["openai", "anthropic", "google", "google-vertex", "
 export type ModelPriceRate = {
   inputNanoPerMillion: number;
   outputNanoPerMillion: number;
+  perRequestNano?: number;
 };
 
 export type ModelPriceRow = ModelPriceRate & {
@@ -83,6 +84,82 @@ export function indexModelPrices(rows: readonly ModelPriceRow[]): ModelPriceInde
 }
 
 export function lookupModelPrice(index: ModelPriceIndex, modelId: string): ModelPriceRate | null {
+  return resolveModelPrice(index, modelId, () => null);
+}
+
+export function resolveModelPrice(
+  index: ModelPriceIndex,
+  modelId: string,
+  override: (modelId: string) => ModelPriceRate | null,
+): ModelPriceRate | null {
+  const manual = override(modelId);
+  if (manual) {
+    return manual;
+  }
+  const direct = lookupIndexedPrice(index, modelId);
+  if (direct) {
+    return direct;
+  }
+  const derived = splitPriceSuffix(modelId);
+  if (!derived) {
+    return null;
+  }
+  const baseOverride = override(derived.base);
+  const base =
+    baseOverride && baseOverride.perRequestNano == null ? baseOverride : lookupIndexedPrice(index, derived.base);
+  if (!base) {
+    return null;
+  }
+  if (!derived.fast) {
+    return base;
+  }
+  const inputNanoPerMillion = base.inputNanoPerMillion * 2;
+  const outputNanoPerMillion = base.outputNanoPerMillion * 2;
+  if (!Number.isSafeInteger(inputNanoPerMillion) || !Number.isSafeInteger(outputNanoPerMillion)) {
+    return null;
+  }
+  return { inputNanoPerMillion, outputNanoPerMillion };
+}
+
+const SAME_PRICE_SEGMENTS: Record<string, true> = {
+  low: true,
+  medium: true,
+  high: true,
+  xhigh: true,
+  max: true,
+  thinking: true,
+};
+
+function splitPriceSuffix(modelId: string): { base: string; fast: boolean } | null {
+  if (modelId.includes("/")) {
+    return null;
+  }
+  const parts = modelId.split("-");
+  let end = parts.length;
+  let fast = false;
+  let stripped = false;
+  while (end > 1) {
+    const segment = parts[end - 1] ?? "";
+    if (segment === "fast") {
+      fast = true;
+      end -= 1;
+      stripped = true;
+      continue;
+    }
+    if (SAME_PRICE_SEGMENTS[segment]) {
+      end -= 1;
+      stripped = true;
+      continue;
+    }
+    break;
+  }
+  if (!stripped || end < 1) {
+    return null;
+  }
+  return { base: parts.slice(0, end).join("-"), fast };
+}
+
+function lookupIndexedPrice(index: ModelPriceIndex, modelId: string): ModelPriceRate | null {
   const exact = index.byId.get(modelId);
   if (exact) {
     return { ...exact };
@@ -128,10 +205,10 @@ export function createModelPriceCatalog(options: CatalogOptions): ModelPriceCata
 
   return {
     get ready() {
-      return ready;
+      return ready || options.store.listModelPriceOverrides().length > 0;
     },
     lookup(modelId: string) {
-      return lookupModelPrice(index, modelId);
+      return resolveModelPrice(index, modelId, (id) => options.store.getModelPriceOverride(id));
     },
     async start() {
       if (started) {

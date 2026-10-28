@@ -10,7 +10,7 @@ import {
 } from "./endpoints.js";
 import { decryptSecret, encryptSecret, loadOrCreateCredentialKey } from "./crypto.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
-import { asNano, chargeNano, formatUsd, parseUsdToNano, sqlInteger } from "./money.js";
+import { asNano, chargeNano, formatUsd, parseRateUsdToNano, parseUsdToNano, sqlInteger } from "./money.js";
 
 export type KeepaliveStatus = "idle" | "ok" | "failed" | "needs_reauth";
 
@@ -258,6 +258,8 @@ export type LedgerEntry = {
 
 export type UserModelChoice = { mode: "all" } | { mode: "only"; modelIds: string[] };
 
+export type UserProviderChoice = { mode: "all" } | { mode: "only"; providerIds: string[] };
+
 export type UserUsageRequest = {
   id: string;
   startedAt: string;
@@ -329,6 +331,7 @@ type LkgpRecord = {
 
 // A row with this id marks an explicit empty allow-list. No rows means follow every published model.
 const EMPTY_MODEL_SELECTION = "";
+const EMPTY_PROVIDER_SELECTION = "";
 
 type ConnectionRow = {
   id: string;
@@ -898,13 +901,25 @@ export class AdminStore {
     }));
   }
 
-  listPublicCatalog(): { object: "list"; data: PublicModel[] } {
-    const grouped = this.groupPublishedMembers(this.listPublishedMembers());
+  listPublicCatalog(providerIds?: readonly string[] | null): { object: "list"; data: PublicModel[] } {
+    let members = this.listPublishedMembers();
+    if (providerIds) {
+      const allowed = new Set(providerIds);
+      members = members.filter((member) => allowed.has(member.providerId));
+    }
+    const grouped = this.groupPublishedMembers(members);
     const data: PublicModel[] = [];
     for (const modelId of [...grouped.keys()].sort()) {
       data.push(this.toPublicModel(modelId, grouped.get(modelId) ?? []));
     }
     return { object: "list", data };
+  }
+
+  listConnectionProviderIds(): string[] {
+    const rows = this.db
+      .prepare("SELECT DISTINCT provider_id FROM connections ORDER BY provider_id")
+      .all() as Array<{ provider_id: string }>;
+    return rows.map((row) => row.provider_id);
   }
 
   getAdvertisedEndpointTypes(providerId: string): ProxyEndpointType[] {
@@ -1409,10 +1424,12 @@ export class AdminStore {
     outputTokens: number;
     inputNanoPerMillion: number;
     outputNanoPerMillion: number;
+    perRequestNano?: number;
   }): void {
     const charge =
       chargeNano(input.inputTokens, input.inputNanoPerMillion) +
-      chargeNano(input.outputTokens, input.outputNanoPerMillion);
+      chargeNano(input.outputTokens, input.outputNanoPerMillion) +
+      asNano(input.perRequestNano);
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1511,6 +1528,107 @@ export class AdminStore {
     };
   }
 
+  listModelPriceOverrides(): Array<{
+    modelId: string;
+    inputNanoPerMillion: number;
+    outputNanoPerMillion: number;
+    perRequestNano: number | null;
+    updatedAt: string;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT model_id, input_nano_per_million, output_nano_per_million, per_request_nano, updated_at
+         FROM model_price_overrides ORDER BY model_id`,
+      )
+      .all() as Array<{
+      model_id: string;
+      input_nano_per_million: number | bigint;
+      output_nano_per_million: number | bigint;
+      per_request_nano: number | bigint | null;
+      updated_at: string;
+    }>;
+    return rows.map((row) => ({
+      modelId: row.model_id,
+      inputNanoPerMillion: numberFrom(row.input_nano_per_million),
+      outputNanoPerMillion: numberFrom(row.output_nano_per_million),
+      perRequestNano: row.per_request_nano == null ? null : numberFrom(row.per_request_nano),
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  getModelPriceOverride(modelId: string): {
+    inputNanoPerMillion: number;
+    outputNanoPerMillion: number;
+    perRequestNano?: number;
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT input_nano_per_million, output_nano_per_million, per_request_nano
+         FROM model_price_overrides WHERE model_id = ?`,
+      )
+      .get(modelId) as
+      | {
+          input_nano_per_million: number | bigint;
+          output_nano_per_million: number | bigint;
+          per_request_nano: number | bigint | null;
+        }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    if (row.per_request_nano != null) {
+      return {
+        inputNanoPerMillion: 0,
+        outputNanoPerMillion: 0,
+        perRequestNano: numberFrom(row.per_request_nano),
+      };
+    }
+    return {
+      inputNanoPerMillion: numberFrom(row.input_nano_per_million),
+      outputNanoPerMillion: numberFrom(row.output_nano_per_million),
+    };
+  }
+
+  setModelPriceOverride(
+    modelId: string,
+    inputUsdPerMillion: string,
+    outputUsdPerMillion: string,
+    usdPerRequest?: string | null,
+  ): void {
+    const id = modelId.trim();
+    if (!id || id.length > 200 || /\s/.test(id)) {
+      throw Object.assign(new Error("model id is invalid"), { statusCode: 400 });
+    }
+    const perRequest = usdPerRequest?.trim() ? parseRateUsdToNano(usdPerRequest) : null;
+    const input = perRequest == null ? parseRateUsdToNano(inputUsdPerMillion) : 0n;
+    const output = perRequest == null ? parseRateUsdToNano(outputUsdPerMillion) : 0n;
+    this.db
+      .prepare(
+        `INSERT INTO model_price_overrides (
+           model_id, input_nano_per_million, output_nano_per_million, per_request_nano, updated_at
+         ) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(model_id) DO UPDATE SET
+           input_nano_per_million = excluded.input_nano_per_million,
+           output_nano_per_million = excluded.output_nano_per_million,
+           per_request_nano = excluded.per_request_nano,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        id,
+        sqlInteger(input),
+        sqlInteger(output),
+        perRequest == null ? null : sqlInteger(perRequest),
+        new Date().toISOString(),
+      );
+  }
+
+  deleteModelPriceOverride(modelId: string): void {
+    const result = this.db.prepare("DELETE FROM model_price_overrides WHERE model_id = ?").run(modelId);
+    if (Number(result.changes) === 0) {
+      throw Object.assign(new Error("model price not found"), { statusCode: 404 });
+    }
+  }
+
   usageForUser(userId: string): UserUsage {
     const user = this.requireUser(userId);
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -1585,7 +1703,10 @@ export class AdminStore {
       seen[trimmed] = true;
       unique.push(trimmed);
     }
-    const published = new Set(this.listPublicCatalog().data.map((model) => model.id));
+    const providers = this.userProviderChoice(userId);
+    const published = new Set(
+      this.listPublicCatalog(providers.mode === "only" ? providers.providerIds : null).data.map((model) => model.id),
+    );
     for (const modelId of unique) {
       if (!published.has(modelId)) {
         throw Object.assign(new Error("unknown model"), { statusCode: 400 });
@@ -1600,6 +1721,64 @@ export class AdminStore {
       } else {
         for (const modelId of unique) {
           insert.run(userId, modelId);
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  userProviderChoice(userId: string): UserProviderChoice {
+    this.requireUser(userId);
+    const rows = this.db
+      .prepare("SELECT provider_id FROM user_providers WHERE user_id = ? ORDER BY provider_id")
+      .all(userId) as Array<{ provider_id: string }>;
+    if (rows.length === 0) {
+      return { mode: "all" };
+    }
+    return {
+      mode: "only",
+      providerIds: rows.map((row) => row.provider_id).filter((providerId) => providerId !== EMPTY_PROVIDER_SELECTION),
+    };
+  }
+
+  setUserProviders(userId: string, providerIds: string[] | null): void {
+    this.requireUser(userId);
+    if (providerIds === null) {
+      this.db.prepare("DELETE FROM user_providers WHERE user_id = ?").run(userId);
+      return;
+    }
+    if (!Array.isArray(providerIds)) {
+      throw Object.assign(new Error("providerIds is required"), { statusCode: 400 });
+    }
+    const known = new Set(this.listConnectionProviderIds());
+    const unique: string[] = [];
+    const seen: Record<string, true> = {};
+    for (const providerId of providerIds) {
+      if (typeof providerId !== "string") {
+        throw Object.assign(new Error("unknown provider"), { statusCode: 400 });
+      }
+      const trimmed = providerId.trim();
+      if (!trimmed || !known.has(trimmed)) {
+        throw Object.assign(new Error("unknown provider"), { statusCode: 400 });
+      }
+      if (seen[trimmed]) {
+        continue;
+      }
+      seen[trimmed] = true;
+      unique.push(trimmed);
+    }
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM user_providers WHERE user_id = ?").run(userId);
+      const insert = this.db.prepare("INSERT INTO user_providers (user_id, provider_id) VALUES (?, ?)");
+      if (unique.length === 0) {
+        insert.run(userId, EMPTY_PROVIDER_SELECTION);
+      } else {
+        for (const providerId of unique) {
+          insert.run(userId, providerId);
         }
       }
       this.db.exec("COMMIT");
@@ -2223,6 +2402,12 @@ function migrateUsers(db: DatabaseSync): void {
       output_nano_per_million INTEGER NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS model_price_overrides (
+      model_id TEXT PRIMARY KEY,
+      input_nano_per_million INTEGER NOT NULL,
+      output_nano_per_million INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS model_price_meta (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       source TEXT NOT NULL,
@@ -2232,6 +2417,10 @@ function migrateUsers(db: DatabaseSync): void {
   const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
   if (!userColumns.some((column) => column.name === "balance_nano")) {
     db.exec("ALTER TABLE users ADD COLUMN balance_nano INTEGER NOT NULL DEFAULT 0");
+  }
+  const overrideColumns = db.prepare("PRAGMA table_info(model_price_overrides)").all() as Array<{ name: string }>;
+  if (!overrideColumns.some((column) => column.name === "per_request_nano")) {
+    db.exec("ALTER TABLE model_price_overrides ADD COLUMN per_request_nano INTEGER");
   }
   const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
   if (!apiKeyColumns.some((column) => column.name === "user_id")) {
@@ -2248,6 +2437,13 @@ function migrateUsers(db: DatabaseSync): void {
       user_id TEXT NOT NULL REFERENCES users(id),
       model_id TEXT NOT NULL,
       PRIMARY KEY (user_id, model_id)
+    );
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_providers (
+      user_id TEXT NOT NULL REFERENCES users(id),
+      provider_id TEXT NOT NULL,
+      PRIMARY KEY (user_id, provider_id)
     );
   `);
 }
