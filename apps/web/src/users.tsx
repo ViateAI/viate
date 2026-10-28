@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, isApiError, type GatewayUser, type TokenLedgerEntry } from "./api";
+import { api, isApiError, type GatewayUser, type LedgerEntry } from "./api";
 
 export function UsersPage({ onNotice }: { onNotice: (value: string | null) => void }) {
   const [users, setUsers] = useState<GatewayUser[] | null>(null);
@@ -85,7 +85,7 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
       {users && users.length === 0 ? (
         <div className="empty">
           <strong>No customers</strong>
-          Create one, then grant tokens before their API keys can call /v1.
+          Create one, then add a dollar balance before their API keys can call /v1.
         </div>
       ) : null}
       {users?.map((user) => (
@@ -96,7 +96,7 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
               <StatusBadge tone={user.status === "active" ? "ok" : "warn"}>{user.status}</StatusBadge>
             </div>
             <div className="meta">{user.name}</div>
-            <div className="meta">Balance {formatTokens(user.balanceTokens)} tokens</div>
+            <div className="meta">Balance {user.balanceUsd} USD</div>
             {openId === user.id ? (
               <UserEditor
                 user={user}
@@ -133,7 +133,7 @@ function UserEditor({
   const [nextPassword, setNextPassword] = useState("");
   const [delta, setDelta] = useState("");
   const [note, setNote] = useState("");
-  const [ledger, setLedger] = useState<TokenLedgerEntry[] | null>(null);
+  const [ledger, setLedger] = useState<LedgerEntry[] | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function run(action: () => Promise<void>) {
@@ -173,7 +173,7 @@ function UserEditor({
           disabled={busy}
           onClick={() =>
             void run(async () => {
-              const result = await api<{ ledger: TokenLedgerEntry[] }>(`/api/admin/users/${user.id}/ledger`);
+              const result = await api<{ ledger: LedgerEntry[] }>(`/api/admin/users/${user.id}/ledger`);
               setLedger(result.ledger);
             })
           }
@@ -214,27 +214,26 @@ function UserEditor({
         className="form"
         onSubmit={(event) => {
           event.preventDefault();
-          const parsed = Number(delta);
           void run(async () => {
-            await api(`/api/admin/users/${user.id}/tokens`, {
+            await api(`/api/admin/users/${user.id}/balance`, {
               method: "POST",
-              body: JSON.stringify({ delta: parsed, note: note.trim() ? note.trim() : undefined }),
+              body: JSON.stringify({ usd: delta.trim(), note: note.trim() ? note.trim() : undefined }),
             });
             setDelta("");
             setNote("");
-            const result = await api<{ ledger: TokenLedgerEntry[] }>(`/api/admin/users/${user.id}/ledger`);
+            const result = await api<{ ledger: LedgerEntry[] }>(`/api/admin/users/${user.id}/ledger`);
             setLedger(result.ledger);
-            onNotice("Token balance updated.");
+            onNotice("Dollar balance updated.");
           });
         }}
       >
         <label>
-          Grant or adjust tokens
+          Grant or adjust dollars
           <input
-            inputMode="numeric"
+            inputMode="decimal"
             value={delta}
             onChange={(event) => setDelta(event.target.value)}
-            placeholder="1000 or -100"
+            placeholder="10.00 or -1.50"
             required
           />
         </label>
@@ -243,7 +242,7 @@ function UserEditor({
           <input value={note} onChange={(event) => setNote(event.target.value)} maxLength={200} />
         </label>
         <button type="submit" disabled={busy || !delta.trim()}>
-          Apply tokens
+          Apply dollars
         </button>
       </form>
       {ledger ? (
@@ -254,11 +253,11 @@ function UserEditor({
             <div key={entry.id} className="meta-list">
               <div>
                 <dt>{entry.reason}</dt>
-                <dd>{formatTokens(entry.delta)}</dd>
+                <dd>{entry.deltaUsd} USD</dd>
               </div>
               <div>
                 <dt>Balance</dt>
-                <dd>{formatTokens(entry.balanceAfter)}</dd>
+                <dd>{entry.balanceAfterUsd} USD</dd>
               </div>
               <div>
                 <dt>When</dt>
@@ -280,8 +279,4 @@ function UserEditor({
 
 function StatusBadge({ children, tone = "neutral" }: { children: string; tone?: "neutral" | "ok" | "warn" }) {
   return <span className={`badge ${tone}`}>{children}</span>;
-}
-
-function formatTokens(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
 }

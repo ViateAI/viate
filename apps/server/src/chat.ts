@@ -18,11 +18,16 @@ import {
   type RequestLogRecorder,
 } from "./request-logs.js";
 import { createKeepaliveScheduler } from "./keepalive.js";
-import type { AdminStore, StoredApiKey } from "./store.js";
+import type { AdminStore, PublicModel, StoredApiKey } from "./store.js";
 import { tapExchange } from "./usage-frames.js";
 import { assertAudioRequest, loggedRequestBody, loggedResponseBody } from "./audio.js";
 
 export type ClientAuthenticator = (secret: string | undefined) => StoredApiKey | null;
+
+export type ModelPriceLookup = {
+  lookup(modelId: string): { inputNanoPerMillion: number; outputNanoPerMillion: number } | null;
+  ready: boolean;
+};
 
 export type ChatRouteOptions = {
   providers: ProviderHandler[];
@@ -30,6 +35,7 @@ export type ChatRouteOptions = {
   store?: AdminStore;
   requestLogs?: RequestLogRecorder;
   onUpstreamAuthFailure?: (connectionId: string) => void;
+  modelPrices?: ModelPriceLookup;
 };
 
 type Capability =
@@ -135,15 +141,19 @@ async function dispatch(
   const billUserId = apiKey?.userId ?? null;
   let admitted = false;
   let billRequestId: string | null = null;
+  let billedRates: { inputNanoPerMillion: number; outputNanoPerMillion: number } | null = null;
   const settle = (inputTokens: number, outputTokens: number) => {
     if (!admitted || !billRequestId || !billUserId || !options.store) {
       return;
     }
+    const rates = billedRates;
     options.store.settleUsage({
       userId: billUserId,
       requestId: billRequestId,
       inputTokens,
       outputTokens,
+      inputNanoPerMillion: rates?.inputNanoPerMillion ?? 0,
+      outputNanoPerMillion: rates?.outputNanoPerMillion ?? 0,
     });
   };
 
@@ -153,7 +163,7 @@ async function dispatch(
         options.store.assertUserActive(billUserId);
       }
       cleanup();
-      return reply.code(200).send(options.store?.listPublicCatalog() ?? { object: "list", data: [] });
+      return reply.code(200).send(publicCatalogFor(options.store, billUserId));
     }
     if (!options.store) {
       cleanup();
@@ -161,6 +171,30 @@ async function dispatch(
     }
     if (capability === "audioTranscriptions" || capability === "audioSpeech") {
       assertAudioRequest(capability, request.body);
+    }
+    if (billUserId && options.store) {
+      const choice = options.store.userModelChoice(billUserId);
+      if (choice.mode === "only") {
+        const requested = requestModelFrom(request.body);
+        if (requested && !choice.modelIds.includes(requested)) {
+          throw Object.assign(new Error("model not available"), { statusCode: 403 });
+    }
+    }
+      const model = requestModelFrom(request.body);
+      if (model) {
+        const catalog = options.modelPrices;
+        if (!catalog?.ready) {
+          throw Object.assign(new Error("model prices unavailable"), { statusCode: 503 });
+        }
+        const rate = catalog.lookup(model);
+        if (!rate) {
+          throw Object.assign(new Error("model price unavailable"), { statusCode: 400 });
+        }
+        billedRates = {
+          inputNanoPerMillion: rate.inputNanoPerMillion,
+          outputNanoPerMillion: rate.outputNanoPerMillion,
+        };
+      }
     }
     if (billUserId && options.store) {
       options.store.admitUser(billUserId);
@@ -275,6 +309,25 @@ function clientSecretFrom(request: FastifyRequest): string | undefined {
   }
   const match = /^Bearer\s+(\S+)/i.exec(value);
   return match?.[1];
+}
+
+function publicCatalogFor(
+  store: AdminStore | undefined,
+  userId: string | null,
+): { object: "list"; data: PublicModel[] } {
+  if (!store) {
+    return { object: "list", data: [] };
+  }
+  const catalog = store.listPublicCatalog();
+  if (!userId) {
+    return catalog;
+  }
+  const choice = store.userModelChoice(userId);
+  if (choice.mode === "all") {
+    return catalog;
+  }
+  const allowed = new Set(choice.modelIds);
+  return { object: "list", data: catalog.data.filter((model) => allowed.has(model.id)) };
 }
 
 function sendUpstream(reply: FastifyReply, upstream: HttpExchange): FastifyReply {

@@ -545,40 +545,29 @@ describe("admin API", () => {
     assert.equal(store.getConnection(id)?.displayLabel, "oauth.example");
   });
 
-  it("creates client API keys once, lists prefixes only, and revokes them", async () => {
+  it("lists client API key prefixes, revokes them, and does not issue keys", async () => {
     const session = await login(app, "correct-horse");
-    const created = await authed(app, session, {
-      method: "POST",
-      url: "/api/admin/api-keys",
-      payload: { name: "codex" },
-    });
-    assert.equal(created.statusCode, 200);
-    const body = created.json() as {
-      apiKey: { id: string; name: string; prefix: string; secret?: string };
-      secret: string;
-    };
-    assert.equal(body.apiKey.name, "codex");
-    assert.match(body.secret, /^viate_/);
-    assert.equal(body.apiKey.secret, undefined);
-    assert.equal(JSON.stringify(body.apiKey).includes(body.secret), false);
+    const created = store.createApiKey("codex");
+    assert.match(created.secret, /^viate_/);
 
     const listed = await authed(app, session, { method: "GET", url: "/api/admin/api-keys" });
     assert.equal(listed.statusCode, 200);
     const keys = listed.json().apiKeys as Array<{ id: string; prefix: string }>;
     assert.equal(keys.length, 1);
-    assert.equal(keys[0]?.id, body.apiKey.id);
-    assert.equal(JSON.stringify(listed.json()).includes(body.secret), false);
+    assert.equal(keys[0]?.id, created.apiKey.id);
+    assert.equal(keys[0]?.prefix, created.apiKey.prefix);
+    assert.equal(JSON.stringify(listed.json()).includes(created.secret), false);
 
-    const missingName = await authed(app, session, {
+    const issued = await authed(app, session, {
       method: "POST",
       url: "/api/admin/api-keys",
-      payload: {},
+      payload: { name: "codex" },
     });
-    assert.equal(missingName.statusCode, 400);
+    assert.equal(issued.statusCode, 404);
 
     const revoked = await authed(app, session, {
       method: "DELETE",
-      url: `/api/admin/api-keys/${body.apiKey.id}`,
+      url: `/api/admin/api-keys/${created.apiKey.id}`,
     });
     assert.equal(revoked.statusCode, 200);
 

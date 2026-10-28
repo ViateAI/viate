@@ -146,16 +146,16 @@ export type GatewayUser = {
   email: string;
   name: string;
   status: "active" | "disabled";
-  balanceTokens: number;
+  balanceUsd: string;
   createdAt: string;
   updatedAt: string;
 };
 
-export type TokenLedgerEntry = {
+export type LedgerEntry = {
   id: string;
   userId: string;
-  delta: number;
-  balanceAfter: number;
+  deltaUsd: string;
+  balanceAfterUsd: string;
   reason: "grant" | "adjust" | "usage";
   requestId: string | null;
   note: string | null;

@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastif
 import type { ProviderHandler } from "@viateai/sdk";
 import type { PluginLoadFailure } from "@viateai/plugin-manager";
 import { registerAdminRoutes, type PluginOperator } from "./admin.js";
-import { registerChatRoute } from "./chat.js";
+import { registerChatRoute, type ModelPriceLookup } from "./chat.js";
 import { registerAdminStatic } from "./static.js";
 import { registerPortalRoutes } from "./portal.js";
 import { createSubscriptionScheduler } from "./subscription.js";
@@ -26,6 +26,7 @@ export type BuildAppOptions = {
   adminEnabled?: boolean;
   adminUiDist?: string | null;
   sessions?: SessionStore;
+  modelPrices?: ModelPriceLookup;
 };
 
 export type App = FastifyInstance;
@@ -108,6 +109,7 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
     authenticateClient: store ? (secret) => store.verifyApiKey(secret) : undefined,
     store,
     requestLogs,
+    modelPrices: options.modelPrices,
   });
 
   if (options.pluginManager && store) {

@@ -327,10 +327,10 @@ function pageDescription(page: Page): string {
     return "Sync inventory per connection. Same ids publish as one aggregated /v1/models entry.";
   }
   if (page === "users") {
-    return "Provision customers and grant tokens. Customers sign in at /portal.";
+    return "Provision customers and grant a dollar balance. Customers sign in at /portal.";
   }
   if (page === "api-keys") {
-    return "Issue hashed client keys for /v1. Optionally bind a key to a customer. Secrets are shown once.";
+    return "Customers create keys at /portal. This page lists prefixes and revokes leaked keys.";
   }
   if (page === "requests") {
     return "Per-request cache, first token, TPS, and token usage. Statistics use the same filters. Detail is kept for 7 days.";
@@ -586,11 +586,7 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
 function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void }) {
   const [keys, setKeys] = useState<ClientApiKey[] | null>(null);
   const [users, setUsers] = useState<GatewayUser[]>([]);
-  const [name, setName] = useState("");
-  const [userId, setUserId] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState<{ name: string; secret: string } | null>(null);
   const [confirm, setConfirm] = useState<ClientApiKey | null>(null);
 
   async function refresh() {
@@ -608,71 +604,18 @@ function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void })
 
   return (
     <section className="stack">
-      <form
-        className="panel form"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          setBusy(true);
-          setError(null);
-          onNotice(null);
-          try {
-            const result = await api<{ apiKey: ClientApiKey; secret: string }>("/api/admin/api-keys", {
-              method: "POST",
-              body: JSON.stringify(userId ? { name, userId } : { name }),
-            });
-            setName("");
-            setUserId("");
-            setRevealed({ name: result.apiKey.name, secret: result.secret });
-            await refresh();
-            onNotice("Copy this key now. It will not be shown again.");
-          } catch (err) {
-            setError(isApiError(err) ? err.message : "create failed");
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
+      <article className="panel">
         <div className="panel-header">
-          <h2>Create API key</h2>
-          <p className="meta">Clients send <code>Authorization: Bearer</code> or <code>x-api-key</code>. The secret is shown once.</p>
+          <h2>Client keys</h2>
+          <p className="meta">Customers create keys at /portal. Revoke a leaked key here. Secrets are not shown again.</p>
         </div>
-        <label>
-          Key name
-          <input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="codex"
-            required
-          />
-        </label>
-        <label>
-          Customer
-          <select value={userId} onChange={(event) => setUserId(event.target.value)}>
-            <option value="">Unbound</option>
-            {users.map((user) => (
-              <option key={user.id} value={user.id}>
-                {user.email}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button className="primary" type="submit" disabled={busy || !name.trim()}>
-          {busy ? "Creating…" : "Create API key"}
-        </button>
-      </form>
-      {revealed ? (
-        <div className="banner ok secret-row" role="status">
-          <div>
-            Copy {revealed.name} now: <code>{revealed.secret}</code>
-          </div>
-        </div>
-      ) : null}
+      </article>
       {error ? <p className="banner error" role="alert">{error}</p> : null}
       {keys === null ? <p className="empty">Loading API keys…</p> : null}
       {keys && keys.length === 0 ? (
         <div className="empty">
           <strong>No client API keys</strong>
-          Create one before calling /v1/chat/completions.
+          Customers create keys at /portal.
         </div>
       ) : null}
       {keys?.map((key) => (

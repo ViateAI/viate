@@ -3,12 +3,21 @@ import { createApp, registerApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { pluginLoggerFromFastify } from "./plugin-log.js";
 import { AdminStore } from "./store.js";
+import { createModelPriceCatalog } from "./model-prices.js";
 
 const config = loadConfig();
 const manager = new PluginManager({ dataDir: config.dataDir });
 const app = createApp();
 const loaded = await loadActivePlugins(manager, { log: pluginLoggerFromFastify(app.log) });
 const store = await AdminStore.open(config.dataDir);
+const modelPrices = createModelPriceCatalog({
+  store,
+  log: {
+    error(obj: unknown, msg?: string) {
+      app.log.error(obj, msg);
+    },
+  },
+});
 await registerApp(app, {
   providers: loaded.plugins.map((plugin) => plugin.provider),
   pluginFailures: loaded.failures,
@@ -17,7 +26,9 @@ await registerApp(app, {
   adminPassword: config.adminPassword,
   adminEnabled: config.adminEnabled,
   adminUiDist: config.adminUiDist,
+  modelPrices,
 });
+await modelPrices.start();
 
 let shuttingDown = false;
 
@@ -30,6 +41,7 @@ async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, "shutting down");
 
   try {
+    modelPrices.stop();
     await app.close();
     store.close();
     process.exit(0);
@@ -58,6 +70,7 @@ try {
   );
 } catch (error) {
   app.log.error({ err: error }, "failed to listen");
+  modelPrices.stop();
   store.close();
   process.exit(1);
 }

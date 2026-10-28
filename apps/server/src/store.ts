@@ -10,6 +10,7 @@ import {
 } from "./endpoints.js";
 import { decryptSecret, encryptSecret, loadOrCreateCredentialKey } from "./crypto.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
+import { asNano, chargeNano, formatUsd, parseUsdToNano, sqlInteger } from "./money.js";
 
 export type KeepaliveStatus = "idle" | "ok" | "failed" | "needs_reauth";
 
@@ -239,7 +240,7 @@ export type GatewayUser = {
   email: string;
   name: string;
   status: "active" | "disabled";
-  balanceTokens: number;
+  balanceUsd: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -247,13 +248,15 @@ export type GatewayUser = {
 export type LedgerEntry = {
   id: string;
   userId: string;
-  delta: number;
-  balanceAfter: number;
+  deltaUsd: string;
+  balanceAfterUsd: string;
   reason: "grant" | "adjust" | "usage";
   requestId: string | null;
   note: string | null;
   createdAt: string;
 };
+
+export type UserModelChoice = { mode: "all" } | { mode: "only"; modelIds: string[] };
 
 export type UserUsageRequest = {
   id: string;
@@ -317,12 +320,15 @@ export type AdminPublishedModel = {
   providers: AdminPublishedProvider[];
 };
 
-export type LkgpRecord = {
+type LkgpRecord = {
   modelKey: string;
   providerId: string;
   connectionId: string;
   updatedAt: string;
 };
+
+// A row with this id marks an explicit empty allow-list. No rows means follow every published model.
+const EMPTY_MODEL_SELECTION = "";
 
 type ConnectionRow = {
   id: string;
@@ -1241,7 +1247,7 @@ export class AdminStore {
       this.db
         .prepare(
           `INSERT INTO users (
-            id, email, name, password_hash, status, balance_tokens, inflight, created_at, updated_at
+            id, email, name, password_hash, status, balance_nano, inflight, created_at, updated_at
           ) VALUES (?, ?, ?, ?, 'active', 0, 0, ?, ?)`,
         )
         .run(id, email, name, hashPassword(password), now, now);
@@ -1311,10 +1317,8 @@ export class AdminStore {
       .run(hashPassword(next), new Date().toISOString(), id);
   }
 
-  grantTokens(userId: string, delta: number, note?: string | null): { user: GatewayUser; entry: LedgerEntry } {
-    if (!Number.isSafeInteger(delta) || delta === 0) {
-      throw Object.assign(new Error("delta must be a non-zero integer"), { statusCode: 400 });
-    }
+  grantUsd(userId: string, usd: string, note?: string | null): { user: GatewayUser; entry: LedgerEntry } {
+    const delta = parseUsdToNano(usd);
     const cleanNote = cleanLedgerNote(note);
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1322,29 +1326,31 @@ export class AdminStore {
       if (!row) {
         throw Object.assign(new Error("user not found"), { statusCode: 404 });
       }
-      const balance = numberFrom(row.balance_tokens);
-      if (delta < 0 && balance + delta < 0) {
+      const balance = asNano(row.balance_nano);
+      const balanceAfter = balance + delta;
+      if (delta < 0n && balanceAfter < 0n) {
         throw Object.assign(new Error("balance cannot be negative"), { statusCode: 400 });
       }
-      const balanceAfter = balance + delta;
       const now = new Date().toISOString();
-      const reason = delta > 0 ? "grant" : "adjust";
+      const reason = delta > 0n ? "grant" : "adjust";
       const id = crypto.randomUUID();
-      this.db.prepare("UPDATE users SET balance_tokens = ?, updated_at = ? WHERE id = ?").run(balanceAfter, now, userId);
+      this.db
+        .prepare("UPDATE users SET balance_nano = ?, updated_at = ? WHERE id = ?")
+        .run(sqlInteger(balanceAfter), now, userId);
       this.db
         .prepare(
           `INSERT INTO token_ledger (id, user_id, delta, balance_after, reason, request_id, note, created_at)
            VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
         )
-        .run(id, userId, delta, balanceAfter, reason, cleanNote, now);
+        .run(id, userId, sqlInteger(delta), sqlInteger(balanceAfter), reason, cleanNote, now);
       this.db.exec("COMMIT");
       return {
-        user: this.toUser({ ...row, balance_tokens: balanceAfter, updated_at: now }),
+        user: this.toUser({ ...row, balance_nano: sqlInteger(balanceAfter), updated_at: now }),
         entry: {
           id,
           userId,
-          delta,
-          balanceAfter,
+          deltaUsd: formatUsd(delta),
+          balanceAfterUsd: formatUsd(balanceAfter),
           reason,
           requestId: null,
           note: cleanNote,
@@ -1380,7 +1386,7 @@ export class AdminStore {
     const result = this.db
       .prepare(
         `UPDATE users SET inflight = inflight + 1, updated_at = ?
-         WHERE id = ? AND status = 'active' AND balance_tokens > inflight`,
+         WHERE id = ? AND status = 'active' AND balance_nano > 0 AND inflight < 8`,
       )
       .run(now, userId);
     if (Number(result.changes) !== 0) {
@@ -1393,17 +1399,26 @@ export class AdminStore {
     if (row.status !== "active") {
       throw Object.assign(new Error("user disabled"), { statusCode: 403 });
     }
-    throw Object.assign(new Error("insufficient token balance"), { statusCode: 402 });
+    throw Object.assign(new Error("insufficient balance"), { statusCode: 402 });
   }
 
-  settleUsage(input: { userId: string; requestId: string; inputTokens: number; outputTokens: number }): void {
-    const tokens = countedTokens(input.inputTokens) + countedTokens(input.outputTokens);
+  settleUsage(input: {
+    userId: string;
+    requestId: string;
+    inputTokens: number;
+    outputTokens: number;
+    inputNanoPerMillion: number;
+    outputNanoPerMillion: number;
+  }): void {
+    const charge =
+      chargeNano(input.inputTokens, input.inputNanoPerMillion) +
+      chargeNano(input.outputTokens, input.outputNanoPerMillion);
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const inserted = this.db
         .prepare("INSERT OR IGNORE INTO user_usage_settlements (request_id, user_id, tokens, created_at) VALUES (?, ?, ?, ?)")
-        .run(input.requestId, input.userId, tokens, now);
+        .run(input.requestId, input.userId, sqlInteger(charge), now);
       if (Number(inserted.changes) === 0) {
         this.db.exec("COMMIT");
         return;
@@ -1412,14 +1427,14 @@ export class AdminStore {
         .prepare(
           `UPDATE users
            SET inflight = CASE WHEN inflight > 0 THEN inflight - 1 ELSE 0 END,
-               balance_tokens = balance_tokens - ?,
+               balance_nano = balance_nano - ?,
                updated_at = ?
            WHERE id = ?`,
         )
-        .run(tokens, now, input.userId);
-      if (tokens > 0) {
-        const row = this.db.prepare("SELECT balance_tokens FROM users WHERE id = ?").get(input.userId) as
-          | { balance_tokens: number | bigint }
+        .run(sqlInteger(charge), now, input.userId);
+      if (charge > 0n) {
+        const row = this.db.prepare("SELECT balance_nano FROM users WHERE id = ?").get(input.userId) as
+          | { balance_nano: number | bigint }
           | undefined;
         if (row) {
           this.db
@@ -1427,7 +1442,14 @@ export class AdminStore {
               `INSERT INTO token_ledger (id, user_id, delta, balance_after, reason, request_id, note, created_at)
                VALUES (?, ?, ?, ?, 'usage', ?, NULL, ?)`,
             )
-            .run(crypto.randomUUID(), input.userId, -tokens, numberFrom(row.balance_tokens), input.requestId, now);
+            .run(
+              crypto.randomUUID(),
+              input.userId,
+              sqlInteger(-charge),
+              sqlInteger(asNano(row.balance_nano)),
+              input.requestId,
+              now,
+            );
         }
       }
       this.db.exec("COMMIT");
@@ -1435,6 +1457,58 @@ export class AdminStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  replaceModelPrices(
+    rows: Array<{ modelId: string; inputNanoPerMillion: number; outputNanoPerMillion: number }>,
+    fetchedAt: string,
+    source = "https://models.dev/api.json",
+  ): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM model_prices").run();
+      const insert = this.db.prepare(
+        `INSERT INTO model_prices (model_id, input_nano_per_million, output_nano_per_million, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      );
+      for (const row of rows) {
+        insert.run(row.modelId, row.inputNanoPerMillion, row.outputNanoPerMillion, fetchedAt);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO model_price_meta (id, source, fetched_at) VALUES (1, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET source = excluded.source, fetched_at = excluded.fetched_at`,
+        )
+        .run(source, fetchedAt);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listModelPrices(): {
+    fetchedAt: string | null;
+    rows: Array<{ modelId: string; inputNanoPerMillion: number; outputNanoPerMillion: number }>;
+  } {
+    const meta = this.db.prepare("SELECT fetched_at FROM model_price_meta WHERE id = 1").get() as
+      | { fetched_at: string }
+      | undefined;
+    const rows = this.db
+      .prepare("SELECT model_id, input_nano_per_million, output_nano_per_million FROM model_prices")
+      .all() as Array<{
+      model_id: string;
+      input_nano_per_million: number | bigint;
+      output_nano_per_million: number | bigint;
+    }>;
+    return {
+      fetchedAt: meta?.fetched_at ?? null,
+      rows: rows.map((row) => ({
+        modelId: row.model_id,
+        inputNanoPerMillion: numberFrom(row.input_nano_per_million),
+        outputNanoPerMillion: numberFrom(row.output_nano_per_million),
+      })),
+    };
   }
 
   usageForUser(userId: string): UserUsage {
@@ -1470,6 +1544,69 @@ export class AdminStore {
         outputTokens: row.output_tokens,
       })),
     };
+  }
+
+  userModelChoice(userId: string): UserModelChoice {
+    this.requireUser(userId);
+    const rows = this.db
+      .prepare("SELECT model_id FROM user_models WHERE user_id = ? ORDER BY model_id")
+      .all(userId) as Array<{ model_id: string }>;
+    if (rows.length === 0) {
+      return { mode: "all" };
+    }
+    return {
+      mode: "only",
+      modelIds: rows.map((row) => row.model_id).filter((modelId) => modelId !== EMPTY_MODEL_SELECTION),
+    };
+  }
+
+  setUserModels(userId: string, modelIds: string[] | null): void {
+    this.requireUser(userId);
+    if (modelIds === null) {
+      this.db.prepare("DELETE FROM user_models WHERE user_id = ?").run(userId);
+      return;
+    }
+    if (!Array.isArray(modelIds)) {
+      throw Object.assign(new Error("modelIds is required"), { statusCode: 400 });
+    }
+    const unique: string[] = [];
+    const seen: Record<string, true> = {};
+    for (const modelId of modelIds) {
+      if (typeof modelId !== "string") {
+        throw Object.assign(new Error("unknown model"), { statusCode: 400 });
+      }
+      const trimmed = modelId.trim();
+      if (!trimmed) {
+        throw Object.assign(new Error("unknown model"), { statusCode: 400 });
+      }
+      if (seen[trimmed]) {
+        continue;
+      }
+      seen[trimmed] = true;
+      unique.push(trimmed);
+    }
+    const published = new Set(this.listPublicCatalog().data.map((model) => model.id));
+    for (const modelId of unique) {
+      if (!published.has(modelId)) {
+        throw Object.assign(new Error("unknown model"), { statusCode: 400 });
+      }
+    }
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM user_models WHERE user_id = ?").run(userId);
+      const insert = this.db.prepare("INSERT INTO user_models (user_id, model_id) VALUES (?, ?)");
+      if (unique.length === 0) {
+        insert.run(userId, EMPTY_MODEL_SELECTION);
+      } else {
+        for (const modelId of unique) {
+          insert.run(userId, modelId);
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   addOperationLog(entry: Omit<OperationLog, "id" | "createdAt">): OperationLog {
@@ -1924,7 +2061,7 @@ export class AdminStore {
       email: row.email,
       name: row.name,
       status: row.status === "disabled" ? "disabled" : "active",
-      balanceTokens: numberFrom(row.balance_tokens),
+      balanceUsd: formatUsd(row.balance_nano),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1935,8 +2072,8 @@ export class AdminStore {
     return {
       id: row.id,
       userId: row.user_id,
-      delta: numberFrom(row.delta),
-      balanceAfter: numberFrom(row.balance_after),
+      deltaUsd: formatUsd(row.delta),
+      balanceAfterUsd: formatUsd(row.balance_after),
       reason,
       requestId: row.request_id,
       note: row.note,
@@ -2058,7 +2195,7 @@ function migrateUsers(db: DatabaseSync): void {
       name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active',
-      balance_tokens INTEGER NOT NULL DEFAULT 0,
+      balance_nano INTEGER NOT NULL DEFAULT 0,
       inflight INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -2080,7 +2217,22 @@ function migrateUsers(db: DatabaseSync): void {
       tokens INTEGER NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS model_prices (
+      model_id TEXT PRIMARY KEY,
+      input_nano_per_million INTEGER NOT NULL,
+      output_nano_per_million INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS model_price_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      source TEXT NOT NULL,
+      fetched_at TEXT NOT NULL
+    );
   `);
+  const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+  if (!userColumns.some((column) => column.name === "balance_nano")) {
+    db.exec("ALTER TABLE users ADD COLUMN balance_nano INTEGER NOT NULL DEFAULT 0");
+  }
   const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
   if (!apiKeyColumns.some((column) => column.name === "user_id")) {
     db.exec("ALTER TABLE api_keys ADD COLUMN user_id TEXT REFERENCES users(id)");
@@ -2091,6 +2243,13 @@ function migrateUsers(db: DatabaseSync): void {
     db.exec("ALTER TABLE request_logs ADD COLUMN user_id TEXT");
   }
   db.exec("CREATE INDEX IF NOT EXISTS request_logs_user_started ON request_logs(user_id, started_at DESC)");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_models (
+      user_id TEXT NOT NULL REFERENCES users(id),
+      model_id TEXT NOT NULL,
+      PRIMARY KEY (user_id, model_id)
+    );
+  `);
 }
 
 type SubscriptionUsageRow = {
@@ -2163,7 +2322,7 @@ type UserRow = {
   name: string;
   password_hash: string;
   status: string;
-  balance_tokens: number | bigint;
+  balance_nano: number | bigint;
   inflight: number | bigint;
   created_at: string;
   updated_at: string;
@@ -2223,13 +2382,6 @@ function cleanLedgerNote(note: string | null | undefined): string | null {
     throw Object.assign(new Error("note is too long"), { statusCode: 400 });
   }
   return trimmed;
-}
-
-function countedTokens(value: number): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    return 0;
-  }
-  return value;
 }
 
 const REQUEST_LOG_BREAKDOWN_COLUMNS = `

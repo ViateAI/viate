@@ -5,13 +5,13 @@ import {
   setCsrf,
   type ClientApiKey,
   type GatewayUser,
-  type TokenLedgerEntry,
+  type LedgerEntry,
   type UserUsageRequest,
 } from "./api";
 
 type PortalUsage = {
   user: GatewayUser;
-  ledger: TokenLedgerEntry[];
+  ledger: LedgerEntry[];
   requests: UserUsageRequest[];
 };
 
@@ -171,7 +171,7 @@ function PortalHome({
     onLoggedOut();
   }
 
-  const balance = usage?.user.balanceTokens ?? user.balanceTokens;
+  const balance = usage?.user.balanceUsd ?? user.balanceUsd;
 
   return (
     <main className="main">
@@ -189,12 +189,13 @@ function PortalHome({
       <section className="stack">
         <article className="panel">
           <div className="panel-header">
-            <h2>Token balance</h2>
-            <p className="meta">{formatTokens(balance)} tokens</p>
+            <h2>Balance</h2>
+            <p className="meta">{balance} USD</p>
           </div>
         </article>
         <LedgerPanel ledger={usage?.ledger ?? null} />
         <RequestsPanel requests={usage?.requests ?? null} />
+        <ModelsPanel onError={setError} onNotice={setNotice} />
         <KeysPanel
           keys={keys}
           onError={setError}
@@ -207,7 +208,7 @@ function PortalHome({
   );
 }
 
-function LedgerPanel({ ledger }: { ledger: TokenLedgerEntry[] | null }) {
+function LedgerPanel({ ledger }: { ledger: LedgerEntry[] | null }) {
   return (
     <section className="panel stack">
       <div className="panel-header">
@@ -220,11 +221,11 @@ function LedgerPanel({ ledger }: { ledger: TokenLedgerEntry[] | null }) {
         <div key={entry.id} className="meta-list">
           <div>
             <dt>{entry.reason}</dt>
-            <dd>{formatTokens(entry.delta)}</dd>
+            <dd>{entry.deltaUsd} USD</dd>
           </div>
           <div>
             <dt>Balance</dt>
-            <dd>{formatTokens(entry.balanceAfter)}</dd>
+            <dd>{entry.balanceAfterUsd} USD</dd>
           </div>
           <div>
             <dt>When</dt>
@@ -273,6 +274,105 @@ function RequestsPanel({ requests }: { requests: UserUsageRequest[] | null }) {
           </div>
         </div>
       ))}
+    </section>
+  );
+}
+
+type PortalModels = {
+  mode: "all" | "only";
+  published: Array<{ id: string; name: string }>;
+  modelIds: string[];
+};
+
+function checkedModelIds(result: PortalModels): string[] {
+  if (result.mode === "all") {
+    return result.published.map((model) => model.id);
+  }
+  const published = new Set(result.published.map((model) => model.id));
+  return result.modelIds.filter((id) => published.has(id));
+}
+
+function ModelsPanel({
+  onError,
+  onNotice,
+}: {
+  onError: (value: string | null) => void;
+  onNotice: (value: string | null) => void;
+}) {
+  const [models, setModels] = useState<PortalModels | null>(null);
+  const [checked, setChecked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<PortalModels>("/api/portal/models")
+      .then((result) => {
+        setModels(result);
+        setChecked(checkedModelIds(result));
+      })
+      .catch((err) => onError(isApiError(err) ? err.message : "failed to load models"));
+  }, [onError]);
+
+  async function save(modelIds: string[] | null) {
+    setBusy(true);
+    onError(null);
+    onNotice(null);
+    try {
+      const result = await api<PortalModels>("/api/portal/models", {
+        method: "PUT",
+        body: JSON.stringify({ modelIds }),
+      });
+      setModels(result);
+      setChecked(checkedModelIds(result));
+      onNotice(modelIds === null ? "Using every published model." : "Model selection saved.");
+    } catch (err) {
+      onError(isApiError(err) ? err.message : "save failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel stack">
+      <div className="panel-header">
+        <h2>Models</h2>
+        <p className="meta">
+          {models?.mode === "only"
+            ? "Only the models you check are available. New admin models stay hidden until you add them and save."
+            : "Every published model is checked. New models the admin publishes are included until you save a selection."}
+        </p>
+      </div>
+      {models === null ? <p className="meta">Loading models…</p> : null}
+      {models && models.published.length === 0 ? <p className="meta">No published models.</p> : null}
+      <div className="protocol-toggles">
+        {models?.published.map((model) => (
+          <label className="toggle" key={model.id}>
+            <input
+              type="checkbox"
+              checked={checked.includes(model.id)}
+              disabled={busy}
+              onChange={(event) => {
+                setChecked((current) =>
+                  event.target.checked ? [...current, model.id] : current.filter((id) => id !== model.id),
+                );
+              }}
+            />
+            {model.name === model.id ? model.id : `${model.name} (${model.id})`}
+          </label>
+        ))}
+      </div>
+      <div className="row-actions">
+        <button className="ghost" type="button" disabled={busy || models === null} onClick={() => void save(null)}>
+          Use all published models
+        </button>
+        <button
+          className="primary"
+          type="button"
+          disabled={busy || models === null}
+          onClick={() => void save(checked)}
+        >
+          Save selection
+        </button>
+      </div>
     </section>
   );
 }

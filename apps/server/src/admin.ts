@@ -556,26 +556,6 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     return { apiKeys: options.store.listApiKeys() };
   });
 
-  app.post("/api/admin/api-keys", async (request, reply) => {
-    const body = asRecord(request.body);
-    const name = typeof body.name === "string" ? body.name.trim() : "";
-    if (!name) {
-      return reply.code(400).send({ error: { message: "name is required", type: "viate_error" } });
-    }
-    let userId: string | null = null;
-    if (body.userId !== undefined && body.userId !== null) {
-      if (typeof body.userId !== "string" || !body.userId.trim()) {
-        return reply.code(400).send({ error: { message: "userId is invalid", type: "viate_error" } });
-      }
-      userId = body.userId.trim();
-    }
-    try {
-      return options.store.createApiKey(name, userId);
-    } catch (error) {
-      return sendStoreError(reply, error);
-    }
-  });
-
   app.delete("/api/admin/api-keys/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
@@ -633,17 +613,17 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     }
   });
 
-  app.post("/api/admin/users/:id/tokens", async (request, reply) => {
+  app.post("/api/admin/users/:id/balance", async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = asRecord(request.body);
-    if (typeof body.delta !== "number") {
-      return reply.code(400).send({ error: { message: "delta must be a non-zero integer", type: "viate_error" } });
+    if (typeof body.usd !== "string") {
+      return reply.code(400).send({ error: { message: "usd must be a non-zero decimal", type: "viate_error" } });
     }
     if (body.note !== undefined && body.note !== null && typeof body.note !== "string") {
       return reply.code(400).send({ error: { message: "note is invalid", type: "viate_error" } });
     }
     try {
-      return options.store.grantTokens(id, body.delta, typeof body.note === "string" ? body.note : null);
+      return options.store.grantUsd(id, body.usd, typeof body.note === "string" ? body.note : null);
     } catch (error) {
       return sendStoreError(reply, error);
     }

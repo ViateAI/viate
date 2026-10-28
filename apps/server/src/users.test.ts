@@ -45,7 +45,8 @@ describe("AdminStore users", { concurrency: false }, () => {
     assert.equal(created.email, "ada@example.com");
     assert.equal(created.name, "Ada");
     assert.equal(created.status, "active");
-    assert.equal(created.balanceTokens, 0);
+    assert.equal(created.balanceUsd, "0.00");
+    assert.equal("balanceTokens" in created, false);
     assert.equal(JSON.stringify(store.listUsers()).includes("password"), false);
     assert.equal(JSON.stringify(store.listUsers()).includes("scrypt"), false);
     assert.equal(store.listUsers()[0]?.id, created.id);
@@ -56,39 +57,63 @@ describe("AdminStore users", { concurrency: false }, () => {
     );
   });
 
-  it("grants tokens and rejects an adjust that would go below zero", () => {
+  it("grants dollars and rejects a zero, exponent, or debit below zero", () => {
     const user = store.createUser({ email: "grant@example.com", name: "Grant", password: "password1" });
-    const granted = store.grantTokens(user.id, 10, " top up ");
-    assert.equal(granted.user.balanceTokens, 10);
+    const granted = store.grantUsd(user.id, "10.50", " top up ");
+    assert.equal(granted.user.balanceUsd, "10.50");
+    assert.equal("balanceTokens" in granted.user, false);
     assert.equal(granted.entry.reason, "grant");
-    assert.equal(granted.entry.delta, 10);
+    assert.equal(granted.entry.deltaUsd, "10.50");
+    assert.equal(granted.entry.balanceAfterUsd, "10.50");
+    assert.equal("delta" in granted.entry, false);
+    assert.equal("balanceAfter" in granted.entry, false);
     assert.equal(granted.entry.note, "top up");
     assert.equal(granted.entry.requestId, null);
 
-    const adjusted = store.grantTokens(user.id, -4, "fix");
-    assert.equal(adjusted.user.balanceTokens, 6);
+    const adjusted = store.grantUsd(user.id, "-0.50", "fix");
+    assert.equal(adjusted.user.balanceUsd, "10.00");
     assert.equal(adjusted.entry.reason, "adjust");
+    assert.equal(adjusted.entry.deltaUsd, "-0.50");
 
     assert.throws(
-      () => store.grantTokens(user.id, -7),
-      (error: unknown) => statusCode(error) === 400,
+      () => store.grantUsd(user.id, "-10.01"),
+      (error: unknown) =>
+        statusCode(error) === 400 && error instanceof Error && error.message === "balance cannot be negative",
     );
-    assert.equal(store.getUser(user.id)?.balanceTokens, 6);
+    assert.throws(() => store.grantUsd(user.id, "0"), (error: unknown) => statusCode(error) === 400);
+    assert.throws(() => store.grantUsd(user.id, "1e2"), (error: unknown) => statusCode(error) === 400);
+    assert.equal(store.getUser(user.id)?.balanceUsd, "10.00");
     assert.equal(store.listLedger(user.id).length, 2);
   });
 
-  it("blocks admission at balance 0 while one request is in flight and when the user is disabled", () => {
+  it("blocks admission at balance 0, at eight in-flight calls, and when the user is disabled", () => {
     const user = store.createUser({ email: "admit@example.com", name: "Admit", password: "password1" });
+    assert.throws(
+      () => store.admitUser(user.id),
+      (error: unknown) =>
+        statusCode(error) === 402 && error instanceof Error && error.message === "insufficient balance",
+    );
+
+    store.grantUsd(user.id, "1.00");
+    for (let i = 0; i < 8; i += 1) {
+      store.admitUser(user.id);
+    }
+    assert.equal(readInflight(dataDir, user.id), 8);
+    assert.throws(() => store.admitUser(user.id), (error: unknown) => statusCode(error) === 402);
+    store.grantUsd(user.id, "-1.00");
+    assert.equal(store.getUser(user.id)?.balanceUsd, "0.00");
     assert.throws(() => store.admitUser(user.id), (error: unknown) => statusCode(error) === 402);
 
-    store.grantTokens(user.id, 1);
-    store.admitUser(user.id);
-    assert.equal(readInflight(dataDir, user.id), 1);
-    store.grantTokens(user.id, -1);
-    assert.equal(store.getUser(user.id)?.balanceTokens, 0);
-    assert.throws(() => store.admitUser(user.id), (error: unknown) => statusCode(error) === 402);
-
-    store.settleUsage({ userId: user.id, requestId: "admit-release", inputTokens: 0, outputTokens: 0 });
+    for (let i = 0; i < 8; i += 1) {
+      store.settleUsage({
+        userId: user.id,
+        requestId: `admit-release-${i}`,
+        inputTokens: 0,
+        outputTokens: 0,
+        inputNanoPerMillion: 0,
+        outputNanoPerMillion: 0,
+      });
+    }
     assert.equal(readInflight(dataDir, user.id), 0);
 
     store.updateUser(user.id, { status: "disabled" });
@@ -101,35 +126,72 @@ describe("AdminStore users", { concurrency: false }, () => {
     store.assertUserActive(user.id);
   });
 
-  it("settles input plus output once, releases inflight, and allows a negative balance", () => {
+  it("settles the worked example once, releases inflight, and allows a negative balance", () => {
     const user = store.createUser({ email: "settle@example.com", name: "Settle", password: "password1" });
-    store.grantTokens(user.id, 1);
+    store.grantUsd(user.id, "1.00");
     store.admitUser(user.id);
     store.settleUsage({
       userId: user.id,
       requestId: "req-once",
-      inputTokens: 3,
-      outputTokens: 2,
+      inputTokens: 1000,
+      outputTokens: 100,
+      inputNanoPerMillion: 3_000_000_000,
+      outputNanoPerMillion: 15_000_000_000,
     });
     store.settleUsage({
       userId: user.id,
       requestId: "req-once",
       inputTokens: 100,
       outputTokens: 100,
+      inputNanoPerMillion: 3_000_000_000,
+      outputNanoPerMillion: 15_000_000_000,
     });
-    assert.equal(store.getUser(user.id)?.balanceTokens, -4);
+    assert.equal(readBalanceNano(dataDir, user.id), 1_000_000_000 - 4_500_000);
+    assert.equal(store.getUser(user.id)?.balanceUsd, "0.9955");
     assert.equal(readInflight(dataDir, user.id), 0);
     const usage = store.listLedger(user.id).filter((entry) => entry.reason === "usage");
     assert.equal(usage.length, 1);
-    assert.equal(usage[0]?.delta, -5);
+    assert.equal(usage[0]?.deltaUsd, "-0.0045");
+    assert.equal(usage[0]?.balanceAfterUsd, "0.9955");
     assert.equal(usage[0]?.requestId, "req-once");
-    assert.throws(() => store.admitUser(user.id), (error: unknown) => statusCode(error) === 402);
 
-    store.grantTokens(user.id, 10);
     store.admitUser(user.id);
-    store.settleUsage({ userId: user.id, requestId: "req-bad", inputTokens: Number.NaN, outputTokens: 1.5 });
-    assert.equal(store.getUser(user.id)?.balanceTokens, 6);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "req-half",
+      inputTokens: 1,
+      outputTokens: 0,
+      inputNanoPerMillion: 500_000,
+      outputNanoPerMillion: 0,
+    });
+    assert.equal(readBalanceNano(dataDir, user.id), 1_000_000_000 - 4_500_000 - 1);
     assert.equal(readInflight(dataDir, user.id), 0);
+
+    const beforeBad = readBalanceNano(dataDir, user.id);
+    store.admitUser(user.id);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "req-bad",
+      inputTokens: Number.NaN,
+      outputTokens: 1.5,
+      inputNanoPerMillion: 3_000_000_000,
+      outputNanoPerMillion: 15_000_000_000,
+    });
+    assert.equal(readBalanceNano(dataDir, user.id), beforeBad);
+    assert.equal(readInflight(dataDir, user.id), 0);
+
+    store.admitUser(user.id);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "req-negative",
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      inputNanoPerMillion: 3_000_000_000,
+      outputNanoPerMillion: 0,
+    });
+    assert.equal(store.getUser(user.id)?.balanceUsd, "-2.004500001");
+    assert.equal(readInflight(dataDir, user.id), 0);
+    assert.throws(() => store.admitUser(user.id), (error: unknown) => statusCode(error) === 402);
   });
 
   it("keeps unbound keys unbound and verifies a key bound to a user", () => {
@@ -150,7 +212,7 @@ describe("AdminStore users", { concurrency: false }, () => {
     const opened = await AdminStore.open(dir);
     try {
       const user = opened.createUser({ email: "crash@example.com", name: "Crash", password: "password1" });
-      opened.grantTokens(user.id, 1);
+      opened.grantUsd(user.id, "1.00");
       opened.admitUser(user.id);
       assert.equal(readInflight(dir, user.id), 1);
       opened.close();
@@ -166,6 +228,62 @@ describe("AdminStore users", { concurrency: false }, () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("adds balance_nano without copying an old token balance", async () => {
+    const fresh = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    try {
+      const names = (fresh.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((column) => column.name);
+      assert.equal(names.includes("balance_nano"), true);
+      assert.equal(names.includes("balance_tokens"), false);
+    } finally {
+      fresh.close();
+    }
+
+    const dir = await mkdtemp(join(tmpdir(), "viate-users-legacy-"));
+    const legacy = new DatabaseSync(join(dir, "viate.sqlite"));
+    const now = new Date().toISOString();
+    legacy.exec(`
+      CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        balance_tokens INTEGER NOT NULL DEFAULT 0,
+        inflight INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    legacy
+      .prepare(
+        `INSERT INTO users (
+          id, email, name, password_hash, status, balance_tokens, inflight, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'active', 42, 3, ?, ?)`,
+      )
+      .run("user-old", "old@example.com", "Old", "hash", now, now);
+    legacy.close();
+    const opened = await AdminStore.open(dir);
+    try {
+      assert.equal(opened.getUser("user-old")?.balanceUsd, "0.00");
+      const check = new DatabaseSync(join(dir, "viate.sqlite"));
+      try {
+        const row = check.prepare("SELECT balance_tokens, balance_nano, inflight FROM users WHERE id = ?").get("user-old") as {
+          balance_tokens: number | bigint;
+          balance_nano: number | bigint;
+          inflight: number | bigint;
+        };
+        assert.equal(Number(row.balance_tokens), 42);
+        assert.equal(Number(row.balance_nano), 0);
+        assert.equal(Number(row.inflight), 0);
+      } finally {
+        check.close();
+      }
+    } finally {
+      opened.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("customer admin and portal HTTP", { concurrency: false }, () => {
@@ -173,12 +291,14 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
   let store: AdminStore;
   let app: App;
   let upstream: TestServer;
+  let upstreamCalls = 0;
 
   before(async () => {
     resetRoutingStateForTests();
     dataDir = await mkdtemp(join(tmpdir(), "viate-users-http-"));
     store = await AdminStore.open(dataDir);
     upstream = await listen((_req, res) => {
+      upstreamCalls += 1;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -196,6 +316,7 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
       store,
       adminPassword: "correct-horse",
       adminEnabled: true,
+      modelPrices: demoModelPrices(),
     });
   });
 
@@ -221,20 +342,41 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     assert.equal(user.email, "ada@example.com");
     assert.equal("password_hash" in user, false);
 
-    const granted = await authed(app, session, {
+    const zero = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/users/${user.id}/balance`,
+      payload: { usd: "0" },
+    });
+    assert.equal(zero.statusCode, 400);
+    const exponent = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/users/${user.id}/balance`,
+      payload: { usd: "1e2" },
+    });
+    assert.equal(exponent.statusCode, 400);
+    const retired = await authed(app, session, {
       method: "POST",
       url: `/api/admin/users/${user.id}/tokens`,
-      payload: { delta: 100, note: "seed" },
+      payload: { delta: 100 },
+    });
+    assert.equal(retired.statusCode, 404);
+
+    const granted = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/users/${user.id}/balance`,
+      payload: { usd: "10.50", note: "seed" },
     });
     assert.equal(granted.statusCode, 200);
-    assert.equal(granted.json().user.balanceTokens, 100);
+    assert.equal(granted.json().user.balanceUsd, "10.50");
+    assert.equal(granted.json().entry.deltaUsd, "10.50");
 
     const tooFar = await authed(app, session, {
       method: "POST",
-      url: `/api/admin/users/${user.id}/tokens`,
-      payload: { delta: -1000 },
+      url: `/api/admin/users/${user.id}/balance`,
+      payload: { usd: "-11.00" },
     });
     assert.equal(tooFar.statusCode, 400);
+    assert.equal(tooFar.json().error.message, "balance cannot be negative");
 
     const listed = await authed(app, session, { method: "GET", url: "/api/admin/users" });
     assert.equal(listed.statusCode, 200);
@@ -338,6 +480,7 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     });
     assert.equal(denied.statusCode, 402);
     assert.equal(denied.json().error.type, "viate_error");
+    assert.equal(denied.json().error.message, "insufficient balance");
     const models = await app.inject({
       method: "GET",
       url: "/v1/models?unused=1",
@@ -347,15 +490,29 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     assert.equal(models.json().object, "list");
 
     const payer = store.createUser({ email: "payer@example.com", name: "Payer", password: "password1" });
-    store.grantTokens(payer.id, 1);
+    store.grantUsd(payer.id, "1.00");
     const payerKey = store.createApiKey("payer", payer.id).secret;
+    const beforeMissing = upstreamCalls;
     const missing = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
       headers: { authorization: `Bearer ${payerKey}` },
       payload: { model: "missing", messages: [] },
     });
-    assert.equal(missing.statusCode, 404);
+    assert.equal(missing.statusCode, 400);
+    assert.equal(missing.json().error.message, "model price unavailable");
+    assert.equal(upstreamCalls, beforeMissing);
+    assert.equal(store.getUser(payer.id)?.balanceUsd, "1.00");
+    assert.equal(readInflight(dataDir, payer.id), 0);
+    const unlisted = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: { authorization: `Bearer ${payerKey}` },
+      payload: { model: "unlisted", messages: [] },
+    });
+    assert.equal(unlisted.statusCode, 404);
+    assert.equal(upstreamCalls, beforeMissing);
+    assert.equal(readInflight(dataDir, payer.id), 0);
     const billed = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
@@ -363,10 +520,10 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
       payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
     });
     assert.equal(billed.statusCode, 200);
-    await waitForUser(store, payer.id, -24);
+    await waitForUser(store, payer.id, "0.999975");
     const usageRows = store.listLedger(payer.id).filter((entry) => entry.reason === "usage");
     assert.equal(usageRows.length, 1);
-    assert.equal(usageRows[0]?.delta, -25);
+    assert.equal(usageRows[0]?.deltaUsd, "-0.000025");
     const payerLogs = await waitForLogs(
       store,
       (rows) => rows.some((row) => row.userId === payer.id && row.status === 200 && row.inputTokens === 20),
@@ -393,9 +550,9 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     assert.equal(disabledModels.statusCode, 403);
   });
 
-  it("does not reserve a token for an invalid JSON body or an unknown route", async () => {
+  it("does not reserve inflight for an invalid JSON body or an unknown route", async () => {
     const user = store.createUser({ email: "stuck@example.com", name: "Stuck", password: "password1" });
-    store.grantTokens(user.id, 1);
+    store.grantUsd(user.id, "1.00");
     const secret = store.createApiKey("stuck", user.id).secret;
     const chat = {
       method: "POST" as const,
@@ -412,12 +569,13 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     });
     assert.ok(bad.statusCode >= 400 && bad.statusCode < 500);
     assert.notEqual(bad.statusCode, 402);
+    assert.equal(readInflight(dataDir, user.id), 0);
 
     const afterBad = await app.inject(chat);
     assert.notEqual(afterBad.statusCode, 402);
 
-    await waitForUser(store, user.id, -24);
-    store.grantTokens(user.id, 25);
+    await waitForUser(store, user.id, "0.999975");
+    assert.equal(readInflight(dataDir, user.id), 0);
     const missing = await app.inject({
       method: "POST",
       url: "/v1/not-a-route",
@@ -425,9 +583,86 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
       payload: { model: "demo" },
     });
     assert.equal(missing.statusCode, 404);
+    assert.equal(readInflight(dataDir, user.id), 0);
 
     const afterMissing = await app.inject(chat);
     assert.notEqual(afterMissing.statusCode, 402);
+  });
+
+  it("returns 503 when prices are not ready and does not call the provider", async () => {
+    let calls = 0;
+    const coldUpstream = await listen((_req, res) => {
+      calls += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    const dir = await mkdtemp(join(tmpdir(), "viate-users-cold-"));
+    const coldStore = await AdminStore.open(dir);
+    enablePublished(coldStore, { baseUrl: coldUpstream.url, apiKey: "env-key" });
+    const user = coldStore.createUser({ email: "cold@example.com", name: "Cold", password: "password1" });
+    coldStore.grantUsd(user.id, "1.00");
+    const secret = coldStore.createApiKey("cold", user.id).secret;
+    const coldApp = await buildApp({
+      logger: false,
+      pluginManager: emptyPlugins(),
+      providers: [billingProvider()],
+      store: coldStore,
+      adminPassword: "correct-horse",
+      adminEnabled: true,
+      modelPrices: { ready: false, lookup: () => null },
+    });
+    try {
+      const denied = await coldApp.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${secret}` },
+        payload: { model: "demo", messages: [] },
+      });
+      assert.equal(denied.statusCode, 503);
+      assert.equal(denied.json().error.message, "model prices unavailable");
+      assert.equal(calls, 0);
+      assert.equal(coldStore.getUser(user.id)?.balanceUsd, "1.00");
+      assert.equal(readInflight(dir, user.id), 0);
+    } finally {
+      await coldApp.close();
+      await coldUpstream.close();
+      coldStore.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("proxies an unbound key when no price catalog is configured", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "viate-users-unbound-"));
+    const openStore = await AdminStore.open(dir);
+    const openUpstream = await listen((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "chatcmpl-open", choices: [{ message: { content: "ok" } }] }));
+    });
+    enablePublished(openStore, { baseUrl: openUpstream.url, apiKey: "env-key" });
+    const secret = openStore.createApiKey("plain").secret;
+    const openApp = await buildApp({
+      logger: false,
+      pluginManager: emptyPlugins(),
+      providers: [billingProvider()],
+      store: openStore,
+      adminPassword: null,
+      adminEnabled: false,
+    });
+    try {
+      const response = await openApp.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${secret}` },
+        payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().id, "chatcmpl-open");
+    } finally {
+      await openApp.close();
+      await openUpstream.close();
+      openStore.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("serves the portal without the admin password", async () => {
@@ -469,6 +704,28 @@ function readInflight(dataDir: string, userId: string): number {
   } finally {
     db.close();
   }
+}
+
+function readBalanceNano(dataDir: string, userId: string): number {
+  const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
+  try {
+    const row = db.prepare("SELECT balance_nano FROM users WHERE id = ?").get(userId) as {
+      balance_nano: number | bigint;
+    };
+    return Number(row.balance_nano);
+  } finally {
+    db.close();
+  }
+}
+
+function demoModelPrices() {
+  const rate = { inputNanoPerMillion: 1_000_000_000, outputNanoPerMillion: 1_000_000_000 };
+  return {
+    ready: true,
+    lookup(modelId: string) {
+      return modelId === "demo" || modelId === "unlisted" ? rate : null;
+    },
+  };
 }
 
 function emptyPlugins(): PluginOperator {
@@ -555,14 +812,14 @@ async function portal(
   return authed(app, session, options);
 }
 
-async function waitForUser(store: AdminStore, userId: string, balance: number): Promise<void> {
+async function waitForUser(store: AdminStore, userId: string, balanceUsd: string): Promise<void> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (store.getUser(userId)?.balanceTokens === balance) {
+    if (store.getUser(userId)?.balanceUsd === balanceUsd) {
       return;
     }
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
-  assert.equal(store.getUser(userId)?.balanceTokens, balance);
+  assert.equal(store.getUser(userId)?.balanceUsd, balanceUsd);
 }
 
 async function waitForLogs(

@@ -172,6 +172,31 @@ export async function registerPortalRoutes(app: FastifyInstance, options: Portal
       return sendStoreError(reply, error);
     }
   });
+
+  app.get("/api/portal/models", async (request) => {
+    const user = (request as PortalRequest).portalUser;
+    if (!user) {
+      return { mode: "all" as const, published: [], modelIds: [] };
+    }
+    return portalModelView(options.store, user.id);
+  });
+
+  app.put("/api/portal/models", async (request, reply) => {
+    const user = (request as PortalRequest).portalUser;
+    if (!user) {
+      return reply.code(401).send({ error: { message: "unauthorized", type: "viate_error" } });
+    }
+    const body = asRecord(request.body);
+    if (!Object.hasOwn(body, "modelIds") || (body.modelIds !== null && !Array.isArray(body.modelIds))) {
+      return reply.code(400).send({ error: { message: "modelIds is required", type: "viate_error" } });
+    }
+    try {
+      options.store.setUserModels(user.id, body.modelIds as string[] | null);
+      return portalModelView(options.store, user.id);
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
 }
 
 function setUserCookies(reply: FastifyReply, sessionId: string, csrf: string): void {
@@ -196,4 +221,16 @@ function sendStoreError(reply: FastifyReply, error: unknown) {
   const status = typeof error === "object" && error !== null && "statusCode" in error ? Number(error.statusCode) : 500;
   const message = error instanceof Error ? error.message : "store error";
   return reply.code(status || 500).send({ error: { message, type: "viate_error" } });
+}
+
+function portalModelView(store: AdminStore, userId: string) {
+  const choice = store.userModelChoice(userId);
+  return {
+    mode: choice.mode,
+    published: store.listPublicCatalog().data.map((model) => ({
+      id: model.id,
+      name: model.name?.trim() || model.id,
+    })),
+    modelIds: choice.mode === "only" ? choice.modelIds : [],
+  };
 }
