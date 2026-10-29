@@ -143,6 +143,24 @@ export type ClientApiKey = {
   prefix: string;
   createdAt: string;
   userId: string | null;
+  channelId: string | null;
+};
+
+export type ChannelRule =
+  | { kind: "all" }
+  | {
+      kind: "match";
+      providerId: string | null;
+      prefix: string | null;
+      excludePrefix: string | null;
+      chatOnly: boolean;
+    };
+
+export type ChannelView = {
+  id: string;
+  name: string;
+  ratio: string;
+  rule: ChannelRule;
 };
 
 export type GatewayUser = {

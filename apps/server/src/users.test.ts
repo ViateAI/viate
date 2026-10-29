@@ -426,7 +426,13 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     });
     assert.equal(noCsrf.statusCode, 403);
 
-    const created = await portal(app, login, { method: "POST", url: "/api/portal/keys", payload: { name: "cli" } });
+    const channel = store.createChannel({ name: "Portal", ratio: "1", rule: { kind: "all" } });
+    store.setUserChannels(seen.json().user.id as string, [channel.id]);
+    const created = await portal(app, login, {
+      method: "POST",
+      url: "/api/portal/keys",
+      payload: { name: "cli", channelId: channel.id },
+    });
     assert.equal(created.statusCode, 200);
     assert.match(created.json().secret, /^viate_/);
     const keyId = created.json().apiKey.id as string;

@@ -137,8 +137,12 @@ export async function registerPortalRoutes(app: FastifyInstance, options: Portal
     }
     const body = asRecord(request.body);
     const name = typeof body.name === "string" ? body.name : "";
+    const channelId = typeof body.channelId === "string" ? body.channelId : "";
+    if (!channelId.trim()) {
+      return reply.code(400).send({ error: { message: "channelId is required", type: "viate_error" } });
+    }
     try {
-      return options.store.createApiKey(name, user.id);
+      return options.store.createApiKey(name, user.id, channelId);
     } catch (error) {
       return sendStoreError(reply, error);
     }
@@ -173,29 +177,18 @@ export async function registerPortalRoutes(app: FastifyInstance, options: Portal
     }
   });
 
-  app.get("/api/portal/models", async (request) => {
+  app.get("/api/portal/channels", async (request) => {
     const user = (request as PortalRequest).portalUser;
     if (!user) {
-      return { mode: "all" as const, published: [], modelIds: [] };
+      return { channels: [] };
     }
-    return portalModelView(options.store, user.id);
-  });
-
-  app.put("/api/portal/models", async (request, reply) => {
-    const user = (request as PortalRequest).portalUser;
-    if (!user) {
-      return reply.code(401).send({ error: { message: "unauthorized", type: "viate_error" } });
-    }
-    const body = asRecord(request.body);
-    if (!Object.hasOwn(body, "modelIds") || (body.modelIds !== null && !Array.isArray(body.modelIds))) {
-      return reply.code(400).send({ error: { message: "modelIds is required", type: "viate_error" } });
-    }
-    try {
-      options.store.setUserModels(user.id, body.modelIds as string[] | null);
-      return portalModelView(options.store, user.id);
-    } catch (error) {
-      return sendStoreError(reply, error);
-    }
+    const granted = new Set(options.store.listUserChannelIds(user.id));
+    return {
+      channels: options.store
+        .listChannels()
+        .filter((channel) => granted.has(channel.id))
+        .map((channel) => options.store.channelView(channel)),
+    };
   });
 }
 
@@ -223,15 +216,3 @@ function sendStoreError(reply: FastifyReply, error: unknown) {
   return reply.code(status || 500).send({ error: { message, type: "viate_error" } });
 }
 
-function portalModelView(store: AdminStore, userId: string) {
-  const choice = store.userModelChoice(userId);
-  const providers = store.userProviderChoice(userId);
-  return {
-    mode: choice.mode,
-    published: store.listPublicCatalog(providers.mode === "only" ? providers.providerIds : null).data.map((model) => ({
-      id: model.id,
-      name: model.name?.trim() || model.id,
-    })),
-    modelIds: choice.mode === "only" ? choice.modelIds : [],
-  };
-}

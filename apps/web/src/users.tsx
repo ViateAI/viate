@@ -181,7 +181,7 @@ function UserEditor({
           Ledger
         </button>
       </div>
-      <ProviderAccess userId={user.id} busy={busy} onError={onError} onNotice={onNotice} />
+      <ChannelAccess userId={user.id} busy={busy} onError={onError} onNotice={onNotice} />
       <form
         className="form"
         onSubmit={(event) => {
@@ -282,13 +282,12 @@ function StatusBadge({ children, tone = "neutral" }: { children: string; tone?: 
   return <span className={`badge ${tone}`}>{children}</span>;
 }
 
-type ProviderAccessView = {
-  mode: "all" | "only";
-  providerIds: string[];
-  available: string[];
+type ChannelGrant = {
+  channelIds: string[];
+  channels: Array<{ id: string; name: string; ratio: string }>;
 };
 
-function ProviderAccess({
+function ChannelAccess({
   userId,
   busy,
   onError,
@@ -299,31 +298,31 @@ function ProviderAccess({
   onError: (value: string | null) => void;
   onNotice: (value: string | null) => void;
 }) {
-  const [access, setAccess] = useState<ProviderAccessView | null>(null);
+  const [access, setAccess] = useState<ChannelGrant | null>(null);
   const [checked, setChecked] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    api<ProviderAccessView>(`/api/admin/users/${userId}/providers`)
+    api<ChannelGrant>(`/api/admin/users/${userId}/channels`)
       .then((result) => {
         setAccess(result);
-        setChecked(result.mode === "all" ? result.available : result.providerIds);
+        setChecked(result.channelIds);
       })
-      .catch((err) => onError(isApiError(err) ? err.message : "failed to load providers"));
+      .catch((err) => onError(isApiError(err) ? err.message : "failed to load channels"));
   }, [onError, userId]);
 
-  async function save(providerIds: string[] | null) {
+  async function save() {
     setSaving(true);
     onError(null);
     onNotice(null);
     try {
-      const result = await api<ProviderAccessView>(`/api/admin/users/${userId}/providers`, {
+      const result = await api<ChannelGrant>(`/api/admin/users/${userId}/channels`, {
         method: "PUT",
-        body: JSON.stringify({ providerIds }),
+        body: JSON.stringify({ channelIds: checked }),
       });
       setAccess(result);
-      setChecked(result.mode === "all" ? result.available : result.providerIds);
-      onNotice(providerIds === null ? "Customer can use every provider." : "Provider access saved.");
+      setChecked(result.channelIds);
+      onNotice(result.channelIds.length === 0 ? "Customer has no channels." : "Channel access saved.");
     } catch (err) {
       onError(isApiError(err) ? err.message : "save failed");
     } finally {
@@ -334,38 +333,34 @@ function ProviderAccess({
   return (
     <div className="stack">
       <div className="panel-header">
-        <h2>Providers</h2>
+        <h2>Channels</h2>
         <p className="meta">
-          {access?.mode === "only"
-            ? "Only checked providers are visible. Unchecked ones, such as a private test provider, stay hidden."
-            : "Every provider is available, including ones you add later. Save a selection to hide the rest."}
+          This customer can create keys only for checked channels. A new customer starts with none. Models added to a
+          channel become available without editing each customer.
         </p>
       </div>
-      {access === null ? <p className="meta">Loading providers…</p> : null}
-      {access && access.available.length === 0 ? <p className="meta">No connections yet.</p> : null}
+      {access === null ? <p className="meta">Loading channels…</p> : null}
+      {access && access.channels.length === 0 ? <p className="meta">No channels yet. Create one on the Channels page.</p> : null}
       <div className="protocol-toggles">
-        {access?.available.map((providerId) => (
-          <label className="toggle" key={providerId}>
+        {access?.channels.map((channel) => (
+          <label className="toggle" key={channel.id}>
             <input
               type="checkbox"
-              checked={checked.includes(providerId)}
+              checked={checked.includes(channel.id)}
               disabled={busy || saving}
               onChange={(event) => {
                 setChecked((current) =>
-                  event.target.checked ? [...current, providerId] : current.filter((id) => id !== providerId),
+                  event.target.checked ? [...current, channel.id] : current.filter((id) => id !== channel.id),
                 );
               }}
             />
-            {providerId}
+            {channel.name} · {channel.ratio}x
           </label>
         ))}
       </div>
       <div className="row-actions">
-        <button className="ghost" type="button" disabled={busy || saving || access === null} onClick={() => void save(null)}>
-          Use all providers
-        </button>
-        <button className="primary" type="button" disabled={busy || saving || access === null} onClick={() => void save(checked)}>
-          Save providers
+        <button className="primary" type="button" disabled={busy || saving || access === null} onClick={() => void save()}>
+          Save channels
         </button>
       </div>
     </div>

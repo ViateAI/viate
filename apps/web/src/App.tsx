@@ -17,12 +17,13 @@ import {
   type SubscriptionView,
 } from "./api";
 import { balanceSummary, BalancesPage } from "./balances";
+import { ChannelsPage } from "./channels";
 import { PortalApp } from "./portal";
 import { PricesPage } from "./prices";
 import { RequestsPage } from "./requests";
 import { UsersPage } from "./users";
 
-type Page = "plugins" | "connections" | "balances" | "models" | "prices" | "users" | "api-keys" | "requests" | "logs";
+type Page = "plugins" | "connections" | "balances" | "models" | "prices" | "channels" | "users" | "api-keys" | "requests" | "logs";
 
 type CredentialMode = "form" | "paste" | "oauth";
 
@@ -185,6 +186,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
           <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
           <NavButton page="prices" current={page} onClick={setPage}>Prices</NavButton>
+          <NavButton page="channels" current={page} onClick={setPage}>Channels</NavButton>
           <NavButton page="users" current={page} onClick={setPage}>Users</NavButton>
           <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
           <NavButton page="requests" current={page} onClick={setPage}>Requests</NavButton>
@@ -254,6 +256,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           />
         ) : null}
         {page === "prices" ? <PricesPage onNotice={setNotice} /> : null}
+        {page === "channels" ? <ChannelsPage onNotice={setNotice} /> : null}
         {page === "users" ? <UsersPage onNotice={setNotice} /> : null}
         {page === "api-keys" ? <ApiKeysPage onNotice={setNotice} /> : null}
         {page === "requests" ? <RequestsPage /> : null}
@@ -265,6 +268,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
         <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
         <NavButton page="prices" current={page} onClick={setPage}>Prices</NavButton>
+        <NavButton page="channels" current={page} onClick={setPage}>Channels</NavButton>
         <NavButton page="users" current={page} onClick={setPage}>Users</NavButton>
         <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
         <NavButton page="requests" current={page} onClick={setPage}>Requests</NavButton>
@@ -308,6 +312,9 @@ function pageLabel(page: Page): string {
   if (page === "prices") {
     return "Model prices";
   }
+  if (page === "channels") {
+    return "Channels";
+  }
   if (page === "users") {
     return "Users";
   }
@@ -335,6 +342,9 @@ function pageDescription(page: Page): string {
   }
   if (page === "prices") {
     return "Set a USD price per million tokens when models.dev has no row for that id.";
+  }
+  if (page === "channels") {
+    return "Create a price multiplier and the models it covers. Assign channels to each customer.";
   }
   if (page === "users") {
     return "Provision customers and grant a dollar balance. Customers sign in at /portal.";

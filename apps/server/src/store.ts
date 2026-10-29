@@ -10,6 +10,15 @@ import {
 } from "./endpoints.js";
 import { decryptSecret, encryptSecret, loadOrCreateCredentialKey } from "./crypto.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
+import {
+  applyChannelRatio,
+  channelMatchesModel,
+  channelProviderLimit,
+  formatChannelRatio,
+  parseChannelRatio,
+  type Channel,
+  type ChannelModelRule,
+} from "./channels.js";
 import { asNano, chargeNano, formatUsd, parseRateUsdToNano, parseUsdToNano, sqlInteger } from "./money.js";
 
 const VIDEO_REQUEST_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -234,7 +243,10 @@ export type StoredApiKey = {
   prefix: string;
   createdAt: string;
   userId: string | null;
+  channelId: string | null;
 };
+
+export type { Channel, ChannelModelRule };
 
 export type CreatedApiKey = {
   apiKey: StoredApiKey;
@@ -271,10 +283,6 @@ export type LedgerEntry = {
   note: string | null;
   createdAt: string;
 };
-
-export type UserModelChoice = { mode: "all" } | { mode: "only"; modelIds: string[] };
-
-export type UserProviderChoice = { mode: "all" } | { mode: "only"; providerIds: string[] };
 
 export type UserUsageRequest = {
   id: string;
@@ -345,10 +353,6 @@ type LkgpRecord = {
   updatedAt: string;
 };
 
-// A row with this id marks an explicit empty allow-list. No rows means follow every published model.
-const EMPTY_MODEL_SELECTION = "";
-const EMPTY_PROVIDER_SELECTION = "";
-
 type ConnectionRow = {
   id: string;
   provider_id: string;
@@ -385,6 +389,15 @@ type ApiKeyRow = {
   key_hash: string;
   created_at: string;
   user_id: string | null;
+  channel_id: string | null;
+};
+
+type ChannelRow = {
+  id: string;
+  name: string;
+  ratio_numerator: number | bigint;
+  ratio_denominator: number | bigint;
+  model_rule: string;
 };
 
 type RequestLogRow = {
@@ -950,6 +963,143 @@ export class AdminStore {
     return { object: "list", data };
   }
 
+  listChannels(): Channel[] {
+    const rows = this.db.prepare("SELECT * FROM channels ORDER BY id").all() as ChannelRow[];
+    return rows.map((row) => toChannel(row));
+  }
+
+  getChannel(id: string): Channel | null {
+    const row = this.db.prepare("SELECT * FROM channels WHERE id = ?").get(id) as ChannelRow | undefined;
+    return row ? toChannel(row) : null;
+  }
+
+  listUserChannelIds(userId: string): string[] {
+    this.requireUser(userId);
+    const rows = this.db
+      .prepare("SELECT channel_id FROM user_channels WHERE user_id = ? ORDER BY channel_id")
+      .all(userId) as Array<{ channel_id: string }>;
+    return rows.map((row) => row.channel_id);
+  }
+
+  userHasChannel(userId: string, channelId: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS ok FROM user_channels WHERE user_id = ? AND channel_id = ?")
+      .get(userId, channelId) as { ok: number } | undefined;
+    return Boolean(row);
+  }
+
+  setUserChannels(userId: string, channelIds: string[]): string[] {
+    this.requireUser(userId);
+    if (!Array.isArray(channelIds)) {
+      throw Object.assign(new Error("channelIds is required"), { statusCode: 400 });
+    }
+    const known = new Set(this.listChannels().map((channel) => channel.id));
+    const unique: string[] = [];
+    const seen: Record<string, true> = {};
+    for (const channelId of channelIds) {
+      if (typeof channelId !== "string") {
+        throw Object.assign(new Error("unknown channel"), { statusCode: 400 });
+      }
+      const trimmed = channelId.trim();
+      if (!trimmed || !known.has(trimmed)) {
+        throw Object.assign(new Error("unknown channel"), { statusCode: 400 });
+      }
+      if (seen[trimmed]) {
+        continue;
+      }
+      seen[trimmed] = true;
+      unique.push(trimmed);
+    }
+    unique.sort();
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM user_channels WHERE user_id = ?").run(userId);
+      const insert = this.db.prepare("INSERT INTO user_channels (user_id, channel_id) VALUES (?, ?)");
+      for (const channelId of unique) {
+        insert.run(userId, channelId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return unique;
+  }
+
+  listChannelCatalog(channel: Channel): { object: "list"; data: PublicModel[] } {
+    const catalog = this.listPublicCatalog(channelProviderLimit(channel.rule));
+    return {
+      object: "list",
+      data: catalog.data.filter((model) =>
+        channelMatchesModel(
+          channel.rule,
+          {
+            id: model.id,
+            providerIds: model.owned_by === "viate" ? [] : [model.owned_by],
+            endpointTypes: model.supported_endpoint_types,
+          },
+          null,
+        ),
+      ),
+    };
+  }
+
+  createChannel(input: { name: string; ratio: string; rule: ChannelModelRule }): Channel {
+    const name = input.name.trim();
+    if (!name) {
+      throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const ratio = parseChannelRatio(input.ratio);
+    const id = crypto.randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO channels (id, name, ratio_numerator, ratio_denominator, model_rule)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, name, ratio.numerator, ratio.denominator, JSON.stringify(input.rule));
+    return this.requireChannel(id);
+  }
+
+  updateChannel(id: string, input: { name: string; ratio: string; rule: ChannelModelRule }): Channel {
+    this.requireChannel(id);
+    const name = input.name.trim();
+    if (!name) {
+      throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const ratio = parseChannelRatio(input.ratio);
+    this.db
+      .prepare(
+        `UPDATE channels
+         SET name = ?, ratio_numerator = ?, ratio_denominator = ?, model_rule = ?
+         WHERE id = ?`,
+      )
+      .run(name, ratio.numerator, ratio.denominator, JSON.stringify(input.rule), id);
+    return this.requireChannel(id);
+  }
+
+  deleteChannel(id: string): void {
+    this.requireChannel(id);
+    const keys = this.db.prepare("SELECT 1 AS ok FROM api_keys WHERE channel_id = ? LIMIT 1").get(id) as
+      | { ok: number }
+      | undefined;
+    const grants = this.db.prepare("SELECT 1 AS ok FROM user_channels WHERE channel_id = ? LIMIT 1").get(id) as
+      | { ok: number }
+      | undefined;
+    if (keys || grants) {
+      throw Object.assign(new Error("channel in use"), { statusCode: 409 });
+    }
+    this.db.prepare("DELETE FROM channels WHERE id = ?").run(id);
+  }
+
+  channelView(channel: Channel): { id: string; name: string; ratio: string; rule: ChannelModelRule } {
+    return {
+      id: channel.id,
+      name: channel.name,
+      ratio: formatChannelRatio(channel.ratioNumerator, channel.ratioDenominator),
+      rule: channel.rule,
+    };
+  }
+
   listConnectionProviderIds(): string[] {
     const rows = this.db
       .prepare("SELECT DISTINCT provider_id FROM connections ORDER BY provider_id")
@@ -1248,7 +1398,7 @@ export class AdminStore {
     return rows.map((row) => this.toApiKey(row));
   }
 
-  createApiKey(name: string, userId?: string | null): CreatedApiKey {
+  createApiKey(name: string, userId?: string | null, channelId?: string | null): CreatedApiKey {
     const trimmed = name.trim();
     if (!trimmed) {
       throw Object.assign(new Error("name is required"), { statusCode: 400 });
@@ -1257,15 +1407,33 @@ export class AdminStore {
     if (ownerId && !this.db.prepare("SELECT id FROM users WHERE id = ?").get(ownerId)) {
       throw Object.assign(new Error("user not found"), { statusCode: 404 });
     }
+    const requested = typeof channelId === "string" ? channelId.trim() : "";
+    const boundChannel = requested || null;
+    if (boundChannel && !this.getChannel(boundChannel)) {
+      throw Object.assign(new Error("unknown channel"), { statusCode: 400 });
+    }
+    if (boundChannel && ownerId && !this.userHasChannel(ownerId, boundChannel)) {
+      throw Object.assign(new Error("channel not available"), { statusCode: 400 });
+    }
     const secret = `viate_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const prefix = secret.slice(0, 12);
     this.db
-      .prepare("INSERT INTO api_keys (id, name, prefix, key_hash, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, trimmed, prefix, createHmac("sha256", this.key).update(secret).digest("hex"), createdAt, ownerId);
+      .prepare(
+        "INSERT INTO api_keys (id, name, prefix, key_hash, created_at, user_id, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        id,
+        trimmed,
+        prefix,
+        createHmac("sha256", this.key).update(secret).digest("hex"),
+        createdAt,
+        ownerId,
+        boundChannel,
+      );
     return {
-      apiKey: { id, name: trimmed, prefix, createdAt, userId: ownerId },
+      apiKey: { id, name: trimmed, prefix, createdAt, userId: ownerId, channelId: boundChannel },
       secret,
     };
   }
@@ -1513,11 +1681,14 @@ export class AdminStore {
     inputNanoPerMillion: number;
     outputNanoPerMillion: number;
     perRequestNano?: number;
+    ratioNumerator?: number;
+    ratioDenominator?: number;
   }): void {
-    const charge =
+    const base =
       chargeNano(input.inputTokens, input.inputNanoPerMillion) +
       chargeNano(input.outputTokens, input.outputNanoPerMillion) +
       asNano(input.perRequestNano);
+    const charge = applyChannelRatio(base, input.ratioNumerator ?? 1, input.ratioDenominator ?? 1);
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1750,130 +1921,6 @@ export class AdminStore {
         outputTokens: row.output_tokens,
       })),
     };
-  }
-
-  userModelChoice(userId: string): UserModelChoice {
-    this.requireUser(userId);
-    const rows = this.db
-      .prepare("SELECT model_id FROM user_models WHERE user_id = ? ORDER BY model_id")
-      .all(userId) as Array<{ model_id: string }>;
-    if (rows.length === 0) {
-      return { mode: "all" };
-    }
-    return {
-      mode: "only",
-      modelIds: rows.map((row) => row.model_id).filter((modelId) => modelId !== EMPTY_MODEL_SELECTION),
-    };
-  }
-
-  setUserModels(userId: string, modelIds: string[] | null): void {
-    this.requireUser(userId);
-    if (modelIds === null) {
-      this.db.prepare("DELETE FROM user_models WHERE user_id = ?").run(userId);
-      return;
-    }
-    if (!Array.isArray(modelIds)) {
-      throw Object.assign(new Error("modelIds is required"), { statusCode: 400 });
-    }
-    const unique: string[] = [];
-    const seen: Record<string, true> = {};
-    for (const modelId of modelIds) {
-      if (typeof modelId !== "string") {
-        throw Object.assign(new Error("unknown model"), { statusCode: 400 });
-      }
-      const trimmed = modelId.trim();
-      if (!trimmed) {
-        throw Object.assign(new Error("unknown model"), { statusCode: 400 });
-      }
-      if (seen[trimmed]) {
-        continue;
-      }
-      seen[trimmed] = true;
-      unique.push(trimmed);
-    }
-    const providers = this.userProviderChoice(userId);
-    const published = new Set(
-      this.listPublicCatalog(providers.mode === "only" ? providers.providerIds : null).data.map((model) => model.id),
-    );
-    for (const modelId of unique) {
-      if (!published.has(modelId)) {
-        throw Object.assign(new Error("unknown model"), { statusCode: 400 });
-      }
-    }
-    this.db.exec("BEGIN");
-    try {
-      this.db.prepare("DELETE FROM user_models WHERE user_id = ?").run(userId);
-      const insert = this.db.prepare("INSERT INTO user_models (user_id, model_id) VALUES (?, ?)");
-      if (unique.length === 0) {
-        insert.run(userId, EMPTY_MODEL_SELECTION);
-      } else {
-        for (const modelId of unique) {
-          insert.run(userId, modelId);
-        }
-      }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  userProviderChoice(userId: string): UserProviderChoice {
-    this.requireUser(userId);
-    const rows = this.db
-      .prepare("SELECT provider_id FROM user_providers WHERE user_id = ? ORDER BY provider_id")
-      .all(userId) as Array<{ provider_id: string }>;
-    if (rows.length === 0) {
-      return { mode: "all" };
-    }
-    return {
-      mode: "only",
-      providerIds: rows.map((row) => row.provider_id).filter((providerId) => providerId !== EMPTY_PROVIDER_SELECTION),
-    };
-  }
-
-  setUserProviders(userId: string, providerIds: string[] | null): void {
-    this.requireUser(userId);
-    if (providerIds === null) {
-      this.db.prepare("DELETE FROM user_providers WHERE user_id = ?").run(userId);
-      return;
-    }
-    if (!Array.isArray(providerIds)) {
-      throw Object.assign(new Error("providerIds is required"), { statusCode: 400 });
-    }
-    const known = new Set(this.listConnectionProviderIds());
-    const unique: string[] = [];
-    const seen: Record<string, true> = {};
-    for (const providerId of providerIds) {
-      if (typeof providerId !== "string") {
-        throw Object.assign(new Error("unknown provider"), { statusCode: 400 });
-      }
-      const trimmed = providerId.trim();
-      if (!trimmed || !known.has(trimmed)) {
-        throw Object.assign(new Error("unknown provider"), { statusCode: 400 });
-      }
-      if (seen[trimmed]) {
-        continue;
-      }
-      seen[trimmed] = true;
-      unique.push(trimmed);
-    }
-    this.db.exec("BEGIN");
-    try {
-      this.db.prepare("DELETE FROM user_providers WHERE user_id = ?").run(userId);
-      const insert = this.db.prepare("INSERT INTO user_providers (user_id, provider_id) VALUES (?, ?)");
-      if (unique.length === 0) {
-        insert.run(userId, EMPTY_PROVIDER_SELECTION);
-      } else {
-        for (const providerId of unique) {
-          insert.run(userId, providerId);
-        }
-      }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
   }
 
   addOperationLog(entry: Omit<OperationLog, "id" | "createdAt">): OperationLog {
@@ -2296,6 +2343,14 @@ export class AdminStore {
     };
   }
 
+  private requireChannel(id: string): Channel {
+    const channel = this.getChannel(id);
+    if (!channel) {
+      throw Object.assign(new Error("channel not found"), { statusCode: 404 });
+    }
+    return channel;
+  }
+
   private toApiKey(row: ApiKeyRow): StoredApiKey {
     return {
       id: row.id,
@@ -2303,6 +2358,7 @@ export class AdminStore {
       prefix: row.prefix,
       createdAt: row.created_at,
       userId: row.user_id ?? null,
+      channelId: row.channel_id ?? null,
     };
   }
 
@@ -2534,6 +2590,80 @@ function migrateUsers(db: DatabaseSync): void {
       PRIMARY KEY (user_id, provider_id)
     );
   `);
+  migrateChannels(db);
+}
+
+function migrateChannels(db: DatabaseSync): void {
+  const hadChannels = Boolean(
+    db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'channels'").get(),
+  );
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS channels (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      ratio_numerator INTEGER NOT NULL,
+      ratio_denominator INTEGER NOT NULL,
+      model_rule TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS user_channels (
+      user_id TEXT NOT NULL REFERENCES users(id),
+      channel_id TEXT NOT NULL REFERENCES channels(id),
+      PRIMARY KEY (user_id, channel_id)
+    );
+  `);
+  const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+  if (!apiKeyColumns.some((column) => column.name === "channel_id")) {
+    db.exec("ALTER TABLE api_keys ADD COLUMN channel_id TEXT");
+  }
+  if (hadChannels) {
+    return;
+  }
+  const users = db.prepare("SELECT COUNT(*) AS count FROM users").get() as { count: number | bigint };
+  const keys = db.prepare("SELECT COUNT(*) AS count FROM api_keys").get() as { count: number | bigint };
+  if (Number(users.count) === 0 && Number(keys.count) === 0) {
+    return;
+  }
+  const grokId = crypto.randomUUID();
+  const standardId = crypto.randomUUID();
+  const insert = db.prepare(
+    `INSERT INTO channels (id, name, ratio_numerator, ratio_denominator, model_rule)
+     VALUES (?, ?, ?, ?, ?)`,
+  );
+  insert.run(
+    grokId,
+    "Grok",
+    1,
+    10,
+    JSON.stringify({
+      kind: "match",
+      providerId: "xai",
+      prefix: "grok-",
+      excludePrefix: "grok-imagine",
+      chatOnly: true,
+    }),
+  );
+  insert.run(standardId, "Standard", 7, 1, JSON.stringify({ kind: "all" }));
+  db.prepare("INSERT INTO user_channels (user_id, channel_id) SELECT id, ? FROM users").run(grokId);
+  db.prepare("UPDATE api_keys SET channel_id = ?").run(grokId);
+}
+
+function toChannel(row: ChannelRow): Channel {
+  let rule: ChannelModelRule = { kind: "all" };
+  try {
+    rule = JSON.parse(row.model_rule) as ChannelModelRule;
+  } catch {
+    rule = { kind: "all" };
+  }
+  if (rule.kind !== "all" && rule.kind !== "match") {
+    rule = { kind: "all" };
+  }
+  return {
+    id: row.id,
+    name: row.name,
+    ratioNumerator: Number(row.ratio_numerator),
+    ratioDenominator: Number(row.ratio_denominator),
+    rule,
+  };
 }
 
 type SubscriptionUsageRow = {

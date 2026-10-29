@@ -26,6 +26,7 @@ import { LoginRateLimiter } from "./rate-limit.js";
 import { readRequestPayload, type RequestLogRecorder } from "./request-logs.js";
 import type { ModelPriceLookup } from "./chat.js";
 import { formatUsd } from "./money.js";
+import { parseChannelRule } from "./channels.js";
 import type {
   AdminStore,
   OperationLog,
@@ -645,33 +646,78 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     }
   });
 
-  app.get("/api/admin/users/:id/providers", async (request, reply) => {
+  app.get("/api/admin/channels", async () => {
+    return { channels: options.store.listChannels().map((channel) => options.store.channelView(channel)) };
+  });
+
+  app.post("/api/admin/channels", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.name !== "string" || typeof body.ratio !== "string") {
+      return reply.code(400).send({ error: { message: "name and ratio are required", type: "viate_error" } });
+    }
+    try {
+      const channel = options.store.createChannel({
+        name: body.name,
+        ratio: body.ratio,
+        rule: parseChannelRule(body.rule),
+      });
+      return { channel: options.store.channelView(channel) };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.put("/api/admin/channels/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = asRecord(request.body);
+    if (typeof body.name !== "string" || typeof body.ratio !== "string") {
+      return reply.code(400).send({ error: { message: "name and ratio are required", type: "viate_error" } });
+    }
+    try {
+      const channel = options.store.updateChannel(id, {
+        name: body.name,
+        ratio: body.ratio,
+        rule: parseChannelRule(body.rule),
+      });
+      return { channel: options.store.channelView(channel) };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.delete("/api/admin/channels/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
-      const choice = options.store.userProviderChoice(id);
+      options.store.deleteChannel(id);
+      return { ok: true };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.get("/api/admin/users/:id/channels", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
       return {
-        mode: choice.mode,
-        providerIds: choice.mode === "only" ? choice.providerIds : [],
-        available: options.store.listConnectionProviderIds(),
+        channelIds: options.store.listUserChannelIds(id),
+        channels: options.store.listChannels().map((channel) => options.store.channelView(channel)),
       };
     } catch (error) {
       return sendStoreError(reply, error);
     }
   });
 
-  app.put("/api/admin/users/:id/providers", async (request, reply) => {
+  app.put("/api/admin/users/:id/channels", async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = asRecord(request.body);
-    if (!Object.hasOwn(body, "providerIds") || (body.providerIds !== null && !Array.isArray(body.providerIds))) {
-      return reply.code(400).send({ error: { message: "providerIds is required", type: "viate_error" } });
+    if (!Array.isArray(body.channelIds)) {
+      return reply.code(400).send({ error: { message: "channelIds is required", type: "viate_error" } });
     }
     try {
-      options.store.setUserProviders(id, body.providerIds as string[] | null);
-      const choice = options.store.userProviderChoice(id);
+      const channelIds = options.store.setUserChannels(id, body.channelIds as string[]);
       return {
-        mode: choice.mode,
-        providerIds: choice.mode === "only" ? choice.providerIds : [],
-        available: options.store.listConnectionProviderIds(),
+        channelIds,
+        channels: options.store.listChannels().map((channel) => options.store.channelView(channel)),
       };
     } catch (error) {
       return sendStoreError(reply, error);
