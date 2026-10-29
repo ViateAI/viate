@@ -12,6 +12,8 @@ import { decryptSecret, encryptSecret, loadOrCreateCredentialKey } from "./crypt
 import { hashPassword, verifyPassword } from "./passwords.js";
 import { asNano, chargeNano, formatUsd, parseRateUsdToNano, parseUsdToNano, sqlInteger } from "./money.js";
 
+const VIDEO_REQUEST_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 export type KeepaliveStatus = "idle" | "ok" | "failed" | "needs_reauth";
 
 export type SubscriptionStatus = "unknown" | "ok" | "failed" | "needs_reauth";
@@ -90,7 +92,11 @@ export type RequestLogEndpoint =
   | "images.generations"
   | "images.edits"
   | "audio.transcriptions"
-  | "audio.speech";
+  | "audio.speech"
+  | "videos.generations"
+  | "videos.edits"
+  | "videos.extensions"
+  | "videos.result";
 
 export type RequestLogOutcome =
   | "success"
@@ -233,6 +239,16 @@ export type StoredApiKey = {
 export type CreatedApiKey = {
   apiKey: StoredApiKey;
   secret: string;
+};
+
+export type StoredVideoRequest = {
+  requestId: string;
+  connectionId: string;
+  providerId: string;
+  modelId: string;
+  userId: string | null;
+  apiKeyId: string | null;
+  createdAt: string;
 };
 
 export type GatewayUser = {
@@ -400,6 +416,16 @@ type RequestLogRow = {
   payload_truncated: number;
 };
 
+type VideoRequestRow = {
+  request_id: string;
+  connection_id: string;
+  provider_id: string;
+  model_id: string;
+  user_id: string | null;
+  api_key_id: string | null;
+  created_at: string;
+};
+
 type RequestAttemptRow = {
   request_id: string;
   seq: number;
@@ -533,6 +559,15 @@ export class AdminStore {
         error TEXT,
         PRIMARY KEY (request_id, seq),
         FOREIGN KEY (request_id) REFERENCES request_logs(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS video_requests (
+        request_id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        user_id TEXT,
+        api_key_id TEXT,
+        created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS request_stats_minute (
         bucket TEXT NOT NULL,
@@ -1250,6 +1285,59 @@ export class AdminStore {
     if (result.changes === 0) {
       throw Object.assign(new Error("api key not found"), { statusCode: 404 });
     }
+  }
+
+  saveVideoRequest(input: {
+    requestId: string;
+    connectionId: string;
+    providerId: string;
+    modelId: string;
+    userId: string | null;
+    apiKeyId: string | null;
+  }): void {
+    const now = Date.now();
+    this.db
+      .prepare("DELETE FROM video_requests WHERE created_at < ?")
+      .run(new Date(now - VIDEO_REQUEST_TTL_MS).toISOString());
+    this.db
+      .prepare(
+        `INSERT INTO video_requests (request_id, connection_id, provider_id, model_id, user_id, api_key_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(request_id) DO UPDATE SET
+           connection_id = excluded.connection_id,
+           provider_id = excluded.provider_id,
+           model_id = excluded.model_id,
+           user_id = excluded.user_id,
+           api_key_id = excluded.api_key_id,
+           created_at = excluded.created_at`,
+      )
+      .run(
+        input.requestId,
+        input.connectionId,
+        input.providerId,
+        input.modelId,
+        input.userId,
+        input.apiKeyId,
+        new Date(now).toISOString(),
+      );
+  }
+
+  getVideoRequest(requestId: string): StoredVideoRequest | null {
+    const row = this.db.prepare("SELECT * FROM video_requests WHERE request_id = ?").get(requestId) as
+      | VideoRequestRow
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      requestId: row.request_id,
+      connectionId: row.connection_id,
+      providerId: row.provider_id,
+      modelId: row.model_id,
+      userId: row.user_id,
+      apiKeyId: row.api_key_id,
+      createdAt: row.created_at,
+    };
   }
 
   createUser(input: { email: string; name: string; password: string }): GatewayUser {

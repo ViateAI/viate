@@ -11,6 +11,7 @@ import type { SessionStore } from "./sessions.js";
 import { RequestLogRecorder } from "./request-logs.js";
 import { multipartAudioBody } from "./audio.js";
 import { multipartImageBody } from "./images.js";
+import { multipartVideoBody, VIDEO_MULTIPART_PATHS } from "./videos.js";
 
 export type HealthResponse = {
   status: "ok";
@@ -57,8 +58,9 @@ export function createApp(options: Pick<BuildAppOptions, "logger"> = {}): App {
       const contentType = request.headers["content-type"];
       const header = Array.isArray(contentType) ? contentType[0] : contentType;
       const path = request.url.split("?")[0] ?? "";
-      const parsed =
-        path === "/v1/audio/transcriptions"
+      const parsed = VIDEO_MULTIPART_PATHS[path]
+        ? multipartVideoBody(header, body as Buffer)
+        : path === "/v1/audio/transcriptions"
           ? multipartAudioBody(header, body as Buffer)
           : multipartImageBody(header, body as Buffer);
       done(null, parsed);

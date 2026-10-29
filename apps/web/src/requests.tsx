@@ -118,6 +118,10 @@ const ENDPOINTS = [
   "images.edits",
   "audio.transcriptions",
   "audio.speech",
+  "videos.generations",
+  "videos.edits",
+  "videos.extensions",
+  "videos.result",
 ] as const;
 
 export function RequestsPage() {

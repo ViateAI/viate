@@ -144,6 +144,22 @@ export type AudioSpeech = {
   audioSpeech(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
 };
 
+export type VideoGenerations = {
+  videoGenerations(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
+};
+
+export type VideoEdits = {
+  videoEdits(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
+};
+
+export type VideoExtensions = {
+  videoExtensions(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
+};
+
+export type VideoResult = {
+  videoResult(request: JsonPostRequest, connection: ProviderConnection): Promise<HttpExchange>;
+};
+
 export type Models = {
   listModels(request: JsonGetRequest, connection: ProviderConnection): Promise<ModelList>;
 };
@@ -204,6 +220,10 @@ export type ProviderHandler = {
     ImageEdits &
     AudioTranscriptions &
     AudioSpeech &
+    VideoGenerations &
+    VideoEdits &
+    VideoExtensions &
+    VideoResult &
     Models &
     Keepalive &
     Subscription

@@ -60,6 +60,10 @@ export type AdminPluginView = {
     | "imageEdits"
     | "audioTranscriptions"
     | "audioSpeech"
+    | "videoGenerations"
+    | "videoEdits"
+    | "videoExtensions"
+    | "videoResult"
   >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
@@ -772,6 +776,10 @@ function toPluginViews(
     if (provider?.imageEdits) capabilities.push("imageEdits");
     if (provider?.audioTranscriptions) capabilities.push("audioTranscriptions");
     if (provider?.audioSpeech) capabilities.push("audioSpeech");
+    if (provider?.videoGenerations) capabilities.push("videoGenerations");
+    if (provider?.videoEdits) capabilities.push("videoEdits");
+    if (provider?.videoExtensions) capabilities.push("videoExtensions");
+    if (provider?.videoResult) capabilities.push("videoResult");
     return {
       name: plugin.name,
       version: plugin.version,
@@ -883,6 +891,10 @@ const REQUEST_ENDPOINTS: Record<string, true> = {
   "images.edits": true,
   "audio.transcriptions": true,
   "audio.speech": true,
+  "videos.generations": true,
+  "videos.edits": true,
+  "videos.extensions": true,
+  "videos.result": true,
 };
 
 function hasRequestRangeFilter(query: Record<string, string | undefined>): boolean {

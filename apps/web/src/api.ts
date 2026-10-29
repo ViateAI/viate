@@ -16,13 +16,17 @@ export type AdminPlugin = {
     | "imageEdits"
     | "audioTranscriptions"
     | "audioSpeech"
+    | "videoGenerations"
+    | "videoEdits"
+    | "videoExtensions"
+    | "videoResult"
   >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
   hasOAuth: boolean;
   hasKeepalive: boolean;
   hasSubscription: boolean;
-  advertisedEndpointTypes: Array<"openai" | "openai-response" | "openai-image" | "openai-audio">;
+  advertisedEndpointTypes: Array<"openai" | "openai-response" | "openai-image" | "openai-audio" | "openai-video">;
 };
 
 export type CredentialField = {
