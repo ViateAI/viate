@@ -55,7 +55,7 @@ function isDataUrl(value: string): boolean {
   return /^data:[a-z0-9.+-]+\/[a-z0-9.+-]+(?:;[^,]*)?,/i.test(value);
 }
 
-type MultipartPart = { name: string; mediaType: string; body: Buffer };
+export type MultipartPart = { name: string; filename: string | null; mediaType: string; body: Buffer };
 
 export function readMultipart(contentType: string | undefined, raw: Buffer): MultipartPart[] {
   const boundary = boundaryFrom(contentType ?? "");
@@ -111,8 +111,10 @@ function parsePart(chunk: Buffer): MultipartPart | null {
   }
   const header = chunk.subarray(0, separated.header).toString("utf8");
   const name = /(?:^|;)\s*name="([^"]*)"|name=([^;\s]+)/i.exec(header)?.[1] ?? /(?:^|;)\s*name="([^"]*)"|name=([^;\s]+)/i.exec(header)?.[2] ?? "";
+  const filenameMatch = /(?:^|;)\s*filename="([^"]*)"|filename=([^;\s]+)/i.exec(header);
+  const filename = filenameMatch ? filenameMatch[1] ?? filenameMatch[2] ?? "" : null;
   const mediaType = /content-type:\s*([^;\r\n]+)/i.exec(header)?.[1]?.trim() || "application/octet-stream";
-  return { name, mediaType, body: chunk.subarray(separated.body) };
+  return { name, filename, mediaType, body: chunk.subarray(separated.body) };
 }
 
 function headerEnd(chunk: Buffer): { header: number; body: number } | null {

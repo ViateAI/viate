@@ -16,13 +16,17 @@ export type AdminPlugin = {
     | "imageEdits"
     | "audioTranscriptions"
     | "audioSpeech"
+    | "videoGenerations"
+    | "videoEdits"
+    | "videoExtensions"
+    | "videoResult"
   >;
   credentialsForm: CredentialField[];
   hasParseCredentials: boolean;
   hasOAuth: boolean;
   hasKeepalive: boolean;
   hasSubscription: boolean;
-  advertisedEndpointTypes: Array<"openai" | "openai-response" | "openai-image" | "openai-audio">;
+  advertisedEndpointTypes: Array<"openai" | "openai-response" | "openai-image" | "openai-audio" | "openai-video">;
 };
 
 export type CredentialField = {
@@ -140,6 +144,24 @@ export type ClientApiKey = {
   prefix: string;
   createdAt: string;
   userId: string | null;
+  channelId: string | null;
+};
+
+export type ChannelRule =
+  | { kind: "all" }
+  | {
+      kind: "match";
+      providerId: string | null;
+      prefix: string | null;
+      excludePrefix: string | null;
+      chatOnly: boolean;
+    };
+
+export type ChannelView = {
+  id: string;
+  name: string;
+  ratio: string;
+  rule: ChannelRule;
 };
 
 export type GatewayUser = {

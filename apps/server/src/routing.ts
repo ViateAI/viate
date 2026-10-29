@@ -22,7 +22,10 @@ export type RoutedCapability =
   | "imageGenerations"
   | "imageEdits"
   | "audioTranscriptions"
-  | "audioSpeech";
+  | "audioSpeech"
+  | "videoGenerations"
+  | "videoEdits"
+  | "videoExtensions";
 
 export type RoutedResult = {
   exchange: HttpExchange;

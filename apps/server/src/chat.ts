@@ -10,7 +10,8 @@ import {
   type ProviderHandler,
 } from "@viateai/sdk";
 import { dispatchRouted, RouteError } from "./routing.js";
-import { resolvePublishedMembers } from "./catalog.js";
+import { parseRequestModel, resolvePublishedMembers } from "./catalog.js";
+import { channelMatchesModel, channelProviderLimit, type Channel } from "./channels.js";
 import {
   classifyOutcome,
   endpointForCapability,
@@ -19,9 +20,10 @@ import {
   type RequestLogRecorder,
 } from "./request-logs.js";
 import { createKeepaliveScheduler } from "./keepalive.js";
-import type { AdminStore, PublicModel, StoredApiKey } from "./store.js";
+import type { AdminStore, StoredApiKey, StoredVideoRequest } from "./store.js";
 import { tapExchange } from "./usage-frames.js";
 import { assertAudioRequest, loggedRequestBody, loggedResponseBody } from "./audio.js";
+import { captureVideoJob } from "./videos.js";
 
 export type ClientAuthenticator = (secret: string | undefined) => StoredApiKey | null;
 
@@ -52,7 +54,10 @@ type Capability =
   | "imageGenerations"
   | "imageEdits"
   | "audioTranscriptions"
-  | "audioSpeech";
+  | "audioSpeech"
+  | "videoGenerations"
+  | "videoEdits"
+  | "videoExtensions";
 
 const CORE_TIMEOUT_MS = 10 * 60 * 1_000;
 
@@ -99,6 +104,18 @@ export async function registerChatRoute(app: FastifyInstance, options: ChatRoute
   );
   app.post("/v1/audio/speech", (request, reply) =>
     dispatch(request, reply, "audioSpeech", options, providers),
+  );
+  app.post("/v1/videos/generations", (request, reply) =>
+    dispatch(request, reply, "videoGenerations", options, providers),
+  );
+  app.post("/v1/videos/edits", (request, reply) =>
+    dispatch(request, reply, "videoEdits", options, providers),
+  );
+  app.post("/v1/videos/extensions", (request, reply) =>
+    dispatch(request, reply, "videoExtensions", options, providers),
+  );
+  app.get<{ Params: { requestId: string } }>("/v1/videos/:requestId", (request, reply) =>
+    pollVideo(request, reply, options, providers),
   );
 
   if (options.store) {
@@ -148,6 +165,8 @@ async function dispatch(
   let billRequestId: string | null = null;
   let billedRates: { inputNanoPerMillion: number; outputNanoPerMillion: number } | null = null;
   let billedPerRequestNano = 0;
+  let billedRatioNumerator = 1;
+  let billedRatioDenominator = 1;
   const settle = (inputTokens: number, outputTokens: number, includePerRequest = false) => {
     if (!admitted || !billRequestId || !billUserId || !options.store) {
       return;
@@ -161,6 +180,8 @@ async function dispatch(
       inputNanoPerMillion: rates?.inputNanoPerMillion ?? 0,
       outputNanoPerMillion: rates?.outputNanoPerMillion ?? 0,
       perRequestNano: includePerRequest ? billedPerRequestNano : 0,
+      ratioNumerator: billedRatioNumerator,
+      ratioDenominator: billedRatioDenominator,
     });
   };
 
@@ -169,8 +190,13 @@ async function dispatch(
       if (billUserId && options.store) {
         options.store.assertUserActive(billUserId);
       }
+      const channel = keyChannel(options.store, apiKey);
+      if (channel === "denied") {
+        cleanup();
+        return viateError(reply, 403, "channel not available");
+      }
       cleanup();
-      return reply.code(200).send(publicCatalogFor(options.store, billUserId));
+      return reply.code(200).send(publicCatalogFor(options.store, channel));
     }
     if (!options.store) {
       cleanup();
@@ -179,19 +205,23 @@ async function dispatch(
     if (capability === "audioTranscriptions" || capability === "audioSpeech") {
       assertAudioRequest(capability, request.body);
     }
+    const channel = keyChannel(options.store, apiKey);
+    if (channel === "denied") {
+      throw Object.assign(new Error("channel not available"), { statusCode: 403 });
+    }
+    const routeProviders = channel ? channelProviderLimit(channel.rule) : null;
+    if (channel && options.store) {
+      const requested = requestModelFrom(request.body);
+      if (requested && !modelAllowedByChannel(options.store, channel, requested, providers.keys(), capability)) {
+        throw Object.assign(new Error("model not available"), { statusCode: 403 });
+      }
+    }
+    if (channel && billUserId) {
+      billedRatioNumerator = channel.ratioNumerator;
+      billedRatioDenominator = channel.ratioDenominator;
+    }
     if (billUserId && options.store) {
-      const choice = options.store.userModelChoice(billUserId);
-      if (choice.mode === "only") {
-        const requested = requestModelFrom(request.body);
-        if (requested && !choice.modelIds.includes(requested)) {
-          throw Object.assign(new Error("model not available"), { statusCode: 403 });
-        }
-      }
-      const allowedProviderIds = allowedProviders(options.store, billUserId);
       const model = requestModelFrom(request.body);
-      if (model && allowedProviderIds && !providerVisible(options.store, model, allowedProviderIds, providers.keys())) {
-        throw Object.assign(new Error("provider not available"), { statusCode: 403 });
-      }
       if (model) {
         const catalog = options.modelPrices;
         if (!catalog?.ready) {
@@ -220,9 +250,12 @@ async function dispatch(
       { body: request.body, headers, signal },
       clientAbort.signal,
       options.onUpstreamAuthFailure,
-      billUserId && options.store ? allowedProviders(options.store, billUserId) : null,
+      routeProviders ? new Set(routeProviders) : null,
     );
-    const { exchange, tap } = tapExchange(routed.exchange, startedAt);
+    const captured = isVideoSubmit(capability)
+      ? await captureVideoJob(routed.exchange, routed, options.store, apiKey)
+      : routed.exchange;
+    const { exchange, tap } = tapExchange(captured, startedAt);
     const sent = sendUpstream(reply, exchange);
     void tap
       .then((result) => {
@@ -310,6 +343,118 @@ async function dispatch(
   }
 }
 
+function isVideoSubmit(capability: Capability): boolean {
+  return capability === "videoGenerations" || capability === "videoEdits" || capability === "videoExtensions";
+}
+
+async function pollVideo(
+  request: FastifyRequest<{ Params: { requestId: string } }>,
+  reply: FastifyReply,
+  options: ChatRouteOptions,
+  providers: Map<string, ProviderHandler>,
+): Promise<FastifyReply | undefined> {
+  const startedAt = Date.now();
+  const apiKey = (request as AuthenticatedRequest).viateV1?.apiKey ?? null;
+  const job = options.store?.getVideoRequest(request.params.requestId) ?? null;
+  if (!job) {
+    return viateError(reply, 404, "unknown video request");
+  }
+  if (job.userId ? job.userId !== apiKey?.userId : job.apiKeyId !== apiKey?.id) {
+    return viateError(reply, 403, "forbidden");
+  }
+  const store = options.store;
+  if (!store || !store.getConnection(job.connectionId)) {
+    return viateError(reply, 404, "unknown video request");
+  }
+  const credentials = store.getCredentials(job.connectionId);
+  if (credentials === null) {
+    return viateError(reply, 404, "unknown video request");
+  }
+  const handler = providers.get(job.providerId)?.videoResult;
+  if (!handler) {
+    return viateError(reply, 404, "capability not supported");
+  }
+
+  const body = { request_id: job.requestId };
+  const signal = AbortSignal.timeout(CORE_TIMEOUT_MS);
+  try {
+    const upstream = await handler(
+      { body, headers: pickAllowedHeaders(request.headers, INBOUND_HEADER_ALLOWLIST), signal },
+      { connectionId: job.connectionId, providerId: job.providerId, credentials },
+    );
+    const { exchange, tap } = tapExchange(upstream, startedAt);
+    const sent = sendUpstream(reply, exchange);
+    void tap
+      .then((result) => {
+        recordVideoResult(options, job, apiKey, {
+          startedAt,
+          status: exchange.status,
+          error: exchange.status >= 400 ? `upstream ${exchange.status}` : null,
+          ttfbMs: result.ttfbMs,
+          requestBody: body,
+          responseBody: loggedResponseBody("videoResult", exchange.headers["content-type"], result.responseBody),
+          payloadTruncated: result.truncated,
+        });
+      })
+      .catch(() => {});
+    return sent;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status =
+      typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number"
+        ? error.statusCode
+        : 500;
+    recordVideoResult(options, job, apiKey, {
+      startedAt,
+      status,
+      error: message,
+      ttfbMs: null,
+      requestBody: body,
+      responseBody: null,
+      payloadTruncated: false,
+    });
+    return viateError(reply, status, message);
+  }
+}
+
+function recordVideoResult(
+  options: ChatRouteOptions,
+  job: StoredVideoRequest,
+  apiKey: StoredApiKey | null,
+  event: {
+    startedAt: number;
+    status: number;
+    error: string | null;
+    ttfbMs: number | null;
+    requestBody: unknown;
+    responseBody: unknown;
+    payloadTruncated: boolean;
+  },
+): void {
+  options.requestLogs?.record({
+    startedAt: event.startedAt,
+    endedAt: Date.now(),
+    endpoint: "videos.result",
+    stream: false,
+    status: event.status,
+    outcome: classifyOutcome(event.status, false, false),
+    requestModel: job.modelId,
+    upstreamModel: job.modelId,
+    providerId: job.providerId,
+    connectionId: job.connectionId,
+    apiKeyId: apiKey?.id ?? null,
+    apiKeyPrefix: apiKey?.prefix ?? null,
+    userId: apiKey?.userId ?? null,
+    attempts: [],
+    usage: null,
+    error: event.error,
+    ttfbMs: event.ttfbMs,
+    requestBody: loggedRequestBody(event.requestBody),
+    responseBody: event.responseBody,
+    payloadTruncated: event.payloadTruncated,
+  });
+}
+
 function clientSecretFrom(request: FastifyRequest): string | undefined {
   const header = request.headers["x-api-key"];
   const xApiKey = Array.isArray(header) ? header[0] : header;
@@ -325,42 +470,50 @@ function clientSecretFrom(request: FastifyRequest): string | undefined {
   return match?.[1];
 }
 
-function publicCatalogFor(
-  store: AdminStore | undefined,
-  userId: string | null,
-): { object: "list"; data: PublicModel[] } {
+function keyChannel(store: AdminStore | undefined, apiKey: StoredApiKey | null): Channel | null | "denied" {
+  if (!store || !apiKey?.channelId) {
+    return null;
+  }
+  const channel = store.getChannel(apiKey.channelId);
+  if (!channel) {
+    return "denied";
+  }
+  if (apiKey.userId && !store.userHasChannel(apiKey.userId, channel.id)) {
+    return "denied";
+  }
+  return channel;
+}
+
+function publicCatalogFor(store: AdminStore | undefined, channel: Channel | null) {
   if (!store) {
     return { object: "list", data: [] };
   }
-  const providerChoice = userId ? store.userProviderChoice(userId) : null;
-  const catalog = store.listPublicCatalog(providerChoice?.mode === "only" ? providerChoice.providerIds : null);
-  if (!userId) {
-    return catalog;
+  if (!channel) {
+    return store.listPublicCatalog();
   }
-  const choice = store.userModelChoice(userId);
-  if (choice.mode === "all") {
-    return catalog;
-  }
-  const allowed = new Set(choice.modelIds);
-  return { object: "list", data: catalog.data.filter((model) => allowed.has(model.id)) };
+  return store.listChannelCatalog(channel);
 }
 
-function allowedProviders(store: AdminStore, userId: string): ReadonlySet<string> | null {
-  const choice = store.userProviderChoice(userId);
-  if (choice.mode === "all") {
-    return null;
-  }
-  return new Set(choice.providerIds);
-}
-
-function providerVisible(
+function modelAllowedByChannel(
   store: AdminStore,
-  model: string,
-  allowed: ReadonlySet<string>,
+  channel: Channel,
+  requested: string,
   loadedProviderIds: Iterable<string>,
+  capability: string,
 ): boolean {
-  const published = resolvePublishedMembers(store, model, loadedProviderIds);
-  return published.length === 0 || published.some((member) => allowed.has(member.providerId));
+  const parsed = parseRequestModel(requested, loadedProviderIds);
+  const members = resolvePublishedMembers(store, requested, loadedProviderIds);
+  const providerIds: string[] = [];
+  const seen: Record<string, true> = {};
+  for (const member of members) {
+    if (seen[member.providerId]) {
+      continue;
+    }
+    seen[member.providerId] = true;
+    providerIds.push(member.providerId);
+  }
+  const endpointTypes = providerIds.flatMap((providerId) => store.getAdvertisedEndpointTypes(providerId));
+  return channelMatchesModel(channel.rule, { id: parsed.modelId, providerIds, endpointTypes }, capability);
 }
 
 function sendUpstream(reply: FastifyReply, upstream: HttpExchange): FastifyReply {

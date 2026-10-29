@@ -14,6 +14,11 @@ describe("parseAdvertisedEndpointTypes", () => {
       "openai-image",
       "openai-audio",
     ]);
+    assert.deepEqual(parseAdvertisedEndpointTypes(["openai-video", "openai-audio", "openai"]), [
+      "openai",
+      "openai-audio",
+      "openai-video",
+    ]);
     assert.deepEqual(parseAdvertisedEndpointTypes([]), []);
     assert.deepEqual([...VIATE_DEFAULT_ENDPOINT_TYPES], ["openai", "openai-response"]);
     assert.throws(() => parseAdvertisedEndpointTypes(["anthropic"]), /unsupported endpoint type/);
