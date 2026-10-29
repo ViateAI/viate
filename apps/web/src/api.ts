@@ -95,6 +95,7 @@ export type ConnectionModel = {
   id: string;
   name: string;
   enabled: boolean;
+  custom: boolean;
 };
 
 export type ConnectionModelCatalog = {

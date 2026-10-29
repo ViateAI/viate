@@ -333,6 +333,88 @@ describe("POST /v1/audio", () => {
       await fixture.close();
     }
   });
+
+  it("routes a custom transcription model the provider catalog does not list", async () => {
+    resetRoutingStateForTests();
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-audio-custom-"));
+    const store = await AdminStore.open(dataDir);
+    const secret = store.createApiKey("audio").secret;
+    const created = store.createConnection("xai-oauth");
+    store.putCredentials(created.id, { token: "k" }, "xai");
+    store.setActive(created.id, true);
+    const calls: string[] = [];
+    const provider: ProviderHandler = {
+      id: "xai-oauth",
+      async audioTranscriptions(request) {
+        const body = request.body;
+        calls.push(body && typeof body === "object" && "model" in body && typeof body.model === "string" ? body.model : "");
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: bytesBody(Buffer.from(JSON.stringify({ text: "heard" }))),
+        };
+      },
+    };
+    const app = await buildApp({ logger: false, providers: [provider], store });
+    const boundary = "viate-custom";
+    const wav = Buffer.from("RIFF-audio-bytes");
+    const payload = () => Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\ngrok-voice-transcribe-2.0\r\n` +
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="note.wav"\r\nContent-Type: audio/wav\r\n\r\n`,
+      ),
+      wav,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    try {
+      const missing = await app.inject({
+        method: "POST",
+        url: "/v1/audio/transcriptions",
+        headers: {
+          authorization: `Bearer ${secret}`,
+          "content-type": `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: payload(),
+      });
+      assert.equal(missing.statusCode, 404);
+      assert.match(missing.json().error.message, /unknown model/);
+      assert.equal(calls.length, 0);
+
+      const before = await app.inject({
+        method: "GET",
+        url: "/v1/models",
+        headers: { authorization: `Bearer ${secret}` },
+      });
+      assert.equal(before.json().data.some((model: { id: string }) => model.id === "grok-voice-transcribe-2.0"), false);
+
+      store.addConnectionModel(created.id, { id: "grok-voice-transcribe-2.0" });
+
+      const listed = await app.inject({
+        method: "GET",
+        url: "/v1/models",
+        headers: { authorization: `Bearer ${secret}` },
+      });
+      assert.equal(listed.statusCode, 200);
+      assert.equal(listed.json().data.some((model: { id: string }) => model.id === "grok-voice-transcribe-2.0"), true);
+
+      const hit = await app.inject({
+        method: "POST",
+        url: "/v1/audio/transcriptions",
+        headers: {
+          authorization: `Bearer ${secret}`,
+          "content-type": `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: payload(),
+      });
+      assert.equal(hit.statusCode, 200);
+      assert.deepEqual(hit.json(), { text: "heard" });
+      assert.deepEqual(calls, ["grok-voice-transcribe-2.0"]);
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
 });
 
 type AudioFixture = {

@@ -530,6 +530,34 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     }
   });
 
+  app.post("/api/admin/connections/:id/models", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = asRecord(request.body);
+    if (typeof body.id !== "string") {
+      return reply.code(400).send({ error: { message: "model id is required", type: "viate_error" } });
+    }
+    if (body.name !== undefined && typeof body.name !== "string") {
+      return reply.code(400).send({ error: { message: "name must be a string", type: "viate_error" } });
+    }
+    try {
+      return options.store.addConnectionModel(id, {
+        id: body.id,
+        ...(typeof body.name === "string" ? { name: body.name } : {}),
+      });
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.delete("/api/admin/connections/:id/models/:modelId", async (request, reply) => {
+    const { id, modelId } = request.params as { id: string; modelId: string };
+    try {
+      return options.store.deleteConnectionModel(id, decodeURIComponent(modelId));
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
   app.get("/api/admin/published-models", async () => {
     return { models: options.store.listAdminPublishedModels() };
   });

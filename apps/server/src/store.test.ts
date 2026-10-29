@@ -6,6 +6,13 @@ import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { AdminStore, type RequestLogRecord } from "./store.js";
 
+function statusOf(error: unknown): number | undefined {
+  if (typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number") {
+    return error.statusCode;
+  }
+  return undefined;
+}
+
 describe("AdminStore connections", () => {
   let dataDir = "";
   let store: AdminStore;
@@ -282,6 +289,76 @@ describe("AdminStore connection models", () => {
       ["anthropic/gpt-4o", "openai-compatible/gpt-4o"],
     );
   });
+
+  it("adds custom models, rejects duplicates, and preserves them across sync", () => {
+    const connection = store.createConnection("openai-compatible");
+    assert.throws(
+      () => store.addConnectionModel(connection.id, { id: "  " }),
+      (error: unknown) => statusOf(error) === 400 && error instanceof Error && /model id is required/.test(error.message),
+    );
+    assert.throws(
+      () => store.addConnectionModel("missing", { id: "voice" }),
+      (error: unknown) => statusOf(error) === 404,
+    );
+
+    const added = store.addConnectionModel(connection.id, {
+      id: " grok-voice-transcribe-2.0 ",
+      name: " Voice ",
+    });
+    assert.deepEqual(added.models.find((model) => model.id === "grok-voice-transcribe-2.0"), {
+      id: "grok-voice-transcribe-2.0",
+      name: "Voice",
+      enabled: true,
+      custom: true,
+    });
+    const unnamed = store.addConnectionModel(connection.id, { id: "plain" });
+    assert.equal(unnamed.models.find((model) => model.id === "plain")?.name, "plain");
+    assert.throws(
+      () => store.addConnectionModel(connection.id, { id: "grok-voice-transcribe-2.0" }),
+      (error: unknown) => statusOf(error) === 409 && error instanceof Error && /model already exists/.test(error.message),
+    );
+
+    store.setConnectionModelEnabled(connection.id, "grok-voice-transcribe-2.0", false);
+    const kept = store.replaceConnectionModels(connection.id, [{ id: "gpt-4o", name: "GPT-4o" }]);
+    assert.deepEqual(kept.models.find((model) => model.id === "grok-voice-transcribe-2.0"), {
+      id: "grok-voice-transcribe-2.0",
+      name: "Voice",
+      enabled: false,
+      custom: true,
+    });
+    assert.equal(kept.models.find((model) => model.id === "plain")?.custom, true);
+    assert.equal(kept.models.find((model) => model.id === "gpt-4o")?.custom, false);
+
+    store.addConnectionModel(connection.id, { id: "o3", name: "manual" });
+    store.setConnectionModelEnabled(connection.id, "o3", false);
+    const converted = store.replaceConnectionModels(connection.id, [
+      { id: "o3", name: "O3", context_length: 200000 },
+      { id: "gpt-4o", name: "GPT-4o upstream", context_length: 128000 },
+    ]);
+    assert.deepEqual(converted.models.find((model) => model.id === "o3"), {
+      id: "o3",
+      name: "O3",
+      enabled: false,
+      custom: false,
+      contextLength: 200000,
+    });
+    assert.equal(converted.models.find((model) => model.id === "gpt-4o")?.name, "GPT-4o upstream");
+    assert.equal(converted.models.find((model) => model.id === "gpt-4o")?.custom, false);
+    assert.equal(converted.models.find((model) => model.id === "grok-voice-transcribe-2.0")?.custom, true);
+    assert.equal(converted.models.find((model) => model.id === "grok-voice-transcribe-2.0")?.enabled, false);
+
+    assert.throws(
+      () => store.deleteConnectionModel(connection.id, "gpt-4o"),
+      (error: unknown) => statusOf(error) === 400 && error instanceof Error && /synced model cannot be removed/.test(error.message),
+    );
+    assert.throws(
+      () => store.deleteConnectionModel(connection.id, "missing-model"),
+      (error: unknown) => statusOf(error) === 404,
+    );
+    const removed = store.deleteConnectionModel(connection.id, "grok-voice-transcribe-2.0");
+    assert.equal(removed.models.some((model) => model.id === "grok-voice-transcribe-2.0"), false);
+    assert.equal(removed.models.find((model) => model.id === "plain")?.custom, true);
+  });
 });
 
 describe("AdminStore public catalog proxy fields", () => {
@@ -408,6 +485,49 @@ describe("AdminStore public catalog proxy fields", () => {
       assert.deepEqual(migrated.listPublicCatalog().data[0]?.supported_endpoint_types, [
         "openai",
         "openai-response",
+      ]);
+    } finally {
+      migrated.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults existing connection models to not custom", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-store-migrate-custom-"));
+    const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    db.exec(`
+      CREATE TABLE connections (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        credentials_enc TEXT,
+        display_label TEXT,
+        active INTEGER NOT NULL DEFAULT 0,
+        keepalive_status TEXT NOT NULL DEFAULT 'idle',
+        keepalive_error TEXT,
+        keepalive_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO connections (id, provider_id, created_at, updated_at)
+      VALUES ('c1', 'openai-compatible', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+      CREATE TABLE connection_models (
+        connection_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        synced_at TEXT NOT NULL,
+        context_length INTEGER,
+        PRIMARY KEY (connection_id, model_id)
+      );
+      INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length)
+      VALUES ('c1', 'gpt-4o', 'GPT-4o', 0, '2026-01-01T00:00:00.000Z', 128000);
+    `);
+    db.close();
+    const migrated = await AdminStore.open(dataDir);
+    try {
+      const catalog = migrated.getConnectionModels("c1");
+      assert.deepEqual(catalog.models, [
+        { id: "gpt-4o", name: "GPT-4o", enabled: false, custom: false, contextLength: 128000 },
       ]);
     } finally {
       migrated.close();

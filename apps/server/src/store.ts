@@ -56,6 +56,7 @@ export type StoredModel = {
   id: string;
   name: string;
   enabled: boolean;
+  custom: boolean;
   contextLength?: number;
 };
 
@@ -472,6 +473,7 @@ export class AdminStore {
         enabled INTEGER NOT NULL DEFAULT 1,
         synced_at TEXT NOT NULL,
         context_length INTEGER,
+        custom INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (connection_id, model_id),
         FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
       );
@@ -768,7 +770,7 @@ export class AdminStore {
     this.requireRow(id);
     const rows = this.db
       .prepare(
-        `SELECT model_id, name, enabled, synced_at, context_length
+        `SELECT model_id, name, enabled, synced_at, context_length, custom
          FROM connection_models
          WHERE connection_id = ?
          ORDER BY model_id`,
@@ -779,17 +781,28 @@ export class AdminStore {
         enabled: number;
         synced_at: string;
         context_length: number | null;
+        custom: number;
       }>;
     if (rows.length === 0) {
       return { connectionId: id, syncedAt: null, models: [] };
     }
+    let syncedAt: string | null = null;
+    for (const row of rows) {
+      if (row.custom === 1) {
+        continue;
+      }
+      if (!syncedAt || row.synced_at > syncedAt) {
+        syncedAt = row.synced_at;
+      }
+    }
     return {
       connectionId: id,
-      syncedAt: rows[0]?.synced_at ?? null,
+      syncedAt,
       models: rows.map((row) => ({
         id: row.model_id,
         name: row.name,
         enabled: row.enabled === 1,
+        custom: row.custom === 1,
         ...(typeof row.context_length === "number" ? { contextLength: row.context_length } : {}),
       })),
     };
@@ -800,17 +813,38 @@ export class AdminStore {
     models: Array<{ id: string; name?: string; context_length?: number }>,
   ): ConnectionModelCatalog {
     this.requireRow(id);
-    const previous = new Map(
-      (this.getConnectionModels(id)?.models ?? []).map((model) => [model.id, model]),
-    );
+    const previousRows = this.db
+      .prepare(
+        `SELECT model_id, name, enabled, synced_at, context_length, custom
+         FROM connection_models
+         WHERE connection_id = ?`,
+      )
+      .all(id) as Array<{
+        model_id: string;
+        name: string;
+        enabled: number;
+        synced_at: string;
+        context_length: number | null;
+        custom: number;
+      }>;
+    const previous = new Map(previousRows.map((row) => [row.model_id, row]));
     const seen = new Set<string>();
-    const next: StoredModel[] = [];
+    const next: Array<{
+      id: string;
+      name: string;
+      enabled: boolean;
+      custom: boolean;
+      syncedAt: string;
+      contextLength?: number;
+    }> = [];
+    const syncedAt = new Date().toISOString();
     for (const model of models) {
       const modelId = model.id.trim();
       if (!modelId || seen.has(modelId)) {
         continue;
       }
       seen.add(modelId);
+      const prior = previous.get(modelId);
       const context =
         typeof model.context_length === "number" && Number.isFinite(model.context_length) && model.context_length > 0
           ? Math.trunc(model.context_length)
@@ -818,27 +852,87 @@ export class AdminStore {
       next.push({
         id: modelId,
         name: model.name?.trim() || modelId,
-        enabled: previous.get(modelId)?.enabled ?? true,
+        enabled: prior ? prior.enabled === 1 : true,
+        custom: false,
+        syncedAt,
         ...(context ? { contextLength: context } : {}),
       });
     }
-    const syncedAt = new Date().toISOString();
+    for (const row of previousRows) {
+      if (row.custom !== 1 || seen.has(row.model_id)) {
+        continue;
+      }
+      next.push({
+        id: row.model_id,
+        name: row.name,
+        enabled: row.enabled === 1,
+        custom: true,
+        syncedAt: row.synced_at,
+        ...(typeof row.context_length === "number" ? { contextLength: row.context_length } : {}),
+      });
+    }
     this.db.exec("BEGIN");
     try {
       this.db.prepare("DELETE FROM connection_models WHERE connection_id = ?").run(id);
       const insert = this.db.prepare(
-        `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length, custom)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const model of next) {
-        insert.run(id, model.id, model.name, model.enabled ? 1 : 0, syncedAt, model.contextLength ?? null);
+        insert.run(
+          id,
+          model.id,
+          model.name,
+          model.enabled ? 1 : 0,
+          model.syncedAt,
+          model.contextLength ?? null,
+          model.custom ? 1 : 0,
+        );
       }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    return { connectionId: id, syncedAt, models: next };
+    return this.getConnectionModels(id);
+  }
+
+  addConnectionModel(id: string, input: { id: string; name?: string }): ConnectionModelCatalog {
+    this.requireRow(id);
+    const modelId = input.id.trim();
+    if (!modelId) {
+      throw Object.assign(new Error("model id is required"), { statusCode: 400 });
+    }
+    const name = input.name?.trim() || modelId;
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length, custom)
+           VALUES (?, ?, ?, 1, ?, NULL, 1)`,
+        )
+        .run(id, modelId, name, new Date().toISOString());
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+        throw Object.assign(new Error("model already exists"), { statusCode: 409 });
+      }
+      throw error;
+    }
+    return this.getConnectionModels(id);
+  }
+
+  deleteConnectionModel(id: string, modelId: string): ConnectionModelCatalog {
+    this.requireRow(id);
+    const row = this.db
+      .prepare("SELECT custom FROM connection_models WHERE connection_id = ? AND model_id = ?")
+      .get(id, modelId) as { custom: number } | undefined;
+    if (!row) {
+      throw Object.assign(new Error("model not found"), { statusCode: 404 });
+    }
+    if (row.custom !== 1) {
+      throw Object.assign(new Error("synced model cannot be removed"), { statusCode: 400 });
+    }
+    this.db.prepare("DELETE FROM connection_models WHERE connection_id = ? AND model_id = ?").run(id, modelId);
+    return this.getConnectionModels(id);
   }
 
   setConnectionModelEnabled(id: string, modelId: string, enabled: boolean): ConnectionModelCatalog {
@@ -2323,10 +2417,13 @@ function migrateConnections(db: DatabaseSync): void {
 
 function migrateConnectionModels(db: DatabaseSync): void {
   const columns = db.prepare("PRAGMA table_info(connection_models)").all() as Array<{ name: string }>;
-  if (columns.some((column) => column.name === "context_length")) {
-    return;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("context_length")) {
+    db.exec("ALTER TABLE connection_models ADD COLUMN context_length INTEGER");
   }
-  db.exec("ALTER TABLE connection_models ADD COLUMN context_length INTEGER");
+  if (!names.has("custom")) {
+    db.exec("ALTER TABLE connection_models ADD COLUMN custom INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 function migrateSubscription(db: DatabaseSync): void {

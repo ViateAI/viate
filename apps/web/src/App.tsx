@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import {
   api,
   isApiError,
@@ -1144,6 +1144,9 @@ function ModelsPage({
   const [query, setQuery] = useState("");
   const [visibility, setVisibility] = useState<"all" | "enabled" | "disabled">("all");
   const [published, setPublished] = useState<AdminPublishedModel[] | null>(null);
+  const [customId, setCustomId] = useState("");
+  const [customName, setCustomName] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const selected = connections?.find((connection) => connection.id === selectedConnectionId) ?? null;
   const selectedPlugin = plugins?.find((plugin) => plugin.id === selected?.providerId) ?? null;
@@ -1268,6 +1271,63 @@ function ModelsPage({
     }
   }
 
+  async function refreshPublished(): Promise<void> {
+    const publishedResult = await api<{ models: AdminPublishedModel[] }>("/api/admin/published-models");
+    setPublished(publishedResult.models);
+  }
+
+  async function addCustomModel(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!selected) {
+      return;
+    }
+    const id = customId.trim();
+    if (!id) {
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await api<ConnectionModelCatalog>(`/api/admin/connections/${selected.id}/models`, {
+        method: "POST",
+        body: JSON.stringify({
+          id,
+          ...(customName.trim() ? { name: customName.trim() } : {}),
+        }),
+      });
+      setCatalog(result);
+      await refreshPublished();
+      setCustomId("");
+      setCustomName("");
+      onNotice(`Added ${id}.`);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "add failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeCustomModel(modelId: string): Promise<void> {
+    if (!selected) {
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await api<ConnectionModelCatalog>(
+        `/api/admin/connections/${selected.id}/models/${encodeURIComponent(modelId)}`,
+        { method: "DELETE" },
+      );
+      setCatalog(result);
+      await refreshPublished();
+      onNotice(`Removed ${modelId}.`);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "remove failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <section className="stack">
       <div className="toolbar model-toolbar">
@@ -1351,18 +1411,44 @@ function ModelsPage({
                     type="search"
                   />
                 </label>
-                <div className="segmented" role="group" aria-label="Model status">
-                  <button type="button" aria-pressed={visibility === "all"} onClick={() => setVisibility("all")}>
-                    All {totals.total}
-                  </button>
-                  <button type="button" aria-pressed={visibility === "enabled"} onClick={() => setVisibility("enabled")}>
-                    Enabled {totals.enabled}
-                  </button>
-                  <button type="button" aria-pressed={visibility === "disabled"} onClick={() => setVisibility("disabled")}>
-                    Disabled {totals.disabled}
-                  </button>
+               <div className="segmented" role="group" aria-label="Model status">
+                 <button type="button" aria-pressed={visibility === "all"} onClick={() => setVisibility("all")}>
+                   All {totals.total}
+                 </button>
+                 <button type="button" aria-pressed={visibility === "enabled"} onClick={() => setVisibility("enabled")}>
+                   Enabled {totals.enabled}
+                 </button>
+                 <button type="button" aria-pressed={visibility === "disabled"} onClick={() => setVisibility("disabled")}>
+                   Disabled {totals.disabled}
+                 </button>
                 </div>
               </div>
+              <form className="custom-model-form" onSubmit={(event) => void addCustomModel(event)}>
+                <label>
+                  Model id
+                  <input
+                    value={customId}
+                    onChange={(event) => setCustomId(event.target.value)}
+                    placeholder="grok-voice-transcribe-2.0"
+                    autoComplete="off"
+                    disabled={!selected || !catalog || saving}
+                    required
+                  />
+                </label>
+                <label>
+                  Name
+                  <input
+                    value={customName}
+                    onChange={(event) => setCustomName(event.target.value)}
+                    placeholder="optional"
+                    autoComplete="off"
+                    disabled={!selected || !catalog || saving}
+                  />
+                </label>
+                <button className="primary" type="submit" disabled={!selected || !catalog || saving || !customId.trim()}>
+                  {saving ? "Saving…" : "Add"}
+                </button>
+              </form>
             </div>
             <div className="model-scroll">
               {!catalog ? (
@@ -1400,20 +1486,35 @@ function ModelsPage({
                     {filtered.map((model) => (
                       <tr key={model.id} className={model.enabled ? "is-enabled" : undefined}>
                         <td>
-                          <label className="model-line">
-                            <input
-                              type="checkbox"
-                              checked={model.enabled}
-                              aria-label={`${model.enabled ? "Disable" : "Enable"} ${model.name}`}
-                              onChange={(event) => {
-                                void setModelEnabled(model.id, event.target.checked);
-                              }}
-                            />
-                            <span className="model-name">
-                              <span className={model.name === model.id ? "model-id" : undefined}>{model.name}</span>
-                              {model.name !== model.id ? <code>{model.id}</code> : null}
-                            </span>
-                          </label>
+                          <div className="model-line">
+                            <label className="model-check">
+                              <input
+                                type="checkbox"
+                                checked={model.enabled}
+                                aria-label={`${model.enabled ? "Disable" : "Enable"} ${model.name}`}
+                                onChange={(event) => {
+                                  void setModelEnabled(model.id, event.target.checked);
+                                }}
+                              />
+                              <span className="model-name">
+                                <span className={model.name === model.id ? "model-id" : undefined}>{model.name}</span>
+                                {model.name !== model.id ? <code>{model.id}</code> : null}
+                              </span>
+                            </label>
+                            {model.custom ? (
+                              <span className="model-actions">
+                                <span className="badge">Custom</span>
+                                <button
+                                  className="danger"
+                                  type="button"
+                                  disabled={saving}
+                                  onClick={() => void removeCustomModel(model.id)}
+                                >
+                                  Remove
+                                </button>
+                              </span>
+                            ) : null}
+                          </div>
                         </td>
                       </tr>
                     ))}

@@ -683,6 +683,132 @@ describe("admin connection models", () => {
     assert.equal(listedCatalog.json().models.find((model: { id: string }) => model.id === "gpt-4o-mini")?.enabled, false);
   });
 
+  it("adds and removes custom models with the same auth as other model routes", async () => {
+    const session = await login(app, "correct-horse");
+    const created = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible" },
+    });
+    const id = created.json().connection.id as string;
+    await authed(app, session, {
+      method: "PUT",
+      url: `/api/admin/connections/${id}`,
+      payload: { credentials: { baseUrl: "http://127.0.0.1:9999/v1", apiKey: "k" } },
+    });
+
+    const unauth = await app.inject({
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      headers: originHeaders(),
+      payload: { id: "custom-1" },
+    });
+    assert.equal(unauth.statusCode, 401);
+
+    const noCsrf = await app.inject({
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      headers: { ...originHeaders(), cookie: session.cookie },
+      payload: { id: "custom-1" },
+    });
+    assert.equal(noCsrf.statusCode, 403);
+
+    const badOrigin = await app.inject({
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      headers: {
+        host: HOST,
+        origin: "http://evil.example",
+        cookie: session.cookie,
+        "x-viate-csrf": session.csrf,
+      },
+      payload: { id: "custom-1" },
+    });
+    assert.equal(badOrigin.statusCode, 403);
+
+    const empty = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { id: "  " },
+    });
+    assert.equal(empty.statusCode, 400);
+    assert.equal(empty.json().error.message, "model id is required");
+
+    const missingConnection = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections/missing/models",
+      payload: { id: "custom-1" },
+    });
+    assert.equal(missingConnection.statusCode, 404);
+
+    const added = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { id: " grok-voice-transcribe-2.0 ", name: " Voice " },
+    });
+    assert.equal(added.statusCode, 200);
+    const custom = added.json().models.find((model: { id: string }) => model.id === "grok-voice-transcribe-2.0");
+    assert.equal(custom?.name, "Voice");
+    assert.equal(custom?.enabled, true);
+    assert.equal(custom?.custom, true);
+
+    const unnamed = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { id: "plain" },
+    });
+    assert.equal(unnamed.json().models.find((model: { id: string }) => model.id === "plain")?.name, "plain");
+
+    const duplicate = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { id: "plain" },
+    });
+    assert.equal(duplicate.statusCode, 409);
+
+    const synced = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models/sync`,
+    });
+    assert.equal(synced.statusCode, 200);
+    assert.equal(synced.json().models.find((model: { id: string }) => model.id === "gpt-4o")?.custom, false);
+    assert.equal(synced.json().models.find((model: { id: string }) => model.id === "plain")?.custom, true);
+
+    const syncedDelete = await authed(app, session, {
+      method: "DELETE",
+      url: `/api/admin/connections/${id}/models/gpt-4o`,
+    });
+    assert.equal(syncedDelete.statusCode, 400);
+
+    const missingModel = await authed(app, session, {
+      method: "DELETE",
+      url: `/api/admin/connections/${id}/models/missing-model`,
+    });
+    assert.equal(missingModel.statusCode, 404);
+
+    const unauthDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/admin/connections/${id}/models/${encodeURIComponent("grok-voice-transcribe-2.0")}`,
+      headers: originHeaders(),
+    });
+    assert.equal(unauthDelete.statusCode, 401);
+
+    const noCsrfDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/admin/connections/${id}/models/${encodeURIComponent("grok-voice-transcribe-2.0")}`,
+      headers: { ...originHeaders(), cookie: session.cookie },
+    });
+    assert.equal(noCsrfDelete.statusCode, 403);
+
+    const removed = await authed(app, session, {
+      method: "DELETE",
+      url: `/api/admin/connections/${id}/models/${encodeURIComponent("grok-voice-transcribe-2.0")}`,
+    });
+    assert.equal(removed.statusCode, 200);
+    assert.equal(removed.json().models.some((model: { id: string }) => model.id === "grok-voice-transcribe-2.0"), false);
+    assert.equal(removed.json().models.find((model: { id: string }) => model.id === "plain")?.custom, true);
+  });
+
   it("lists published models and reorders contributing providers", async () => {
     const session = await login(app, "correct-horse");
     const openai = await authed(app, session, {
