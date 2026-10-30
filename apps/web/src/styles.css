@@ -505,6 +505,46 @@ textarea {
   flex: 0 0 auto;
 }
 
+.endpoint-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  flex: 1 1 100%;
+}
+
+.endpoint-fieldset legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.endpoint-choices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 12px;
+}
+
+.endpoint-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.endpoint-choice input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  accent-color: var(--primary);
+}
+
 .model-filter {
   display: flex;
   align-items: center;
@@ -553,6 +593,7 @@ textarea {
 
 .model-line {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   min-height: 32px;
@@ -570,9 +611,11 @@ textarea {
 
 .model-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  flex: 0 0 auto;
+  flex: 1 1 220px;
+  justify-content: flex-end;
 }
 
 .model-line input {
@@ -1148,7 +1191,8 @@ label {
   }
 
   .custom-model-form button,
-  .model-actions button {
+  .model-actions button,
+  .endpoint-choice {
     min-height: 44px;
   }
 

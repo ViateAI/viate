@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseAdvertisedEndpointTypes, VIATE_DEFAULT_ENDPOINT_TYPES } from "./endpoints.js";
+import { parseAdvertisedEndpointTypes, parseRequiredEndpointTypes, VIATE_DEFAULT_ENDPOINT_TYPES } from "./endpoints.js";
 
 describe("parseAdvertisedEndpointTypes", () => {
   it("keeps known types in stable order and rejects unknown values", () => {
@@ -23,5 +23,15 @@ describe("parseAdvertisedEndpointTypes", () => {
     assert.deepEqual([...VIATE_DEFAULT_ENDPOINT_TYPES], ["openai", "openai-response"]);
     assert.throws(() => parseAdvertisedEndpointTypes(["anthropic"]), /unsupported endpoint type/);
     assert.throws(() => parseAdvertisedEndpointTypes(undefined), /advertisedEndpointTypes is required/);
+  });
+});
+
+describe("parseRequiredEndpointTypes", () => {
+  it("requires one known type and stores public order", () => {
+    assert.deepEqual(parseRequiredEndpointTypes(["openai-audio", "openai", "openai-audio"]), ["openai", "openai-audio"]);
+    assert.throws(() => parseRequiredEndpointTypes(undefined), /endpointTypes is required/);
+    assert.throws(() => parseRequiredEndpointTypes([]), /endpointTypes is required/);
+    assert.throws(() => parseRequiredEndpointTypes(["anthropic"]), /unsupported endpoint type/);
+    assert.throws(() => parseRequiredEndpointTypes([1]), /endpointTypes must be strings/);
   });
 });

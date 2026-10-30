@@ -741,28 +741,53 @@ describe("admin connection models", () => {
     });
     assert.equal(missingConnection.statusCode, 404);
 
+    const missingTypes = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { id: "needs-types" },
+    });
+    assert.equal(missingTypes.statusCode, 400);
+    assert.equal(missingTypes.json().error.message, "endpointTypes is required");
+
+    const emptyTypes = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { id: "needs-types", endpointTypes: [] },
+    });
+    assert.equal(emptyTypes.statusCode, 400);
+    assert.equal(emptyTypes.json().error.message, "endpointTypes is required");
+
+    const unknownTypes = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { id: "needs-types", endpointTypes: ["anthropic"] },
+    });
+    assert.equal(unknownTypes.statusCode, 400);
+    assert.match(unknownTypes.json().error.message, /unsupported endpoint type/);
+
     const added = await authed(app, session, {
       method: "POST",
       url: `/api/admin/connections/${id}/models`,
-      payload: { id: " grok-voice-transcribe-2.0 ", name: " Voice " },
+      payload: { id: " grok-voice-transcribe-2.0 ", name: " Voice ", endpointTypes: ["openai-audio", "openai"] },
     });
     assert.equal(added.statusCode, 200);
     const custom = added.json().models.find((model: { id: string }) => model.id === "grok-voice-transcribe-2.0");
     assert.equal(custom?.name, "Voice");
     assert.equal(custom?.enabled, true);
     assert.equal(custom?.custom, true);
+    assert.deepEqual(custom?.endpointTypes, ["openai", "openai-audio"]);
 
     const unnamed = await authed(app, session, {
       method: "POST",
       url: `/api/admin/connections/${id}/models`,
-      payload: { id: "plain" },
+      payload: { id: "plain", endpointTypes: ["openai-response"] },
     });
     assert.equal(unnamed.json().models.find((model: { id: string }) => model.id === "plain")?.name, "plain");
 
     const duplicate = await authed(app, session, {
       method: "POST",
       url: `/api/admin/connections/${id}/models`,
-      payload: { id: "plain" },
+      payload: { id: "plain", endpointTypes: ["openai-response"] },
     });
     assert.equal(duplicate.statusCode, 409);
 
@@ -773,6 +798,10 @@ describe("admin connection models", () => {
     assert.equal(synced.statusCode, 200);
     assert.equal(synced.json().models.find((model: { id: string }) => model.id === "gpt-4o")?.custom, false);
     assert.equal(synced.json().models.find((model: { id: string }) => model.id === "plain")?.custom, true);
+    assert.deepEqual(
+      synced.json().models.find((model: { id: string }) => model.id === "plain")?.endpointTypes,
+      ["openai-response"],
+    );
 
     const syncedDelete = await authed(app, session, {
       method: "DELETE",
@@ -807,6 +836,110 @@ describe("admin connection models", () => {
     assert.equal(removed.statusCode, 200);
     assert.equal(removed.json().models.some((model: { id: string }) => model.id === "grok-voice-transcribe-2.0"), false);
     assert.equal(removed.json().models.find((model: { id: string }) => model.id === "plain")?.custom, true);
+  });
+
+  it("updates custom endpoint types with the same auth as other model routes", async () => {
+    const session = await login(app, "correct-horse");
+    const created = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible" },
+    });
+    const id = created.json().connection.id as string;
+    await authed(app, session, {
+      method: "PUT",
+      url: `/api/admin/connections/${id}`,
+      payload: { credentials: { baseUrl: "http://127.0.0.1:9999/v1", apiKey: "k" } },
+    });
+    await authed(app, session, { method: "POST", url: `/api/admin/connections/${id}/models/sync` });
+    await authed(app, session, { method: "POST", url: `/api/admin/connections/${id}/activate` });
+    await authed(app, session, {
+      method: "PUT",
+      url: "/api/admin/providers/openai-compatible/advertised-endpoints",
+      payload: { advertisedEndpointTypes: ["openai-response"] },
+    });
+    const added = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { id: "grok tts", name: "Grok TTS", endpointTypes: ["openai"] },
+    });
+    assert.equal(added.statusCode, 200);
+
+    const endpointUrl = `/api/admin/connections/${id}/models/${encodeURIComponent("grok tts")}/endpoints`;
+    const unauth = await app.inject({
+      method: "PUT",
+      url: endpointUrl,
+      headers: originHeaders(),
+      payload: { endpointTypes: ["openai-audio"] },
+    });
+    assert.equal(unauth.statusCode, 401);
+
+    const noCsrf = await app.inject({
+      method: "PUT",
+      url: endpointUrl,
+      headers: { ...originHeaders(), cookie: session.cookie },
+      payload: { endpointTypes: ["openai-audio"] },
+    });
+    assert.equal(noCsrf.statusCode, 403);
+
+    const badOrigin = await app.inject({
+      method: "PUT",
+      url: endpointUrl,
+      headers: {
+        host: HOST,
+        origin: "http://evil.example",
+        cookie: session.cookie,
+        "x-viate-csrf": session.csrf,
+      },
+      payload: { endpointTypes: ["openai-audio"] },
+    });
+    assert.equal(badOrigin.statusCode, 403);
+
+    const missing = await authed(app, session, {
+      method: "PUT",
+      url: `/api/admin/connections/${id}/models/${encodeURIComponent("missing model")}/endpoints`,
+      payload: { endpointTypes: ["openai-audio"] },
+    });
+    assert.equal(missing.statusCode, 404);
+
+    const synced = await authed(app, session, {
+      method: "PUT",
+      url: `/api/admin/connections/${id}/models/gpt-4o/endpoints`,
+      payload: { endpointTypes: ["openai-audio"] },
+    });
+    assert.equal(synced.statusCode, 400);
+    assert.equal(synced.json().error.message, "synced model endpoints cannot be changed");
+    assert.equal(
+      store.getConnectionModels(id).models.find((model) => model.id === "gpt-4o")?.enabled,
+      true,
+    );
+
+    const empty = await authed(app, session, {
+      method: "PUT",
+      url: endpointUrl,
+      payload: { endpointTypes: [] },
+    });
+    assert.equal(empty.statusCode, 400);
+
+    const updated = await authed(app, session, {
+      method: "PUT",
+      url: endpointUrl,
+      payload: { endpointTypes: ["openai-audio", "openai-image"] },
+    });
+    assert.equal(updated.statusCode, 200);
+    const custom = updated.json().models.find((model: { id: string }) => model.id === "grok tts");
+    assert.equal(custom?.name, "Grok TTS");
+    assert.equal(custom?.enabled, true);
+    assert.equal(custom?.custom, true);
+    assert.deepEqual(custom?.endpointTypes, ["openai-image", "openai-audio"]);
+    assert.deepEqual(
+      store.listPublicCatalog().data.find((model) => model.id === "grok tts")?.supported_endpoint_types,
+      ["openai-image", "openai-audio"],
+    );
+    assert.deepEqual(
+      store.listPublicCatalog().data.find((model) => model.id === "gpt-4o")?.supported_endpoint_types,
+      ["openai-response"],
+    );
   });
 
   it("lists published models and reorders contributing providers", async () => {

@@ -548,7 +548,18 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       return options.store.addConnectionModel(id, {
         id: body.id,
         ...(typeof body.name === "string" ? { name: body.name } : {}),
+        endpointTypes: body.endpointTypes,
       });
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.put("/api/admin/connections/:id/models/:modelId/endpoints", async (request, reply) => {
+    const { id, modelId } = request.params as { id: string; modelId: string };
+    const body = asRecord(request.body);
+    try {
+      return options.store.setConnectionModelEndpointTypes(id, decodeURIComponent(modelId), body.endpointTypes);
     } catch (error) {
       return sendStoreError(reply, error);
     }

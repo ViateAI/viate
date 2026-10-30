@@ -1,3 +1,5 @@
+export type PublicEndpointType = "openai" | "openai-response" | "openai-image" | "openai-audio" | "openai-video";
+
 export type AdminPlugin = {
   name: string;
   version: string;
@@ -26,7 +28,7 @@ export type AdminPlugin = {
   hasOAuth: boolean;
   hasKeepalive: boolean;
   hasSubscription: boolean;
-  advertisedEndpointTypes: Array<"openai" | "openai-response" | "openai-image" | "openai-audio" | "openai-video">;
+  advertisedEndpointTypes: PublicEndpointType[];
 };
 
 export type CredentialField = {
@@ -100,6 +102,7 @@ export type ConnectionModel = {
   name: string;
   enabled: boolean;
   custom: boolean;
+  endpointTypes?: PublicEndpointType[] | null;
 };
 
 export type ConnectionModelCatalog = {
