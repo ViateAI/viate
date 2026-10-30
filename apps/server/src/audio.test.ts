@@ -387,7 +387,10 @@ describe("POST /v1/audio", () => {
       });
       assert.equal(before.json().data.some((model: { id: string }) => model.id === "grok-voice-transcribe-2.0"), false);
 
-      store.addConnectionModel(created.id, { id: "grok-voice-transcribe-2.0" });
+      store.addConnectionModel(created.id, {
+        id: "grok-voice-transcribe-2.0",
+        endpointTypes: ["openai-audio"],
+      });
 
       const listed = await app.inject({
         method: "GET",
@@ -395,7 +398,8 @@ describe("POST /v1/audio", () => {
         headers: { authorization: `Bearer ${secret}` },
       });
       assert.equal(listed.statusCode, 200);
-      assert.equal(listed.json().data.some((model: { id: string }) => model.id === "grok-voice-transcribe-2.0"), true);
+      const voice = listed.json().data.find((model: { id: string }) => model.id === "grok-voice-transcribe-2.0");
+      assert.deepEqual(voice?.supported_endpoint_types, ["openai-audio"]);
 
       const hit = await app.inject({
         method: "POST",

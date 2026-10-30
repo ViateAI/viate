@@ -9,7 +9,9 @@ import {
   type AdminPublishedModel,
   type ClientApiKey,
   type Connection,
+  type ConnectionModel,
   type ConnectionModelCatalog,
+  type PublicEndpointType,
   type CredentialField,
   type GatewayUser,
   type OAuthStart,
@@ -31,6 +33,13 @@ const CREDENTIAL_MODE_LABEL: Record<CredentialMode, string> = {
   paste: "Paste",
   oauth: "OAuth",
 };
+
+const PUBLIC_ENDPOINT_TYPES: Array<{ id: PublicEndpointType; label: string }> = [
+  { id: "openai", label: "Chat Completions" },
+  { id: "openai-response", label: "Responses" },
+  { id: "openai-image", label: "Images" },
+  { id: "openai-audio", label: "Audio" },
+];
 
 function credentialModes(provider: AdminPlugin | null): CredentialMode[] {
   const modes: CredentialMode[] = [];
@@ -1146,6 +1155,7 @@ function ModelsPage({
   const [published, setPublished] = useState<AdminPublishedModel[] | null>(null);
   const [customId, setCustomId] = useState("");
   const [customName, setCustomName] = useState("");
+  const [customTypes, setCustomTypes] = useState<PublicEndpointType[]>([]);
   const [saving, setSaving] = useState(false);
 
   const selected = connections?.find((connection) => connection.id === selectedConnectionId) ?? null;
@@ -1293,15 +1303,49 @@ function ModelsPage({
         body: JSON.stringify({
           id,
           ...(customName.trim() ? { name: customName.trim() } : {}),
+          endpointTypes: customTypes,
         }),
       });
       setCatalog(result);
       await refreshPublished();
       setCustomId("");
       setCustomName("");
+      setCustomTypes([]);
       onNotice(`Added ${id}.`);
     } catch (err) {
       setError(isApiError(err) ? err.message : "add failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function endpointSelection(model: ConnectionModel): PublicEndpointType[] {
+    if (model.endpointTypes && model.endpointTypes.length > 0) {
+      return model.endpointTypes;
+    }
+    return selectedPlugin?.advertisedEndpointTypes ?? [];
+  }
+
+  async function setCustomEndpoints(model: ConnectionModel, type: PublicEndpointType, enabled: boolean): Promise<void> {
+    if (!selected) {
+      return;
+    }
+    const current = endpointSelection(model);
+    const next = PUBLIC_ENDPOINT_TYPES.map((item) => item.id).filter((id) => (id === type ? enabled : current.includes(id)));
+    if (next.length === 0) {
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await api<ConnectionModelCatalog>(
+        `/api/admin/connections/${selected.id}/models/${encodeURIComponent(model.id)}/endpoints`,
+        { method: "PUT", body: JSON.stringify({ endpointTypes: next }) },
+      );
+      setCatalog(result);
+      await refreshPublished();
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "update failed");
     } finally {
       setSaving(false);
     }
@@ -1445,7 +1489,34 @@ function ModelsPage({
                     disabled={!selected || !catalog || saving}
                   />
                 </label>
-                <button className="primary" type="submit" disabled={!selected || !catalog || saving || !customId.trim()}>
+                <fieldset className="endpoint-fieldset">
+                  <legend>Endpoints</legend>
+                  <div className="endpoint-choices">
+                    {PUBLIC_ENDPOINT_TYPES.map((type) => (
+                      <label key={type.id} className="endpoint-choice">
+                        <input
+                          type="checkbox"
+                          checked={customTypes.includes(type.id)}
+                          disabled={!selected || !catalog || saving}
+                          onChange={(event) => {
+                            const enabled = event.target.checked;
+                            setCustomTypes(
+                              PUBLIC_ENDPOINT_TYPES.map((item) => item.id).filter((id) =>
+                                id === type.id ? enabled : customTypes.includes(id),
+                              ),
+                            );
+                          }}
+                        />
+                        {type.label}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+                <button
+                  className="primary"
+                  type="submit"
+                  disabled={!selected || !catalog || saving || !customId.trim() || customTypes.length === 0}
+                >
                   {saving ? "Saving…" : "Add"}
                 </button>
               </form>
@@ -1503,6 +1574,27 @@ function ModelsPage({
                             </label>
                             {model.custom ? (
                               <span className="model-actions">
+                                <span className="endpoint-choices" role="group" aria-label={`Endpoints for ${model.name}`}>
+                                  {PUBLIC_ENDPOINT_TYPES.map((type) => {
+                                    const selectedTypes = endpointSelection(model);
+                                    const checked = selectedTypes.includes(type.id);
+                                    return (
+                                      <label key={type.id} className="endpoint-choice">
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          disabled={saving || (checked && selectedTypes.length === 1)}
+                                          aria-label={`${type.label} for ${model.name}`}
+                                          onChange={(event) => {
+                                            void setCustomEndpoints(model, type.id, event.target.checked);
+                                          }}
+                                        />
+                                        {type.label}
+                                      </label>
+                                    );
+                                  })}
+                                </span>
+                                {model.endpointTypes == null ? <span className="meta">Inherited</span> : null}
                                 <span className="badge">Custom</span>
                                 <button
                                   className="danger"

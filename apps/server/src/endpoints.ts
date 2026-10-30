@@ -42,3 +42,18 @@ export function parseAdvertisedEndpointTypes(values: unknown): ProxyEndpointType
   }
   return filterPublicEndpointTypes(values);
 }
+
+export function parseRequiredEndpointTypes(values: unknown): ProxyEndpointType[] {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw Object.assign(new Error("endpointTypes is required"), { statusCode: 400 });
+  }
+  for (const value of values) {
+    if (typeof value !== "string" || !ENDPOINT_TYPE_BY_ID[value.trim()]) {
+      throw Object.assign(
+        new Error(typeof value === "string" ? `unsupported endpoint type: ${value}` : "endpointTypes must be strings"),
+        { statusCode: 400 },
+      );
+    }
+  }
+  return filterPublicEndpointTypes(values);
+}

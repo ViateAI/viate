@@ -3,7 +3,9 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
 import {
+  filterPublicEndpointTypes,
   parseAdvertisedEndpointTypes,
+  parseRequiredEndpointTypes,
   VIATE_DEFAULT_ENDPOINT_TYPES,
   VIATE_PUBLIC_ENDPOINT_TYPES,
   type ProxyEndpointType,
@@ -58,6 +60,7 @@ export type StoredModel = {
   enabled: boolean;
   custom: boolean;
   contextLength?: number;
+  endpointTypes?: ProxyEndpointType[] | null;
 };
 
 export type ConnectionModelCatalog = {
@@ -287,6 +290,8 @@ export type PublishedMember = {
   keepaliveStatus: KeepaliveStatus;
   createdAt: string;
   credentials: unknown;
+  custom?: boolean;
+  endpointTypes?: ProxyEndpointType[] | null;
 };
 
 export type PublicModelChild = {
@@ -474,6 +479,7 @@ export class AdminStore {
         synced_at TEXT NOT NULL,
         context_length INTEGER,
         custom INTEGER NOT NULL DEFAULT 0,
+        endpoint_types TEXT,
         PRIMARY KEY (connection_id, model_id),
         FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
       );
@@ -770,19 +776,12 @@ export class AdminStore {
     this.requireRow(id);
     const rows = this.db
       .prepare(
-        `SELECT model_id, name, enabled, synced_at, context_length, custom
+        `SELECT model_id, name, enabled, synced_at, context_length, custom, endpoint_types
          FROM connection_models
          WHERE connection_id = ?
          ORDER BY model_id`,
       )
-      .all(id) as Array<{
-        model_id: string;
-        name: string;
-        enabled: number;
-        synced_at: string;
-        context_length: number | null;
-        custom: number;
-      }>;
+      .all(id) as ConnectionModelRow[];
     if (rows.length === 0) {
       return { connectionId: id, syncedAt: null, models: [] };
     }
@@ -804,6 +803,7 @@ export class AdminStore {
         enabled: row.enabled === 1,
         custom: row.custom === 1,
         ...(typeof row.context_length === "number" ? { contextLength: row.context_length } : {}),
+        ...(row.custom === 1 ? { endpointTypes: readStoredEndpointTypes(row.endpoint_types) } : {}),
       })),
     };
   }
@@ -815,18 +815,11 @@ export class AdminStore {
     this.requireRow(id);
     const previousRows = this.db
       .prepare(
-        `SELECT model_id, name, enabled, synced_at, context_length, custom
+        `SELECT model_id, name, enabled, synced_at, context_length, custom, endpoint_types
          FROM connection_models
          WHERE connection_id = ?`,
       )
-      .all(id) as Array<{
-        model_id: string;
-        name: string;
-        enabled: number;
-        synced_at: string;
-        context_length: number | null;
-        custom: number;
-      }>;
+      .all(id) as ConnectionModelRow[];
     const previous = new Map(previousRows.map((row) => [row.model_id, row]));
     const seen = new Set<string>();
     const next: Array<{
@@ -836,6 +829,7 @@ export class AdminStore {
       custom: boolean;
       syncedAt: string;
       contextLength?: number;
+      endpointTypes: ProxyEndpointType[] | null;
     }> = [];
     const syncedAt = new Date().toISOString();
     for (const model of models) {
@@ -855,6 +849,7 @@ export class AdminStore {
         enabled: prior ? prior.enabled === 1 : true,
         custom: false,
         syncedAt,
+        endpointTypes: null,
         ...(context ? { contextLength: context } : {}),
       });
     }
@@ -868,6 +863,7 @@ export class AdminStore {
         enabled: row.enabled === 1,
         custom: true,
         syncedAt: row.synced_at,
+        endpointTypes: readStoredEndpointTypes(row.endpoint_types),
         ...(typeof row.context_length === "number" ? { contextLength: row.context_length } : {}),
       });
     }
@@ -875,8 +871,8 @@ export class AdminStore {
     try {
       this.db.prepare("DELETE FROM connection_models WHERE connection_id = ?").run(id);
       const insert = this.db.prepare(
-        `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length, custom)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length, custom, endpoint_types)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const model of next) {
         insert.run(
@@ -887,6 +883,7 @@ export class AdminStore {
           model.syncedAt,
           model.contextLength ?? null,
           model.custom ? 1 : 0,
+          model.endpointTypes ? JSON.stringify(model.endpointTypes) : null,
         );
       }
       this.db.exec("COMMIT");
@@ -897,26 +894,45 @@ export class AdminStore {
     return this.getConnectionModels(id);
   }
 
-  addConnectionModel(id: string, input: { id: string; name?: string }): ConnectionModelCatalog {
+  addConnectionModel(id: string, input: { id: string; name?: string; endpointTypes?: unknown }): ConnectionModelCatalog {
     this.requireRow(id);
     const modelId = input.id.trim();
     if (!modelId) {
       throw Object.assign(new Error("model id is required"), { statusCode: 400 });
     }
     const name = input.name?.trim() || modelId;
+    const endpointTypes = parseRequiredEndpointTypes(input.endpointTypes);
     try {
       this.db
         .prepare(
-          `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length, custom)
-           VALUES (?, ?, ?, 1, ?, NULL, 1)`,
+          `INSERT INTO connection_models (connection_id, model_id, name, enabled, synced_at, context_length, custom, endpoint_types)
+           VALUES (?, ?, ?, 1, ?, NULL, 1, ?)`,
         )
-        .run(id, modelId, name, new Date().toISOString());
+        .run(id, modelId, name, new Date().toISOString(), JSON.stringify(endpointTypes));
     } catch (error) {
       if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
         throw Object.assign(new Error("model already exists"), { statusCode: 409 });
       }
       throw error;
     }
+    return this.getConnectionModels(id);
+  }
+
+  setConnectionModelEndpointTypes(id: string, modelId: string, endpointTypes: unknown): ConnectionModelCatalog {
+    this.requireRow(id);
+    const row = this.db
+      .prepare("SELECT custom FROM connection_models WHERE connection_id = ? AND model_id = ?")
+      .get(id, modelId) as { custom: number } | undefined;
+    if (!row) {
+      throw Object.assign(new Error("model not found"), { statusCode: 404 });
+    }
+    if (row.custom !== 1) {
+      throw Object.assign(new Error("synced model endpoints cannot be changed"), { statusCode: 400 });
+    }
+    const types = parseRequiredEndpointTypes(endpointTypes);
+    this.db
+      .prepare("UPDATE connection_models SET endpoint_types = ? WHERE connection_id = ? AND model_id = ?")
+      .run(JSON.stringify(types), id, modelId);
     return this.getConnectionModels(id);
   }
 
@@ -965,7 +981,7 @@ export class AdminStore {
     const rows = this.db
       .prepare(
         `SELECT c.id AS connection_id, c.provider_id, c.display_label, c.keepalive_status,
-                c.credentials_enc, c.created_at, cm.model_id, cm.name, cm.context_length
+                c.credentials_enc, c.created_at, cm.model_id, cm.name, cm.context_length, cm.custom, cm.endpoint_types
          FROM connection_models cm
          INNER JOIN connections c ON c.id = cm.connection_id
          WHERE ${clauses.join(" AND ")}
@@ -981,18 +997,25 @@ export class AdminStore {
       model_id: string;
       name: string;
       context_length: number | null;
+      custom: number;
+      endpoint_types: string | null;
     }>;
-    return rows.map((row) => ({
-      connectionId: row.connection_id,
-      providerId: row.provider_id,
-      modelId: row.model_id,
-      name: row.name,
-      contextLength: typeof row.context_length === "number" ? row.context_length : null,
-      displayLabel: row.display_label?.trim() || row.connection_id,
-      keepaliveStatus: (row.keepalive_status as KeepaliveStatus) || "idle",
-      createdAt: row.created_at,
-      credentials: JSON.parse(decryptSecret(this.key, row.credentials_enc)) as unknown,
-    }));
+    return rows.map((row) => {
+      const custom = row.custom === 1;
+      return {
+        connectionId: row.connection_id,
+        providerId: row.provider_id,
+        modelId: row.model_id,
+        name: row.name,
+        contextLength: typeof row.context_length === "number" ? row.context_length : null,
+        displayLabel: row.display_label?.trim() || row.connection_id,
+        keepaliveStatus: (row.keepalive_status as KeepaliveStatus) || "idle",
+        createdAt: row.created_at,
+        credentials: JSON.parse(decryptSecret(this.key, row.credentials_enc)) as unknown,
+        custom,
+        endpointTypes: custom ? readStoredEndpointTypes(row.endpoint_types) : null,
+      };
+    });
   }
 
   listPublicCatalog(providerIds?: readonly string[] | null): { object: "list"; data: PublicModel[] } {
@@ -1197,10 +1220,13 @@ export class AdminStore {
     return grouped;
   }
 
-  private advertisedEndpointTypesFor(providerIds: string[]): ProxyEndpointType[] {
+  private endpointTypesForMembers(members: PublishedMember[]): ProxyEndpointType[] {
     const seen: Record<string, true> = {};
-    for (const providerId of providerIds) {
-      for (const type of this.getAdvertisedEndpointTypes(providerId)) {
+    for (const member of members) {
+      const own = member.custom && member.endpointTypes && member.endpointTypes.length > 0
+        ? member.endpointTypes
+        : this.getAdvertisedEndpointTypes(member.providerId);
+      for (const type of own) {
         seen[type] = true;
       }
     }
@@ -1218,7 +1244,7 @@ export class AdminStore {
       }
     }
     const proxyFields = {
-      supported_endpoint_types: this.advertisedEndpointTypesFor(providerIds),
+      supported_endpoint_types: this.endpointTypesForMembers(members),
       ...(name ? { name } : {}),
       ...(contextLength ? { context_length: contextLength } : {}),
     };
@@ -2371,6 +2397,28 @@ export class AdminStore {
   }
 }
 
+type ConnectionModelRow = {
+  model_id: string;
+  name: string;
+  enabled: number;
+  synced_at: string;
+  context_length: number | null;
+  custom: number;
+  endpoint_types: string | null;
+};
+
+function readStoredEndpointTypes(raw: string | null): ProxyEndpointType[] | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = filterPublicEndpointTypes(JSON.parse(raw) as unknown);
+    return parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function isPermutation(actual: string[], expected: string[]): boolean {
   if (actual.length !== expected.length) {
     return false;
@@ -2423,6 +2471,9 @@ function migrateConnectionModels(db: DatabaseSync): void {
   }
   if (!names.has("custom")) {
     db.exec("ALTER TABLE connection_models ADD COLUMN custom INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!names.has("endpoint_types")) {
+    db.exec("ALTER TABLE connection_models ADD COLUMN endpoint_types TEXT");
   }
 }
 
