@@ -167,6 +167,18 @@ export type ChannelView = {
   rule: ChannelRule;
 };
 
+export type PortalEndpointType = PublicEndpointType;
+
+export type PortalChannel = {
+  id: string;
+  name: string;
+  models: Array<{
+    id: string;
+    name?: string;
+    endpoints: PortalEndpointType[];
+  }>;
+};
+
 export type GatewayUser = {
   id: string;
   email: string;

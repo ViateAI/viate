@@ -464,6 +464,50 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     assert.equal(stale.statusCode, 403);
   });
 
+  it("returns granted channel catalogs without ratio or match rules", async () => {
+    const user = store.createUser({
+      email: "portal-channels@example.com",
+      name: "Channels",
+      password: "password1",
+    });
+    const login = await loginPortal(app, "portal-channels@example.com", "password1");
+    const granted = store.createChannel({
+      name: "Granted",
+      ratio: "2",
+      rule: { kind: "match", providerId: null, prefix: "portal-", excludePrefix: null, chatOnly: false },
+    });
+    const hidden = store.createChannel({ name: "Other", ratio: "3", rule: { kind: "all" } });
+    store.setUserChannels(user.id, [granted.id]);
+
+    const response = await portal(app, login, { method: "GET", url: "/api/portal/channels" });
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as {
+      channels: Array<{ id: string; name: string; models: Array<{ id: string; endpoints: string[] }> }>;
+    };
+    const encoded = JSON.stringify(body);
+    assert.equal(encoded.includes("ratio"), false);
+    assert.equal(encoded.includes("rule"), false);
+    assert.equal(encoded.includes("owned_by"), false);
+    assert.equal(encoded.includes("children"), false);
+    assert.deepEqual(
+      body.channels.map((channel) => channel.id),
+      [granted.id],
+    );
+    assert.equal(body.channels.some((channel) => channel.id === hidden.id), false);
+    const catalog = store.listChannelCatalog(granted).data;
+    assert.deepEqual(
+      body.channels[0]?.models.map((model) => model.id),
+      catalog.map((model) => model.id),
+    );
+    assert.deepEqual(
+      body.channels[0]?.models.map((model) => model.endpoints),
+      catalog.map((model) => model.supported_endpoint_types),
+    );
+    assert.equal(store.listPublicCatalog().data.some((model) => model.id === "demo"), true);
+    assert.equal(body.channels[0]?.models.some((model) => model.id === "demo"), false);
+    assert.equal(body.channels[0]?.models.some((model) => !model.id.startsWith("portal-")), false);
+  });
+
   it("leaves unbound keys unchanged, bills a bound chat once, and blocks an empty balance", async () => {
     const unbound = store.createApiKey("unbound").secret;
     const openChat = await app.inject({

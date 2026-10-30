@@ -187,7 +187,15 @@ export async function registerPortalRoutes(app: FastifyInstance, options: Portal
       channels: options.store
         .listChannels()
         .filter((channel) => granted.has(channel.id))
-        .map((channel) => options.store.channelView(channel)),
+        .map((channel) => ({
+          id: channel.id,
+          name: channel.name,
+          models: options.store.listChannelCatalog(channel).data.map((model) => ({
+            id: model.id,
+            ...(model.name ? { name: model.name } : {}),
+            endpoints: model.supported_endpoint_types,
+          })),
+        })),
     };
   });
 }
