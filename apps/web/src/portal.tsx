@@ -487,6 +487,7 @@ function KeysPanel({
                   required
                 />
                 <span className="channel-card-name">{channel.name}</span>
+                <span className="badge">{channel.ratio}x</span>
                 <span className="meta">
                   {m.count_channel_models({ count: channel.models.length })}
                 </span>
@@ -515,40 +516,43 @@ function KeysPanel({
       ) : null}
       {keys === null ? <p className="meta">{m.portal_keys_loading()}</p> : null}
       {keys && keys.length === 0 ? <p className="meta">{m.portal_keys_empty()}</p> : null}
-      {keys?.map((key) => (
-        <article className="resource" key={key.id}>
-          <div className="resource-main">
-            <div className="resource-title-row">
-              <h2>{key.name}</h2>
-              <span className="badge">{key.prefix}…</span>
+      {keys?.map((key) => {
+        const channel = channels?.find((item) => item.id === key.channelId);
+        return (
+          <article className="resource" key={key.id}>
+            <div className="resource-main">
+              <div className="resource-title-row">
+                <h2>{key.name}</h2>
+                <span className="badge">{key.prefix}…</span>
+              </div>
+              <div className="meta">
+                {channel ? `${channel.name} · ${channel.ratio}x` : m.portal_no_channel()} · {m.portal_created({ time: formatDateTime(key.createdAt) })}
+              </div>
             </div>
-            <div className="meta">
-              {channels?.find((channel) => channel.id === key.channelId)?.name ?? m.portal_no_channel()} · {m.portal_created({ time: formatDateTime(key.createdAt) })}
+            <div className="row-actions">
+              <button
+                className="danger"
+                type="button"
+                onClick={() => {
+                  void (async () => {
+                    onError(null);
+                    try {
+                      await api(`/api/portal/keys/${key.id}`, { method: "DELETE" });
+                      if (secret?.name === key.name) setSecret(null);
+                      await onChanged();
+                      onNotice(m.portal_revoked());
+                    } catch (err) {
+                      onError(isApiError(err) ? err.message : m.error_revoke());
+                    }
+                  })();
+                }}
+              >
+                {m.action_revoke()}
+              </button>
             </div>
-          </div>
-          <div className="row-actions">
-            <button
-              className="danger"
-              type="button"
-              onClick={() => {
-                void (async () => {
-                  onError(null);
-                  try {
-                    await api(`/api/portal/keys/${key.id}`, { method: "DELETE" });
-                    if (secret?.name === key.name) setSecret(null);
-                    await onChanged();
-                    onNotice(m.portal_revoked());
-                  } catch (err) {
-                    onError(isApiError(err) ? err.message : m.error_revoke());
-                  }
-                })();
-              }}
-            >
-              {m.action_revoke()}
-            </button>
-          </div>
-        </article>
-      ))}
+          </article>
+        );
+      })}
     </section>
   );
 }

@@ -169,6 +169,7 @@ export type PortalEndpointType = PublicEndpointType;
 export type PortalChannel = {
   id: string;
   name: string;
+  ratio: string;
   models: Array<{
     id: string;
     name?: string;

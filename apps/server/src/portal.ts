@@ -190,6 +190,7 @@ export async function registerPortalRoutes(app: FastifyInstance, options: Portal
         .map((channel) => ({
           id: channel.id,
           name: channel.name,
+          ratio: options.store.channelView(channel).ratio,
           models: options.store.listChannelCatalog(channel).data.map((model) => ({
             id: model.id,
             ...(model.name ? { name: model.name } : {}),

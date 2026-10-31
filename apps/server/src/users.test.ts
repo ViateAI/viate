@@ -464,7 +464,7 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     assert.equal(stale.statusCode, 403);
   });
 
-  it("returns granted channel catalogs without ratio or match rules", async () => {
+  it("returns granted channel catalogs with the ratio and without match rules", async () => {
     const user = store.createUser({
       email: "portal-channels@example.com",
       name: "Channels",
@@ -482,10 +482,10 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     const response = await portal(app, login, { method: "GET", url: "/api/portal/channels" });
     assert.equal(response.statusCode, 200);
     const body = response.json() as {
-      channels: Array<{ id: string; name: string; models: Array<{ id: string; endpoints: string[] }> }>;
+      channels: Array<{ id: string; name: string; ratio: string; models: Array<{ id: string; endpoints: string[] }> }>;
     };
     const encoded = JSON.stringify(body);
-    assert.equal(encoded.includes("ratio"), false);
+    assert.equal(body.channels[0]?.ratio, "2");
     assert.equal(encoded.includes("rule"), false);
     assert.equal(encoded.includes("owned_by"), false);
     assert.equal(encoded.includes("children"), false);
