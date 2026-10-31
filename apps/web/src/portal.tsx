@@ -1,3 +1,4 @@
+import { ParaglideMessage } from "@inlang/paraglide-js-react";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   api,
@@ -10,6 +11,9 @@ import {
   type PortalEndpointType,
   type UserUsageRequest,
 } from "./api";
+import { formatCount, formatDateTime } from "./format";
+import { LocaleSwitch } from "./locale-switch";
+import { m } from "./paraglide/messages.js";
 
 type PortalUsage = {
   user: GatewayUser;
@@ -25,13 +29,13 @@ const ENDPOINT_ORDER: PortalEndpointType[] = [
   "openai-video",
 ];
 
-const ENDPOINT_LABEL: Record<PortalEndpointType, string> = {
-  openai: "Chat",
-  "openai-response": "Responses",
-  "openai-image": "Image",
-  "openai-audio": "Audio",
-  "openai-video": "Video",
-};
+function endpointLabel(endpoint: PortalEndpointType): string {
+  if (endpoint === "openai") return m.endpoint_chat();
+  if (endpoint === "openai-response") return m.endpoint_responses();
+  if (endpoint === "openai-image") return m.endpoint_image();
+  if (endpoint === "openai-audio") return m.endpoint_audio();
+  return m.endpoint_video();
+}
 
 const LATEST_ROWS = 5;
 
@@ -55,7 +59,7 @@ export function PortalApp() {
         if (isApiError(error) && error.status === 401) {
           setUser(null);
         } else {
-          setBootError(isApiError(error) ? error.message : "failed to load session");
+          setBootError(isApiError(error) ? error.message : m.error_load_session());
         }
         setReady(true);
       });
@@ -65,13 +69,14 @@ export function PortalApp() {
   }, []);
 
   if (!ready) {
-    return <p className="empty">Loading account…</p>;
+    return <p className="empty">{m.portal_loading()}</p>;
   }
   if (bootError) {
     return (
       <div className="login-screen">
         <main className="login">
-          <h1>Unable to load account</h1>
+          <div className="login-locale"><LocaleSwitch /></div>
+          <h1>{m.portal_boot_title()}</h1>
           <p className="banner error">{bootError}</p>
         </main>
       </div>
@@ -92,15 +97,16 @@ function PortalLogin({ onLoggedIn }: { onLoggedIn: (user: GatewayUser) => void }
   return (
     <div className="login-screen">
       <main className="login">
+        <div className="login-locale"><LocaleSwitch /></div>
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">V</span>
           <div>
             <div className="brand-name">Viate</div>
-            <div className="brand-sub">Customer</div>
+            <div className="brand-sub">{m.portal_brand()}</div>
           </div>
         </div>
-        <h1>Customer console</h1>
-        <p className="meta">Sign in to view your token balance and API keys.</p>
+        <h1>{m.portal_login_title()}</h1>
+        <p className="meta">{m.portal_login_subtitle()}</p>
         <form
           className="form"
           onSubmit={async (event) => {
@@ -115,14 +121,14 @@ function PortalLogin({ onLoggedIn }: { onLoggedIn: (user: GatewayUser) => void }
               setCsrf(result.csrf);
               onLoggedIn(result.user);
             } catch (err) {
-              setError(isApiError(err) ? err.message : "login failed");
+              setError(isApiError(err) ? err.message : m.error_login());
             } finally {
               setBusy(false);
             }
           }}
         >
           <label>
-            Email
+            {m.label_email()}
             <input
               type="email"
               name="email"
@@ -133,7 +139,7 @@ function PortalLogin({ onLoggedIn }: { onLoggedIn: (user: GatewayUser) => void }
             />
           </label>
           <label>
-            Password
+            {m.label_password()}
             <input
               type="password"
               name="password"
@@ -145,7 +151,7 @@ function PortalLogin({ onLoggedIn }: { onLoggedIn: (user: GatewayUser) => void }
           </label>
           {error ? <p className="banner error" role="alert">{error}</p> : null}
           <button className="primary" type="submit" disabled={busy}>
-            {busy ? "Signing in…" : "Sign in"}
+            {busy ? m.busy_signing_in() : m.action_sign_in()}
           </button>
         </form>
       </main>
@@ -178,7 +184,7 @@ function PortalHome({
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : "failed to load account"));
+    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_account()));
   }, []);
 
   async function logout() {
@@ -195,19 +201,22 @@ function PortalHome({
 
   return (
     <main className="main">
-      <div className="topbar" aria-label="Account">
+      <div className="topbar" aria-label={m.portal_account()}>
         <div className="page-heading">
           <h1>{user.email}</h1>
           <p className="page-desc">{user.name}</p>
         </div>
-        <button className="ghost" type="button" onClick={() => void logout()}>
-          Log out
-        </button>
+        <div className="topbar-actions">
+          <LocaleSwitch />
+          <button className="ghost" type="button" onClick={() => void logout()}>
+            {m.action_log_out()}
+          </button>
+        </div>
       </div>
       {notice ? <p className="banner ok" role="status">{notice}</p> : null}
       {error ? <p className="banner error" role="alert">{error}</p> : null}
       <p className="portal-balance">
-        <span className="visually-hidden">Balance </span>
+        <span className="visually-hidden">{m.portal_balance_label()} </span>
         <span className="portal-balance-amount">{balance}</span>
         <span className="portal-balance-unit">USD</span>
       </p>
@@ -232,26 +241,28 @@ function ActivityPanel({
   ledger: LedgerEntry[] | null;
   requests: UserUsageRequest[] | null;
 }) {
-  const summary = ledger && requests ? `${ledger.length} charges · ${requests.length} requests` : "Loading…";
+  const summary = ledger && requests
+    ? m.count_activity({ charges: String(ledger.length), requests: String(requests.length) })
+    : m.busy_loading();
 
   return (
     <section className="panel portal-activity">
       <div className="panel-header">
-        <h2>Activity</h2>
+        <h2>{m.portal_activity()}</h2>
         <p className="meta">{summary}</p>
-        <p className="meta">Request logs expire after 7 days.</p>
+        <p className="meta">{m.portal_expire()}</p>
       </div>
       <LogBlock
-        title="Charges"
+        title={m.portal_charges()}
         rows={ledger}
-        empty="No charges yet."
+        empty={m.portal_no_charges()}
         table={(rows) => <ChargeTable rows={rows} />}
         cards={(rows) => <ChargeCards rows={rows} />}
       />
       <LogBlock
-        title="Recent requests"
+        title={m.portal_recent()}
         rows={requests}
-        empty="No recent requests."
+        empty={m.portal_no_requests()}
         table={(rows) => <RequestTable rows={rows} />}
         cards={(rows) => <RequestCards rows={rows} />}
       />
@@ -285,11 +296,11 @@ function LogBlock<T>({
             aria-expanded={open}
             onClick={() => setOpen((current) => !current)}
           >
-            {open ? "Show less" : "Show all"}
+            {open ? m.action_show_less() : m.action_show_all()}
           </button>
         ) : null}
       </div>
-      {rows === null ? <p className="meta">Loading…</p> : null}
+      {rows === null ? <p className="meta">{m.busy_loading()}</p> : null}
       {rows && rows.length === 0 ? <p className="meta">{empty}</p> : null}
       {visible && visible.length > 0 ? (
         <>
@@ -304,19 +315,19 @@ function LogBlock<T>({
 function ChargeTable({ rows }: { rows: LedgerEntry[] }) {
   return (
     <table className="portal-log-table">
-      <caption className="visually-hidden">Charges</caption>
+      <caption className="visually-hidden">{m.portal_charges()}</caption>
       <thead>
         <tr>
-          <th scope="col">When</th>
-          <th scope="col">Reason</th>
-          <th scope="col">Delta</th>
-          <th scope="col">Balance after</th>
+          <th scope="col">{m.label_when()}</th>
+          <th scope="col">{m.label_reason()}</th>
+          <th scope="col">{m.label_delta()}</th>
+          <th scope="col">{m.label_balance_after()}</th>
         </tr>
       </thead>
       <tbody>
         {rows.map((entry) => (
           <tr key={entry.id}>
-            <td>{formatWhen(entry.createdAt)}</td>
+            <td>{formatDateTime(entry.createdAt)}</td>
             <td>
               {entry.reason}
               {entry.note ? <span className="meta"> {entry.note}</span> : null}
@@ -335,13 +346,13 @@ function ChargeCards({ rows }: { rows: LedgerEntry[] }) {
     <>
       {rows.map((entry) => (
         <article className="portal-log-card" key={entry.id}>
-          <div>{formatWhen(entry.createdAt)}</div>
+          <div>{formatDateTime(entry.createdAt)}</div>
           <div>
             {entry.reason}
             {entry.note ? <span className="meta"> {entry.note}</span> : null}
           </div>
           <div>
-            {entry.deltaUsd} USD · {entry.balanceAfterUsd} USD after
+            {m.portal_usd_after({ delta: entry.deltaUsd, after: entry.balanceAfterUsd })}
           </div>
         </article>
       ))}
@@ -352,25 +363,25 @@ function ChargeCards({ rows }: { rows: LedgerEntry[] }) {
 function RequestTable({ rows }: { rows: UserUsageRequest[] }) {
   return (
     <table className="portal-log-table">
-      <caption className="visually-hidden">Recent requests</caption>
+      <caption className="visually-hidden">{m.portal_recent()}</caption>
       <thead>
         <tr>
-          <th scope="col">When</th>
-          <th scope="col">Model</th>
-          <th scope="col">Status</th>
-          <th scope="col">Tokens</th>
+          <th scope="col">{m.label_when()}</th>
+          <th scope="col">{m.label_model()}</th>
+          <th scope="col">{m.label_status()}</th>
+          <th scope="col">{m.label_tokens()}</th>
         </tr>
       </thead>
       <tbody>
         {rows.map((request) => (
           <tr key={request.id}>
-            <td>{formatWhen(request.startedAt)}</td>
+            <td>{formatDateTime(request.startedAt)}</td>
             <td>
               {request.requestModel ?? "—"}
               <span className="meta"> {request.endpoint}</span>
             </td>
             <td>{request.status}</td>
-            <td>{`${formatTokens(request.inputTokens ?? 0)} in / ${formatTokens(request.outputTokens ?? 0)} out`}</td>
+            <td>{m.tokens_in_out({ input: formatCount(request.inputTokens ?? 0), output: formatCount(request.outputTokens ?? 0) })}</td>
           </tr>
         ))}
       </tbody>
@@ -383,13 +394,13 @@ function RequestCards({ rows }: { rows: UserUsageRequest[] }) {
     <>
       {rows.map((request) => (
         <article className="portal-log-card" key={request.id}>
-          <div>{formatWhen(request.startedAt)}</div>
+          <div>{formatDateTime(request.startedAt)}</div>
           <div>
             {request.requestModel ?? "—"}
             <span className="meta"> {request.endpoint}</span>
           </div>
           <div>
-            {request.status} · {formatTokens(request.inputTokens ?? 0)} in / {formatTokens(request.outputTokens ?? 0)} out
+            {request.status} · {m.tokens_in_out({ input: formatCount(request.inputTokens ?? 0), output: formatCount(request.outputTokens ?? 0) })}
           </div>
         </article>
       ))}
@@ -423,14 +434,14 @@ function KeysPanel({
           result.channels.some((channel) => channel.id === current) ? current : result.channels[0]?.id ?? "",
         );
       })
-      .catch((err) => onError(isApiError(err) ? err.message : "failed to load channels"));
+      .catch((err) => onError(isApiError(err) ? err.message : m.error_load_channels()));
   }, [onError]);
 
   return (
     <section className="panel stack portal-keys">
       <div className="panel-header">
-        <h2>API keys</h2>
-        <p className="meta">Each key uses one channel. Secrets are shown once. Revoking a key blocks it immediately.</p>
+        <h2>{m.portal_keys()}</h2>
+        <p className="meta">{m.portal_keys_hint()}</p>
       </div>
       <form
         className="form"
@@ -447,22 +458,22 @@ function KeysPanel({
             setName("");
             setSecret({ name: result.apiKey.name, secret: result.secret });
             await onChanged();
-            onNotice("Copy this key now. It will not be shown again.");
+            onNotice(m.portal_copy_once());
           } catch (err) {
-            onError(isApiError(err) ? err.message : "create failed");
+            onError(isApiError(err) ? err.message : m.error_create());
           } finally {
             setBusy(false);
           }
         }}
       >
         <label>
-          Key name
+          {m.label_key_name()}
           <input value={name} onChange={(event) => setName(event.target.value)} required />
         </label>
         <fieldset className="portal-channels">
-          <legend>Channel</legend>
-          {channels === null ? <p className="meta">Loading…</p> : null}
-          {channels && channels.length === 0 ? <p className="meta">No channel is enabled for this account.</p> : null}
+          <legend>{m.label_channel()}</legend>
+          {channels === null ? <p className="meta">{m.busy_loading()}</p> : null}
+          {channels && channels.length === 0 ? <p className="meta">{m.portal_channel_empty()}</p> : null}
           <div className="channel-cards">
             {channels?.map((channel) => (
               <label key={channel.id} className="channel-card">
@@ -477,7 +488,7 @@ function KeysPanel({
                 />
                 <span className="channel-card-name">{channel.name}</span>
                 <span className="meta">
-                  {channel.models.length} {channel.models.length === 1 ? "model" : "models"}
+                  {m.count_channel_models({ count: channel.models.length })}
                 </span>
               </label>
             ))}
@@ -488,18 +499,22 @@ function KeysPanel({
           <CallExample key={`example-${selected.id}`} channel={selected} token={secret?.secret ?? "YOUR_API_KEY"} />
         ) : null}
         <button className="primary" type="submit" disabled={busy || !name.trim() || !channelId}>
-          {busy ? "Creating…" : "Create API key"}
+          {busy ? m.busy_creating() : m.action_create_key()}
         </button>
       </form>
       {secret ? (
         <div className="banner ok secret-row" role="status">
           <div>
-            Copy {secret.name} now: <code>{secret.secret}</code>
+            <ParaglideMessage
+              message={m.portal_copy_secret}
+              inputs={{ name: secret.name, secret: secret.secret }}
+              markup={{ code: ({ children }) => <code>{children}</code> }}
+            />
           </div>
         </div>
       ) : null}
-      {keys === null ? <p className="meta">Loading keys…</p> : null}
-      {keys && keys.length === 0 ? <p className="meta">No API keys yet.</p> : null}
+      {keys === null ? <p className="meta">{m.portal_keys_loading()}</p> : null}
+      {keys && keys.length === 0 ? <p className="meta">{m.portal_keys_empty()}</p> : null}
       {keys?.map((key) => (
         <article className="resource" key={key.id}>
           <div className="resource-main">
@@ -508,8 +523,7 @@ function KeysPanel({
               <span className="badge">{key.prefix}…</span>
             </div>
             <div className="meta">
-              {channels?.find((channel) => channel.id === key.channelId)?.name ?? "No channel"} · created{" "}
-              {new Date(key.createdAt).toLocaleString()}
+              {channels?.find((channel) => channel.id === key.channelId)?.name ?? m.portal_no_channel()} · {m.portal_created({ time: formatDateTime(key.createdAt) })}
             </div>
           </div>
           <div className="row-actions">
@@ -523,14 +537,14 @@ function KeysPanel({
                     await api(`/api/portal/keys/${key.id}`, { method: "DELETE" });
                     if (secret?.name === key.name) setSecret(null);
                     await onChanged();
-                    onNotice("API key revoked.");
+                    onNotice(m.portal_revoked());
                   } catch (err) {
-                    onError(isApiError(err) ? err.message : "revoke failed");
+                    onError(isApiError(err) ? err.message : m.error_revoke());
                   }
                 })();
               }}
             >
-              Revoke
+              {m.action_revoke()}
             </button>
           </div>
         </article>
@@ -542,7 +556,7 @@ function KeysPanel({
 function ChannelModels({ channel }: { channel: PortalChannel }) {
   const [filter, setFilter] = useState("");
   if (channel.models.length === 0) {
-    return <p className="meta">No models are published on this channel yet.</p>;
+    return <p className="meta">{m.portal_models_empty()}</p>;
   }
   const query = filter.trim().toLowerCase();
   const visible = query
@@ -552,7 +566,7 @@ function ChannelModels({ channel }: { channel: PortalChannel }) {
     <div className="portal-models">
       {channel.models.length > 8 ? (
         <label>
-          Filter models
+          {m.portal_filter_models()}
           <input
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
@@ -568,13 +582,13 @@ function ChannelModels({ channel }: { channel: PortalChannel }) {
             <span className="model-id">{model.id}</span>
             <span className="portal-endpoint-badges">
               {model.endpoints.map((endpoint) => (
-                <span className="badge neutral" key={endpoint}>{ENDPOINT_LABEL[endpoint]}</span>
+                <span className="badge neutral" key={endpoint}>{endpointLabel(endpoint)}</span>
               ))}
             </span>
           </li>
         ))}
       </ul>
-      {visible.length === 0 ? <p className="meta">No models match.</p> : null}
+      {visible.length === 0 ? <p className="meta">{m.portal_models_match()}</p> : null}
     </div>
   );
 }
@@ -582,11 +596,11 @@ function ChannelModels({ channel }: { channel: PortalChannel }) {
 function CallExample({ channel, token }: { channel: PortalChannel; token: string }) {
   const endpoints = presentEndpoints(channel);
   const [endpoint, setEndpoint] = useState<PortalEndpointType | null>(endpoints[0] ?? null);
-  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(null);
   const selected = endpoint && endpoints.includes(endpoint) ? endpoint : endpoints[0];
 
   useEffect(() => {
-    if (copyStatus !== "Copied") return;
+    if (copyStatus !== "copied") return;
     const timer = window.setTimeout(() => setCopyStatus(null), 2000);
     return () => window.clearTimeout(timer);
   }, [copyStatus]);
@@ -599,7 +613,7 @@ function CallExample({ channel, token }: { channel: PortalChannel; token: string
   return (
     <div className="portal-example-block">
       <div className="portal-example-toolbar">
-        <div className="segmented" role="group" aria-label="Endpoint type">
+        <div className="segmented" role="group" aria-label={m.portal_calls()}>
           {endpoints.map((item) => (
             <button
               key={item}
@@ -610,7 +624,7 @@ function CallExample({ channel, token }: { channel: PortalChannel; token: string
                 setCopyStatus(null);
               }}
             >
-              {ENDPOINT_LABEL[item]}
+              {endpointLabel(item)}
             </button>
           ))}
         </div>
@@ -618,18 +632,18 @@ function CallExample({ channel, token }: { channel: PortalChannel; token: string
           type="button"
           onClick={() => {
             void navigator.clipboard.writeText(text).then(
-              () => setCopyStatus("Copied"),
-              () => setCopyStatus("Copy failed"),
+              () => setCopyStatus("copied"),
+              () => setCopyStatus("failed"),
             );
           }}
         >
-          Copy example
+          {m.action_copy_example()}
         </button>
       </div>
       <pre className="portal-example">{text}</pre>
-      {copyStatus ? <p className="meta" role="status">{copyStatus}</p> : null}
+      {copyStatus ? <p className="meta" role="status">{copyStatus === "copied" ? m.portal_copied() : m.error_copy()}</p> : null}
       {selected === "openai-audio" ? (
-        <p className="meta">Transcriptions are POST /v1/audio/transcriptions multipart file + model.</p>
+        <p className="meta">{m.portal_audio_hint()}</p>
       ) : null}
     </div>
   );
@@ -661,19 +675,19 @@ function PasswordPanel({
           });
           setCurrentPassword("");
           setNewPassword("");
-          onNotice("Password changed.");
+          onNotice(m.portal_changed());
         } catch (err) {
-          onError(isApiError(err) ? err.message : "password change failed");
+          onError(isApiError(err) ? err.message : m.error_password());
         } finally {
           setBusy(false);
         }
       }}
     >
       <div className="panel-header">
-        <h2>Change password</h2>
+        <h2>{m.portal_change_password()}</h2>
       </div>
       <label>
-        Current password
+        {m.label_current_password()}
         <input
           type="password"
           autoComplete="current-password"
@@ -683,7 +697,7 @@ function PasswordPanel({
         />
       </label>
       <label>
-        New password
+        {m.label_new_password()}
         <input
           type="password"
           autoComplete="new-password"
@@ -694,7 +708,7 @@ function PasswordPanel({
         />
       </label>
       <button className="primary" type="submit" disabled={busy || newPassword.length < 8}>
-        {busy ? "Saving…" : "Change password"}
+        {busy ? m.busy_saving() : m.portal_change_password()}
       </button>
     </form>
   );
@@ -745,10 +759,3 @@ function requestExample(method: string, url: string, auth: string, body: string)
   return `${method} ${url}\n${auth}\nContent-Type: application/json\n\n${body}`;
 }
 
-function formatWhen(value: string): string {
-  return new Date(value).toLocaleString();
-}
-
-function formatTokens(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
-}

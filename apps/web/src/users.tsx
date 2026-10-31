@@ -1,5 +1,8 @@
+import { ParaglideMessage } from "@inlang/paraglide-js-react";
 import { useEffect, useState } from "react";
 import { api, isApiError, type GatewayUser, type LedgerEntry } from "./api";
+import { formatDateTime } from "./format";
+import { m } from "./paraglide/messages.js";
 
 export function UsersPage({ onNotice }: { onNotice: (value: string | null) => void }) {
   const [users, setUsers] = useState<GatewayUser[] | null>(null);
@@ -16,7 +19,7 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : "failed to load users"));
+    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_users()));
   }, []);
 
   return (
@@ -37,22 +40,25 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
             setName("");
             setPassword("");
             await refresh();
-            onNotice("Customer created.");
+            onNotice(m.users_created());
           } catch (err) {
-            setError(isApiError(err) ? err.message : "create failed");
+            setError(isApiError(err) ? err.message : m.error_create());
           } finally {
             setBusy(false);
           }
         }}
       >
         <div className="panel-header">
-          <h2>Create customer</h2>
+          <h2>{m.users_create_title()}</h2>
           <p>
-            Customers sign in at <a href="/portal">/portal</a>. There is no public signup.
+            <ParaglideMessage
+              message={m.users_create_hint}
+              markup={{ link: ({ children }) => <a href="/portal">{children}</a> }}
+            />
           </p>
         </div>
         <label>
-          Email
+          {m.label_email()}
           <input
             type="email"
             autoComplete="off"
@@ -62,11 +68,11 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
           />
         </label>
         <label>
-          Name
+          {m.label_name()}
           <input value={name} onChange={(event) => setName(event.target.value)} required />
         </label>
         <label>
-          Password
+          {m.label_password()}
           <input
             type="password"
             autoComplete="new-password"
@@ -77,15 +83,15 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
           />
         </label>
         <button className="primary" type="submit" disabled={busy}>
-          {busy ? "Creating…" : "Create customer"}
+          {busy ? m.busy_creating() : m.action_create_customer()}
         </button>
       </form>
       {error ? <p className="banner error" role="alert">{error}</p> : null}
-      {users === null ? <p className="empty">Loading users…</p> : null}
+      {users === null ? <p className="empty">{m.users_loading()}</p> : null}
       {users && users.length === 0 ? (
         <div className="empty">
-          <strong>No customers</strong>
-          Create one, then add a dollar balance before their API keys can call /v1.
+          <strong>{m.users_empty_title()}</strong>
+          {m.users_empty_body()}
         </div>
       ) : null}
       {users?.map((user) => (
@@ -93,10 +99,10 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
           <div className="resource-main">
             <div className="resource-title-row">
               <h2>{user.email}</h2>
-              <StatusBadge tone={user.status === "active" ? "ok" : "warn"}>{user.status}</StatusBadge>
+              <StatusBadge tone={user.status === "active" ? "ok" : "warn"}>{user.status === "active" ? m.status_active() : m.status_disabled()}</StatusBadge>
             </div>
             <div className="meta">{user.name}</div>
-            <div className="meta">Balance {user.balanceUsd} USD</div>
+            <div className="meta">{m.users_balance({ amount: user.balanceUsd })}</div>
             {openId === user.id ? (
               <UserEditor
                 user={user}
@@ -110,7 +116,7 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
           </div>
           <div className="row-actions">
             <button className="ghost" type="button" onClick={() => setOpenId(openId === user.id ? null : user.id)}>
-              {openId === user.id ? "Close" : "Manage"}
+              {openId === user.id ? m.action_close() : m.action_manage()}
             </button>
           </div>
         </article>
@@ -144,7 +150,7 @@ function UserEditor({
       await action();
       await onChanged();
     } catch (err) {
-      onError(isApiError(err) ? err.message : "update failed");
+      onError(isApiError(err) ? err.message : m.error_update());
     } finally {
       setBusy(false);
     }
@@ -162,11 +168,11 @@ function UserEditor({
                 method: "PATCH",
                 body: JSON.stringify({ status: user.status === "active" ? "disabled" : "active" }),
               });
-              onNotice(user.status === "active" ? "Customer disabled." : "Customer enabled.");
+              onNotice(user.status === "active" ? m.users_disabled() : m.users_enabled());
             })
           }
         >
-          {user.status === "active" ? "Disable" : "Enable"}
+          {user.status === "active" ? m.action_disable() : m.action_enable()}
         </button>
         <button
           type="button"
@@ -178,7 +184,7 @@ function UserEditor({
             })
           }
         >
-          Ledger
+          {m.users_ledger()}
         </button>
       </div>
       <ChannelAccess userId={user.id} busy={busy} onError={onError} onNotice={onNotice} />
@@ -192,12 +198,12 @@ function UserEditor({
               body: JSON.stringify({ password: nextPassword }),
             });
             setNextPassword("");
-            onNotice("Password reset.");
+            onNotice(m.users_password_reset());
           });
         }}
       >
         <label>
-          Reset password
+          {m.label_reset_password()}
           <input
             type="password"
             autoComplete="new-password"
@@ -208,7 +214,7 @@ function UserEditor({
           />
         </label>
         <button type="submit" disabled={busy || nextPassword.length < 8}>
-          Reset password
+          {m.action_reset_password()}
         </button>
       </form>
       <form
@@ -224,32 +230,32 @@ function UserEditor({
             setNote("");
             const result = await api<{ ledger: LedgerEntry[] }>(`/api/admin/users/${user.id}/ledger`);
             setLedger(result.ledger);
-            onNotice("Dollar balance updated.");
+            onNotice(m.users_balance_updated());
           });
         }}
       >
         <label>
-          Grant or adjust dollars
+          {m.users_delta()}
           <input
             inputMode="decimal"
             value={delta}
             onChange={(event) => setDelta(event.target.value)}
-            placeholder="10.00 or -1.50"
+            placeholder={m.users_delta_placeholder()}
             required
           />
         </label>
         <label>
-          Note
+          {m.label_note()}
           <input value={note} onChange={(event) => setNote(event.target.value)} maxLength={200} />
         </label>
         <button type="submit" disabled={busy || !delta.trim()}>
-          Apply dollars
+          {m.action_apply_dollars()}
         </button>
       </form>
       {ledger ? (
         <div className="stack">
-          <p className="meta">Latest ledger entries. This is the charge history.</p>
-          {ledger.length === 0 ? <p className="meta">No ledger entries.</p> : null}
+          <p className="meta">{m.users_ledger_hint()}</p>
+          {ledger.length === 0 ? <p className="meta">{m.users_ledger_empty()}</p> : null}
           {ledger.map((entry) => (
             <div key={entry.id} className="meta-list">
               <div>
@@ -257,16 +263,16 @@ function UserEditor({
                 <dd>{entry.deltaUsd} USD</dd>
               </div>
               <div>
-                <dt>Balance</dt>
+                <dt>{m.label_balance()}</dt>
                 <dd>{entry.balanceAfterUsd} USD</dd>
               </div>
               <div>
-                <dt>When</dt>
-                <dd>{new Date(entry.createdAt).toLocaleString()}</dd>
+                <dt>{m.label_when()}</dt>
+                <dd>{formatDateTime(entry.createdAt)}</dd>
               </div>
               {entry.note ? (
                 <div>
-                  <dt>Note</dt>
+                  <dt>{m.label_note()}</dt>
                   <dd>{entry.note}</dd>
                 </div>
               ) : null}
@@ -308,7 +314,7 @@ function ChannelAccess({
         setAccess(result);
         setChecked(result.channelIds);
       })
-      .catch((err) => onError(isApiError(err) ? err.message : "failed to load channels"));
+      .catch((err) => onError(isApiError(err) ? err.message : m.error_load_channels()));
   }, [onError, userId]);
 
   async function save() {
@@ -322,9 +328,9 @@ function ChannelAccess({
       });
       setAccess(result);
       setChecked(result.channelIds);
-      onNotice(result.channelIds.length === 0 ? "Customer has no channels." : "Channel access saved.");
+      onNotice(result.channelIds.length === 0 ? m.users_access_none() : m.users_access_saved());
     } catch (err) {
-      onError(isApiError(err) ? err.message : "save failed");
+      onError(isApiError(err) ? err.message : m.error_save());
     } finally {
       setSaving(false);
     }
@@ -333,14 +339,11 @@ function ChannelAccess({
   return (
     <div className="stack">
       <div className="panel-header">
-        <h2>Channels</h2>
-        <p className="meta">
-          This customer can create keys only for checked channels. A new customer starts with none. Models added to a
-          channel become available without editing each customer.
-        </p>
+        <h2>{m.users_channels_title()}</h2>
+        <p className="meta">{m.users_access_hint()}</p>
       </div>
-      {access === null ? <p className="meta">Loading channels…</p> : null}
-      {access && access.channels.length === 0 ? <p className="meta">No channels yet. Create one on the Channels page.</p> : null}
+      {access === null ? <p className="meta">{m.users_channels_loading()}</p> : null}
+      {access && access.channels.length === 0 ? <p className="meta">{m.users_channels_empty()}</p> : null}
       <div className="protocol-toggles">
         {access?.channels.map((channel) => (
           <label className="toggle" key={channel.id}>
@@ -360,7 +363,7 @@ function ChannelAccess({
       </div>
       <div className="row-actions">
         <button className="primary" type="button" disabled={busy || saving || access === null} onClick={() => void save()}>
-          Save channels
+          {m.action_save_channels()}
         </button>
       </div>
     </div>

@@ -4,16 +4,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -p tsconfig.json --noEmit && vite build",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "i18n:compile": "paraglide-js compile --project ./project.inlang --outdir ./src/paraglide --emit-ts-declarations --strategy localStorage preferredLanguage baseLocale --output-structure locale-modules --no-emit-readme",
+    "dev": "pnpm run i18n:compile && vite",
+    "build": "pnpm run i18n:compile && tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "pnpm run i18n:compile && tsc -p tsconfig.json --noEmit",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@inlang/paraglide-js-react": "1.0.3",
     "react": "19.1.1",
     "react-dom": "19.1.1"
   },
   "devDependencies": {
+    "@inlang/paraglide-js": "2.29.3",
+    "@inlang/plugin-message-format": "4.5.6",
     "@types/react": "19.1.13",
     "@types/react-dom": "19.1.9",
     "@vitejs/plugin-react": "5.0.4",

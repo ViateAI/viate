@@ -15,6 +15,9 @@ data/
 .pnpm-store/
 .codegraph/
 
+# Paraglide output. Compile with the web package's i18n:compile script.
+apps/web/src/paraglide/
+
 # Local product-contract notes. Do not commit.
 PROJECT_BRIEF.txt
 *_BRIEF.txt

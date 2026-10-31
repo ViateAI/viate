@@ -1,4 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { formatCount, formatDateTime, formatRate } from "./format";
+import { m } from "./paraglide/messages.js";
 import { api, isApiError, type ClientApiKey, type Connection } from "./api";
 
 type Tab = "requests" | "statistics";
@@ -158,7 +160,7 @@ export function RequestsPage() {
         setKeys(keyResult.apiKeys);
       })
       .catch((error) => {
-        if (!cancelled) setCatalogError(messageOf(error, "failed to load filters"));
+        if (!cancelled) setCatalogError(messageOf(error, m.error_load_filters()));
       });
     return () => {
       cancelled = true;
@@ -176,7 +178,7 @@ export function RequestsPage() {
         }
       })
       .catch((error) => {
-        if (!cancelled) setList({ status: "error", message: messageOf(error, "failed to load requests") });
+        if (!cancelled) setList({ status: "error", message: messageOf(error, m.error_load_requests()) });
       });
     return () => {
       cancelled = true;
@@ -192,7 +194,7 @@ export function RequestsPage() {
         if (!cancelled) setStats({ status: "ready", stats: result.stats });
       })
       .catch((error) => {
-        if (!cancelled) setStats({ status: "error", message: messageOf(error, "failed to load statistics") });
+        if (!cancelled) setStats({ status: "error", message: messageOf(error, m.error_load_statistics()) });
       });
     return () => {
       cancelled = true;
@@ -215,7 +217,7 @@ export function RequestsPage() {
           setDetail({ status: "missing" });
           return;
         }
-        setDetail({ status: "error", message: messageOf(error, "failed to load request") });
+        setDetail({ status: "error", message: messageOf(error, m.error_load_request()) });
       });
     return () => {
       cancelled = true;
@@ -227,11 +229,11 @@ export function RequestsPage() {
     const from = new Date(draft.fromLocal).getTime();
     const to = new Date(draft.toLocal).getTime();
     if (Number.isNaN(from) || Number.isNaN(to)) {
-      setFormError("Enter a valid from and to.");
+      setFormError(m.requests_invalid_range());
       return;
     }
     if (from > to) {
-      setFormError("From is after to.");
+      setFormError(m.requests_from_after());
       return;
     }
     setFormError(null);
@@ -273,7 +275,7 @@ export function RequestsPage() {
         };
       });
     } catch (error) {
-      setMoreError(messageOf(error, "failed to load older requests"));
+      setMoreError(messageOf(error, m.error_load_older()));
     } finally {
       setLoadingMore(false);
     }
@@ -284,34 +286,34 @@ export function RequestsPage() {
 
   return (
     <section className="stack">
-      <div className="segmented" role="tablist" aria-label="Request views">
+      <div className="segmented" role="tablist" aria-label={m.requests_views()}>
         <button type="button" role="tab" aria-selected={tab === "requests"} aria-pressed={tab === "requests"} onClick={() => setTab("requests")}>
-          Requests
+          {m.requests_tab_requests()}
         </button>
         <button type="button" role="tab" aria-selected={tab === "statistics"} aria-pressed={tab === "statistics"} onClick={() => setTab("statistics")}>
-          Statistics
+          {m.requests_tab_stats()}
         </button>
       </div>
       <form className="panel req-filters" onSubmit={applyDraft}>
         <div className="req-filter-grid">
           <label>
-            From
+            {m.label_from()}
             <input type="datetime-local" value={draft.fromLocal} onChange={(event) => setDraft({ ...draft, fromLocal: event.target.value })} required />
           </label>
           <label>
-            To
+            {m.label_to()}
             <input type="datetime-local" value={draft.toLocal} onChange={(event) => setDraft({ ...draft, toLocal: event.target.value })} required />
           </label>
           <label>
-            Model
+            {m.label_model()}
             <input
               value={draft.model ?? ""}
-              placeholder="Exact request model"
+              placeholder={m.requests_model_placeholder()}
               onChange={(event) => setDraft({ ...draft, model: event.target.value === "" ? null : event.target.value })}
             />
           </label>
           <label>
-            Connection
+            {m.label_connection()}
             <select
               value={draft.connectionId === null ? "" : draft.connectionId === "" ? "__none__" : draft.connectionId}
               onChange={(event) => {
@@ -319,8 +321,8 @@ export function RequestsPage() {
                 setDraft({ ...draft, connectionId: value === "" ? null : value === "__none__" ? "" : value });
               }}
             >
-              <option value="">Any</option>
-              {draft.connectionId === "" ? <option value="__none__">No connection</option> : null}
+              <option value="">{m.label_any()}</option>
+              {draft.connectionId === "" ? <option value="__none__">{m.requests_any_connection()}</option> : null}
               {connections.map((connection) => (
                 <option key={connection.id} value={connection.id}>
                   {connectionOption(connection)}
@@ -329,9 +331,9 @@ export function RequestsPage() {
             </select>
           </label>
           <label>
-            API key
+            {m.label_api_key()}
             <select value={draft.keyId} onChange={(event) => setDraft({ ...draft, keyId: event.target.value })}>
-              <option value="">Any</option>
+              <option value="">{m.label_any()}</option>
               {keys.map((key) => (
                 <option key={key.id} value={key.id}>
                   {key.name} ({key.prefix})
@@ -340,18 +342,18 @@ export function RequestsPage() {
             </select>
           </label>
           <label>
-            Outcome
+            {m.label_outcome()}
             <select value={draft.outcome} onChange={(event) => setDraft({ ...draft, outcome: event.target.value })}>
-              <option value="">Any</option>
+              <option value="">{m.label_any()}</option>
               {OUTCOMES.map((outcome) => (
-                <option key={outcome} value={outcome}>{outcome}</option>
+                <option key={outcome} value={outcome}>{outcomeLabel(outcome)}</option>
               ))}
             </select>
           </label>
           <label>
-            Endpoint
+            {m.label_endpoint()}
             <select value={draft.endpoint} onChange={(event) => setDraft({ ...draft, endpoint: event.target.value })}>
-              <option value="">Any</option>
+              <option value="">{m.label_any()}</option>
               {ENDPOINTS.map((endpoint) => (
                 <option key={endpoint} value={endpoint}>{endpoint}</option>
               ))}
@@ -361,8 +363,8 @@ export function RequestsPage() {
         {formError ? <p className="banner error" role="alert">{formError}</p> : null}
         {catalogError ? <p className="banner warn" role="status">{catalogError}</p> : null}
         <div className="row-actions">
-          <button className="primary" type="submit">Apply</button>
-          {showClear ? <button type="button" onClick={clearAll}>Clear all</button> : null}
+          <button className="primary" type="submit">{m.action_apply()}</button>
+          {showClear ? <button type="button" onClick={clearAll}>{m.action_clear_all()}</button> : null}
         </div>
       </form>
       <FilterChips
@@ -427,28 +429,28 @@ function FilterChips({
     chips.push({ key: "time", label: `${applied.fromLocal.replace("T", " ")} – ${applied.toLocal.replace("T", " ")}`, patch: { fromLocal: defaults.fromLocal, toLocal: defaults.toLocal } });
   }
   if (applied.model !== null) {
-    chips.push({ key: "model", label: `Model: ${applied.model || "(none)"}`, patch: { model: null } });
+    chips.push({ key: "model", label: m.requests_chip_model({ name: applied.model || m.requests_none() }), patch: { model: null } });
   }
   if (applied.connectionId !== null) {
     chips.push({
       key: "connection",
-      label: `Connection: ${applied.connectionId === "" ? "(none)" : connectionLabel(applied.connectionId, connections)}`,
+      label: m.requests_chip_connection({ name: applied.connectionId === "" ? m.requests_none() : connectionLabel(applied.connectionId, connections) }),
       patch: { connectionId: null },
     });
   }
   if (applied.keyId) {
     const key = keys.find((item) => item.id === applied.keyId);
-    chips.push({ key: "key", label: `API key: ${key ? `${key.name} ${key.prefix}` : applied.keyId}`, patch: { keyId: "" } });
+    chips.push({ key: "key", label: m.requests_chip_key({ name: key ? `${key.name} ${key.prefix}` : applied.keyId }), patch: { keyId: "" } });
   }
-  if (applied.outcome) chips.push({ key: "outcome", label: `Outcome: ${applied.outcome}`, patch: { outcome: "" } });
-  if (applied.endpoint) chips.push({ key: "endpoint", label: `Endpoint: ${applied.endpoint}`, patch: { endpoint: "" } });
+  if (applied.outcome) chips.push({ key: "outcome", label: m.requests_chip_outcome({ name: outcomeLabel(applied.outcome) }), patch: { outcome: "" } });
+  if (applied.endpoint) chips.push({ key: "endpoint", label: m.requests_chip_endpoint({ name: applied.endpoint }), patch: { endpoint: "" } });
   if (chips.length === 0) return null;
   return (
-    <div className="req-chips" aria-label="Active filters">
+    <div className="req-chips" aria-label={m.requests_active_filters()}>
       {chips.map((chip) => (
         <button key={chip.key} type="button" className="badge neutral req-chip" onClick={() => onRemove(chip.patch)}>
           {chip.label} <span aria-hidden="true">×</span>
-          <span className="visually-hidden">Remove</span>
+          <span className="visually-hidden">{m.action_remove()}</span>
         </button>
       ))}
     </div>
@@ -476,20 +478,20 @@ function RequestList({
   onRetry: () => void;
   onOlder: () => void;
 }) {
-  if (list.status === "loading") return <p className="empty">Loading requests…</p>;
+  if (list.status === "loading") return <p className="empty">{m.requests_loading()}</p>;
   if (list.status === "error") {
     return (
       <div className="stack">
         <p className="banner error" role="alert">{list.message}</p>
-        <div className="row-actions"><button type="button" onClick={onRetry}>Retry</button></div>
+        <div className="row-actions"><button type="button" onClick={onRetry}>{m.action_retry()}</button></div>
       </div>
     );
   }
   if (list.rows.length === 0) {
     return (
       <div className="empty">
-        <strong>{extraFilters ? "No matching requests" : "No requests in this range"}</strong>
-        {extraFilters ? "Clear a filter or widen the time range." : "Requests appear here after traffic reaches /v1."}
+        <strong>{extraFilters ? m.requests_empty_filtered_title() : m.requests_empty_title()}</strong>
+        {extraFilters ? m.requests_empty_filtered_body() : m.requests_empty_body()}
       </div>
     );
   }
@@ -497,17 +499,17 @@ function RequestList({
     <div className="stack">
       <div className="req-table-wrap">
         <table className="req-table">
-          <caption className="visually-hidden">Gateway requests</caption>
+          <caption className="visually-hidden">{m.requests_caption()}</caption>
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Connection</th>
-              <th>API key</th>
-              <th>Model</th>
-              <th>Stream</th>
-              <th>Tokens</th>
-              <th>Timing</th>
-              <th>Status</th>
+              <th>{m.label_time()}</th>
+              <th>{m.label_connection()}</th>
+              <th>{m.label_api_key()}</th>
+              <th>{m.label_model()}</th>
+              <th>{m.label_stream()}</th>
+              <th>{m.label_tokens()}</th>
+              <th>{m.label_timing()}</th>
+              <th>{m.label_status()}</th>
             </tr>
           </thead>
           <tbody>
@@ -517,7 +519,7 @@ function RequestList({
                 data-request-id={row.id}
                 tabIndex={0}
                 role="button"
-                aria-label={`Open request ${row.id}`}
+                aria-label={m.requests_open({ id: row.id })}
                 aria-selected={selectedId === row.id}
                 className={selectedId === row.id ? "is-selected" : undefined}
                 onClick={(event) => {
@@ -535,23 +537,23 @@ function RequestList({
                 <td><time dateTime={row.startedAt}>{formatTime(row.startedAt)}</time></td>
                 <td>
                   <div>{connectionLabel(row.connectionId, connections)}</div>
-                  {row.attemptCount > 1 ? <div className="meta">{row.attemptCount} attempts</div> : null}
+                  {row.attemptCount > 1 ? <div className="meta">{m.count_attempts({ count: row.attemptCount })}</div> : null}
                 </td>
                 <td>{row.apiKeyPrefix || "—"}</td>
                 <td>
                   <div>{row.requestModel || "—"}</div>
-                  {row.upstreamModel && row.upstreamModel !== row.requestModel ? <div className="meta">upstream {row.upstreamModel}</div> : null}
+                  {row.upstreamModel && row.upstreamModel !== row.requestModel ? <div className="meta">{m.requests_upstream({ model: row.upstreamModel })}</div> : null}
                 </td>
                 <td>
-                  <div>{row.stream ? "Stream" : "Non-stream"}</div>
-                  <div className="meta">TPS {formatTps(rowTps(row))}</div>
+                  <div>{row.stream ? m.requests_stream() : m.requests_non_stream()}</div>
+                  <div className="meta">{m.requests_tps({ value: formatTps(rowTps(row)) })}</div>
                 </td>
                 <td>
                   <div>{tokenPair(row.inputTokens, row.outputTokens)}</div>
                   {cacheLine(row) ? <div className="meta">{cacheLine(row)}</div> : null}
                 </td>
                 <td>
-                  {row.stream ? <div>first token {formatDuration(row.ttfbMs)}</div> : null}
+                  {row.stream ? <div>{m.requests_first_token({ duration: formatDuration(row.ttfbMs) })}</div> : null}
                   <div>{formatDuration(row.durationMs)}</div>
                 </td>
                 <td>
@@ -584,14 +586,14 @@ function RequestList({
             </span>
             <strong>{row.requestModel || "—"}</strong>
             <span>{tokenPair(row.inputTokens, row.outputTokens)}</span>
-            <span className="meta">TPS {formatTps(rowTps(row))}</span>
+            <span className="meta">{m.requests_tps({ value: formatTps(rowTps(row)) })}</span>
           </button>
         ))}
       </div>
       {moreError ? <p className="banner error" role="alert">{moreError}</p> : null}
       {list.nextBefore ? (
         <div className="row-actions">
-          <button type="button" onClick={onOlder} disabled={loadingMore}>{loadingMore ? "Loading…" : "Older"}</button>
+          <button type="button" onClick={onOlder} disabled={loadingMore}>{loadingMore ? m.busy_loading() : m.action_older()}</button>
         </div>
       ) : null}
     </div>
@@ -616,57 +618,57 @@ function StatisticsView({
       return (
         <div className="stack">
           <p className="banner error" role="alert">{stats.message}</p>
-          <div className="row-actions"><button type="button" onClick={onRetry}>Retry</button></div>
+          <div className="row-actions"><button type="button" onClick={onRetry}>{m.action_retry()}</button></div>
         </div>
       );
     }
-    return <p className="empty">Loading statistics…</p>;
+    return <p className="empty">{m.requests_loading_stats()}</p>;
   }
   const data = stats.stats;
   const maxRequests = Math.max(1, ...data.series.map((row) => row.requests));
   return (
     <div className="stack">
       <p className="meta">
-        {formatTime(data.from)} – {formatTime(data.to)}. Event rows are kept for 7 days.
+        {m.requests_kept({ from: formatTime(data.from), to: formatTime(data.to) })}
       </p>
       <div className="req-metrics">
-        <Metric label="Requests" value={formatCount(data.requests)} />
-        <Metric label="Errors" value={formatCount(data.errors)} />
-        <Metric label="Aborted" value={formatCount(data.aborted)} />
-        <Metric label="Error rate" value={formatPercent(data.errorRate)} />
-        <Metric label="RPM" value={`${formatRate(data.rpm)} req/min`} />
-        <Metric label="TPM" value={`${formatRate(data.tpm)} tok/min`} />
-        <Metric label="Input tokens" value={`${formatCount(data.inputTokens)} · ${formatRate(data.inputTpm)}/min`} />
-        <Metric label="Output tokens" value={`${formatCount(data.outputTokens)} · ${formatRate(data.outputTpm)}/min`} />
-        <Metric label="Cache read" value={`${formatCount(data.cacheReadTokens)} · ${formatRate(data.cacheReadTpm)}/min`} />
-        <Metric label="Cache write" value={`${formatCount(data.cacheWriteTokens)} · ${formatRate(data.cacheWriteTpm)}/min`} />
-        <Metric label="Avg duration" value={formatDuration(data.avgDurationMs)} />
-        <Metric label="Avg first token" value={formatDuration(data.avgTtfbMs)} />
-        <Metric label="Output TPS" value={data.outputTps == null ? "—" : `${formatTps(data.outputTps)} tok/s`} />
+        <Metric label={m.requests_tab_requests()} value={formatCount(data.requests)} />
+        <Metric label={m.requests_errors()} value={formatCount(data.errors)} />
+        <Metric label={m.requests_aborted()} value={formatCount(data.aborted)} />
+        <Metric label={m.requests_error_rate()} value={formatPercent(data.errorRate)} />
+        <Metric label={m.requests_rpm()} value={m.requests_rpm_value({ value: formatRate(data.rpm) })} />
+        <Metric label={m.requests_tpm()} value={m.requests_tpm_value({ value: formatRate(data.tpm) })} />
+        <Metric label={m.requests_input_tokens()} value={`${formatCount(data.inputTokens)} · ${m.requests_per_min({ value: formatRate(data.inputTpm) })}`} />
+        <Metric label={m.requests_output_tokens()} value={`${formatCount(data.outputTokens)} · ${m.requests_per_min({ value: formatRate(data.outputTpm) })}`} />
+        <Metric label={m.requests_cache_read()} value={`${formatCount(data.cacheReadTokens)} · ${m.requests_per_min({ value: formatRate(data.cacheReadTpm) })}`} />
+        <Metric label={m.requests_cache_write()} value={`${formatCount(data.cacheWriteTokens)} · ${m.requests_per_min({ value: formatRate(data.cacheWriteTpm) })}`} />
+        <Metric label={m.requests_avg_duration()} value={formatDuration(data.avgDurationMs)} />
+        <Metric label={m.requests_avg_first()} value={formatDuration(data.avgTtfbMs)} />
+        <Metric label={m.requests_output_tps()} value={data.outputTps == null ? "—" : m.requests_tps_value({ value: formatTps(data.outputTps) })} />
       </div>
       {data.requests === 0 ? (
         <div className="empty">
-          <strong>No requests in this range</strong>
-          Widen the range or clear a filter.
+          <strong>{m.requests_stats_empty()}</strong>
+          {m.requests_range_empty_body()}
         </div>
       ) : null}
       <div className="req-scroll">
         <table className="req-table req-stats-table">
-          <caption>Series</caption>
+          <caption>{m.requests_series()}</caption>
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Requests</th>
-              <th>Errors</th>
-              <th>Input</th>
-              <th>Output</th>
-              <th>Cache read</th>
-              <th>Cache write</th>
+              <th>{m.label_time()}</th>
+              <th>{m.requests_tab_requests()}</th>
+              <th>{m.requests_errors()}</th>
+              <th>{m.requests_input()}</th>
+              <th>{m.requests_output()}</th>
+              <th>{m.requests_cache_read()}</th>
+              <th>{m.requests_cache_write()}</th>
             </tr>
           </thead>
           <tbody>
             {data.series.length === 0 ? (
-              <tr><td colSpan={7}>No buckets in this range.</td></tr>
+              <tr><td colSpan={7}>{m.requests_buckets_empty()}</td></tr>
             ) : data.series.map((row) => (
               <tr key={row.t}>
                 <td>{formatTime(row.t)}</td>
@@ -688,24 +690,24 @@ function StatisticsView({
       </div>
       <div className="req-scroll">
         <table className="req-table req-stats-table">
-          <caption>By model</caption>
+          <caption>{m.requests_by_model()}</caption>
           <thead>
             <tr>
-              <th>Model</th>
-              <th>Requests</th>
-              <th>Errors</th>
-              <th>Input</th>
-              <th>Output</th>
-              <th>Cache read</th>
-              <th>Cache write</th>
+              <th>{m.label_model()}</th>
+              <th>{m.requests_tab_requests()}</th>
+              <th>{m.requests_errors()}</th>
+              <th>{m.requests_input()}</th>
+              <th>{m.requests_output()}</th>
+              <th>{m.requests_cache_read()}</th>
+              <th>{m.requests_cache_write()}</th>
             </tr>
           </thead>
           <tbody>
-            {data.byModel.length === 0 ? <tr><td colSpan={7}>No models in this range.</td></tr> : data.byModel.map((row) => (
+            {data.byModel.length === 0 ? <tr><td colSpan={7}>{m.requests_models_empty()}</td></tr> : data.byModel.map((row) => (
               <tr key={row.model || "(none)"}>
                 <td>
                   <button type="button" className="req-facet" onClick={() => onModel(row.model)}>
-                    {row.model || "(none)"}
+                    {row.model || m.requests_none()}
                   </button>
                 </td>
                 <td>{formatCount(row.requests)}</td>
@@ -721,25 +723,25 @@ function StatisticsView({
       </div>
       <div className="req-scroll">
         <table className="req-table req-stats-table">
-          <caption>By connection</caption>
+          <caption>{m.requests_by_connection()}</caption>
           <thead>
             <tr>
-              <th>Connection</th>
-              <th>Provider</th>
-              <th>Requests</th>
-              <th>Errors</th>
-              <th>Input</th>
-              <th>Output</th>
-              <th>Cache read</th>
-              <th>Cache write</th>
+              <th>{m.label_connection()}</th>
+              <th>{m.label_provider()}</th>
+              <th>{m.requests_tab_requests()}</th>
+              <th>{m.requests_errors()}</th>
+              <th>{m.requests_input()}</th>
+              <th>{m.requests_output()}</th>
+              <th>{m.requests_cache_read()}</th>
+              <th>{m.requests_cache_write()}</th>
             </tr>
           </thead>
           <tbody>
-            {data.byConnection.length === 0 ? <tr><td colSpan={8}>No connections in this range.</td></tr> : data.byConnection.map((row) => (
+            {data.byConnection.length === 0 ? <tr><td colSpan={8}>{m.requests_connections_empty()}</td></tr> : data.byConnection.map((row) => (
               <tr key={`${row.connectionId}:${row.providerId}`}>
                 <td>
                   <button type="button" className="req-facet" onClick={() => onConnection(row.connectionId)}>
-                    {row.connectionId ? connectionLabel(row.connectionId, connections) : "(none)"}
+                    {row.connectionId ? connectionLabel(row.connectionId, connections) : m.requests_none()}
                   </button>
                 </td>
                 <td>{row.providerId || "—"}</td>
@@ -825,69 +827,69 @@ function RequestDetail({
         aria-labelledby={titleId}
       >
         <header className="detail-header">
-          <h2 id={titleId}>Request {id}</h2>
-          <button type="button" onClick={onClose}>Close</button>
+          <h2 id={titleId}>{m.requests_title({ id })}</h2>
+          <button type="button" onClick={onClose}>{m.action_close()}</button>
         </header>
         <div className="detail-body">
-          {detail.status === "loading" ? <p className="empty">Loading request…</p> : null}
+          {detail.status === "loading" ? <p className="empty">{m.requests_loading_one()}</p> : null}
           {detail.status === "missing" ? (
             <div className="empty">
-              <strong>Request log not found</strong>
-              Detail is kept for 7 days.
+              <strong>{m.requests_missing_title()}</strong>
+              {m.requests_missing_body()}
             </div>
           ) : null}
           {detail.status === "error" ? <p className="banner error" role="alert">{detail.message}</p> : null}
           {record ? (
             <>
               <dl className="meta-list">
-                <div><dt>Endpoint</dt><dd>{record.endpoint}</dd></div>
-                <div><dt>Usage source</dt><dd>{record.usageSource}</dd></div>
-                <div><dt>Status</dt><dd>{record.status}</dd></div>
-                <div><dt>Outcome</dt><dd><OutcomeBadge outcome={record.outcome} /></dd></div>
-                <div><dt>Tokens</dt><dd>{tokenPair(record.inputTokens, record.outputTokens)}</dd></div>
-                <div><dt>Cache read</dt><dd>{record.cacheReadTokens ?? "—"}</dd></div>
-                <div><dt>Cache write</dt><dd>{record.cacheWriteTokens ?? "—"}</dd></div>
-                <div><dt>Duration</dt><dd>{formatDuration(record.durationMs)}</dd></div>
-                {record.stream ? <div><dt>First token</dt><dd>{formatDuration(record.ttfbMs)}</dd></div> : null}
+                <div><dt>{m.label_endpoint()}</dt><dd>{record.endpoint}</dd></div>
+                <div><dt>{m.requests_usage_source()}</dt><dd>{usageSourceLabel(record.usageSource)}</dd></div>
+                <div><dt>{m.label_status()}</dt><dd>{record.status}</dd></div>
+                <div><dt>{m.label_outcome()}</dt><dd><OutcomeBadge outcome={record.outcome} /></dd></div>
+                <div><dt>{m.label_tokens()}</dt><dd>{tokenPair(record.inputTokens, record.outputTokens)}</dd></div>
+                <div><dt>{m.requests_cache_read()}</dt><dd>{record.cacheReadTokens ?? "—"}</dd></div>
+                <div><dt>{m.requests_cache_write()}</dt><dd>{record.cacheWriteTokens ?? "—"}</dd></div>
+                <div><dt>{m.requests_duration()}</dt><dd>{formatDuration(record.durationMs)}</dd></div>
+                {record.stream ? <div><dt>{m.requests_first_token_label()}</dt><dd>{formatDuration(record.ttfbMs)}</dd></div> : null}
                 <div><dt>TPS</dt><dd>{formatTps(rowTps(record))}</dd></div>
-                <div><dt>Model</dt><dd>{record.requestModel || "—"}</dd></div>
-                <div><dt>Upstream model</dt><dd>{record.upstreamModel || "—"}</dd></div>
-                <div><dt>Connection</dt><dd>{connectionLabel(record.connectionId, connections)}</dd></div>
-                <div><dt>API key</dt><dd>{record.apiKeyPrefix || "—"}</dd></div>
+                <div><dt>{m.label_model()}</dt><dd>{record.requestModel || "—"}</dd></div>
+                <div><dt>{m.requests_upstream_model()}</dt><dd>{record.upstreamModel || "—"}</dd></div>
+                <div><dt>{m.label_connection()}</dt><dd>{connectionLabel(record.connectionId, connections)}</dd></div>
+                <div><dt>{m.label_api_key()}</dt><dd>{record.apiKeyPrefix || "—"}</dd></div>
               </dl>
               {record.error ? <p className="banner error" role="alert">{record.error}</p> : null}
-              <h3>{detail.status === "ready" && detail.attempts.length > 1 ? "Retry chain" : "Attempts"}</h3>
-              {detail.status === "ready" && detail.attempts.length === 0 ? <p className="empty">No attempts recorded.</p> : null}
+              <h3>{detail.status === "ready" && detail.attempts.length > 1 ? m.requests_retry_chain() : m.requests_attempts()}</h3>
+              {detail.status === "ready" && detail.attempts.length === 0 ? <p className="empty">{m.requests_no_attempts()}</p> : null}
               {detail.status === "ready" && detail.attempts.length > 0 ? (
                 <ol className="req-attempts">
                   {detail.attempts.map((attempt) => (
                     <li key={attempt.seq}>
-                      <strong>Attempt {attempt.seq}</strong>
+                      <strong>{m.requests_attempt({ seq: String(attempt.seq) })}</strong>
                       <dl className="meta-list">
-                        <div><dt>Provider</dt><dd>{attempt.providerId}</dd></div>
-                        <div><dt>Connection</dt><dd>{connectionLabel(attempt.connectionId, connections)}</dd></div>
-                        <div><dt>Upstream model</dt><dd>{attempt.upstreamModel || "—"}</dd></div>
-                        <div><dt>Status</dt><dd>{attempt.status ?? "—"}</dd></div>
-                        <div><dt>Duration</dt><dd>{formatDuration(attempt.durationMs)}</dd></div>
-                        {attempt.error ? <div><dt>Error</dt><dd>{attempt.error}</dd></div> : null}
+                        <div><dt>{m.label_provider()}</dt><dd>{attempt.providerId}</dd></div>
+                        <div><dt>{m.label_connection()}</dt><dd>{connectionLabel(attempt.connectionId, connections)}</dd></div>
+                        <div><dt>{m.requests_upstream_model()}</dt><dd>{attempt.upstreamModel || "—"}</dd></div>
+                        <div><dt>{m.label_status()}</dt><dd>{attempt.status ?? "—"}</dd></div>
+                        <div><dt>{m.requests_duration()}</dt><dd>{formatDuration(attempt.durationMs)}</dd></div>
+                        {attempt.error ? <div><dt>{m.requests_errors()}</dt><dd>{attempt.error}</dd></div> : null}
                       </dl>
                     </li>
                   ))}
                 </ol>
               ) : null}
               <div className="resource-title-row">
-                <h3>Request</h3>
-                {record.payloadTruncated ? <span className="badge warn">truncated</span> : null}
+                <h3>{m.requests_payload_request()}</h3>
+                {record.payloadTruncated ? <span className="badge warn">{m.status_truncated()}</span> : null}
               </div>
               {detail.status === "ready" && detail.payload == null ? (
                 <div className="empty">
-                  <strong>No payload stored</strong>
-                  This request has no request or response body on disk.
+                  <strong>{m.requests_no_payload_title()}</strong>
+                  {m.requests_no_payload_body()}
                 </div>
               ) : detail.status === "ready" ? (
                 <>
                   <pre className="payload-pre">{formatJson(detail.payload?.request)}</pre>
-                  <h3>Response</h3>
+                  <h3>{m.requests_payload_response()}</h3>
                   <pre className="payload-pre">{formatJson(detail.payload?.response)}</pre>
                 </>
               ) : null}
@@ -910,7 +912,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
   const tone = outcome === "success" ? "ok" : outcome === "aborted" ? "warn" : "error";
-  return <span className={`badge ${tone}`}>{outcome}</span>;
+  return <span className={`badge ${tone}`}>{outcomeLabel(outcome)}</span>;
 }
 
 function defaultFilters(): Filters {
@@ -986,22 +988,7 @@ function formatDuration(ms: number | null): string {
 }
 
 function formatTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString();
-}
-
-function formatCount(value: number): string {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
-}
-
-function formatRate(value: number): string {
-  if (!Number.isFinite(value)) return "—";
-  if (value === 0) return "0";
-  const abs = Math.abs(value);
-  if (abs >= 100) return new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(value);
-  if (abs >= 1) return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
-  return new Intl.NumberFormat("en-US", { maximumSignificantDigits: 3 }).format(value);
+  return formatDateTime(iso);
 }
 
 function formatPercent(rate: number): string {
@@ -1015,8 +1002,8 @@ function tokenPair(input: number | null, output: number | null): string {
 
 function cacheLine(row: Pick<RequestRow, "cacheReadTokens" | "cacheWriteTokens">): string | null {
   const parts: string[] = [];
-  if ((row.cacheReadTokens ?? 0) > 0) parts.push(`cache read ${row.cacheReadTokens}`);
-  if ((row.cacheWriteTokens ?? 0) > 0) parts.push(`cache write ${row.cacheWriteTokens}`);
+  if ((row.cacheReadTokens ?? 0) > 0) parts.push(m.requests_cache_read_line({ count: formatCount(row.cacheReadTokens ?? 0) }));
+  if ((row.cacheWriteTokens ?? 0) > 0) parts.push(m.requests_cache_write_line({ count: formatCount(row.cacheWriteTokens ?? 0) }));
   return parts.length > 0 ? parts.join(" / ") : null;
 }
 
@@ -1031,4 +1018,20 @@ function toDatetimeLocal(date: Date): string {
 
 function messageOf(error: unknown, fallback: string): string {
   return isApiError(error) ? error.message : fallback;
+}
+
+function outcomeLabel(outcome: string): string {
+  if (outcome === "success") return m.outcome_success();
+  if (outcome === "upstream_error") return m.outcome_upstream_error();
+  if (outcome === "client_error") return m.outcome_client_error();
+  if (outcome === "aborted") return m.outcome_aborted();
+  if (outcome === "timeout") return m.outcome_timeout();
+  if (outcome === "auth_error") return m.outcome_auth_error();
+  return outcome;
+}
+
+function usageSourceLabel(source: string): string {
+  if (source === "parser") return m.usage_source_parser();
+  if (source === "missing") return m.usage_source_missing();
+  return source;
 }

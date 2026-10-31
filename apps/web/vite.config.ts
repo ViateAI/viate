@@ -1,3 +1,4 @@
+import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -28,7 +29,17 @@ function portalDevServer(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [portalDevServer(), react()],
+  plugins: [
+    portalDevServer(),
+    react(),
+    paraglideVitePlugin({
+      project: "./project.inlang",
+      outdir: "./src/paraglide",
+      emitTsDeclarations: true,
+      strategy: ["localStorage", "preferredLanguage", "baseLocale"],
+      outputStructure: "locale-modules",
+    }),
+  ],
   base: "/admin/",
   server: {
     port: 5173,

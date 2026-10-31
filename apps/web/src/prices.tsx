@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, isApiError } from "./api";
+import { m } from "./paraglide/messages.js";
 
 type PriceOverride = {
   modelId: string;
@@ -31,7 +32,7 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : "failed to load prices"));
+    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_prices()));
   }, []);
 
   return (
@@ -58,31 +59,27 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
             setOutputUsd("");
             setUsdPerRequest("");
             await refresh();
-            onNotice("Model price saved.");
+            onNotice(m.prices_saved());
           } catch (err) {
-            setError(isApiError(err) ? err.message : "save failed");
+            setError(isApiError(err) ? err.message : m.error_save());
           } finally {
             setBusy(false);
           }
         }}
       >
         <div className="panel-header">
-          <h2>Manual price</h2>
-          <p>
-            USD per 1,000,000 tokens. A saved price overrides models.dev for that exact id. Without one, a trailing
-            fast suffix is twice the base model. low, medium, high, xhigh, max, and thinking use the base price.
-            Per request charges that amount once for a successful call, even when the response has no token usage.
-          </p>
+          <h2>{m.prices_title()}</h2>
+          <p>{m.prices_hint()}</p>
         </div>
         <label>
-          Billing
+          {m.label_billing()}
           <select value={mode} onChange={(event) => setMode(event.target.value === "request" ? "request" : "tokens")}>
-            <option value="request">Per request</option>
-            <option value="tokens">Per million tokens</option>
+            <option value="request">{m.billing_request()}</option>
+            <option value="tokens">{m.billing_tokens()}</option>
           </select>
         </label>
         <label>
-          Model
+          {m.label_model()}
           <input list="unpriced-models" value={modelId} onChange={(event) => setModelId(event.target.value)} required />
           <datalist id="unpriced-models">
             {view?.unpriced.map((id) => (
@@ -92,23 +89,23 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
         </label>
         {mode === "request" ? (
           <label>
-            USD per request
+            {m.label_usd_per_request()}
             <input inputMode="decimal" value={usdPerRequest} onChange={(event) => setUsdPerRequest(event.target.value)} required />
           </label>
         ) : (
           <>
         <label>
-          Input USD / 1M
+          {m.label_input_usd()}
           <input inputMode="decimal" value={inputUsd} onChange={(event) => setInputUsd(event.target.value)} required />
         </label>
         <label>
-          Output USD / 1M
+          {m.label_output_usd()}
           <input inputMode="decimal" value={outputUsd} onChange={(event) => setOutputUsd(event.target.value)} required />
         </label>
           </>
         )}
         <button className="primary" type="submit" disabled={busy}>
-          {busy ? "Saving…" : "Save price"}
+          {busy ? m.busy_saving() : m.action_save_price()}
         </button>
       </form>
       {error ? (
@@ -116,14 +113,14 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
           {error}
         </p>
       ) : null}
-      {view === null ? <p className="empty">Loading prices…</p> : null}
+      {view === null ? <p className="empty">{m.prices_loading()}</p> : null}
       {view && view.unpriced.length > 0 ? (
-        <p className="meta">No automatic price: {view.unpriced.join(", ")}</p>
+        <p className="meta">{m.prices_unpriced({ ids: view.unpriced.join(", ") })}</p>
       ) : null}
       {view && view.overrides.length === 0 ? (
         <div className="empty">
-          <strong>No manual prices</strong>
-          Models that models.dev already prices do not need an entry.
+          <strong>{m.prices_empty_title()}</strong>
+          {m.prices_empty_body()}
         </div>
       ) : null}
       {view?.overrides.map((row) => (
@@ -134,8 +131,8 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
             </div>
             <div className="meta">
               {row.mode === "request"
-                ? `Per request ${row.usdPerRequest}`
-                : `In ${row.inputUsdPerMillion} · Out ${row.outputUsdPerMillion}`}
+                ? m.prices_per_request({ amount: row.usdPerRequest ?? "" })
+                : m.prices_in_out({ input: row.inputUsdPerMillion, output: row.outputUsdPerMillion })}
             </div>
           </div>
           <div className="row-actions">
@@ -148,14 +145,14 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
                   try {
                     await api(`/api/admin/model-prices/${encodeURIComponent(row.modelId)}`, { method: "DELETE" });
                     await refresh();
-                    onNotice("Model price removed.");
+                    onNotice(m.prices_removed());
                   } catch (err) {
-                    setError(isApiError(err) ? err.message : "remove failed");
+                    setError(isApiError(err) ? err.message : m.error_remove());
                   }
                 })();
               }}
             >
-              Remove
+              {m.action_remove()}
             </button>
           </div>
         </article>

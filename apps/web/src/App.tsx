@@ -1,3 +1,4 @@
+import { ParaglideMessage } from "@inlang/paraglide-js-react";
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import {
   api,
@@ -20,6 +21,9 @@ import {
 } from "./api";
 import { balanceSummary, BalancesPage } from "./balances";
 import { ChannelsPage } from "./channels";
+import { formatDateTime } from "./format";
+import { LocaleSwitch } from "./locale-switch";
+import { m } from "./paraglide/messages.js";
 import { PortalApp } from "./portal";
 import { PricesPage } from "./prices";
 import { RequestsPage } from "./requests";
@@ -29,19 +33,35 @@ type Page = "plugins" | "connections" | "balances" | "models" | "prices" | "chan
 
 type CredentialMode = "form" | "paste" | "oauth";
 
-const CREDENTIAL_MODE_LABEL: Record<CredentialMode, string> = {
-  form: "Form",
-  paste: "Paste",
-  oauth: "OAuth",
-};
+function keepaliveLabel(status: Connection["keepaliveStatus"]): string {
+  if (status === "ok") return m.keepalive_ok();
+  if (status === "failed") return m.keepalive_failed();
+  if (status === "needs_reauth") return m.keepalive_needs_reauth();
+  return status;
+}
 
-const PUBLIC_ENDPOINT_TYPES: Array<{ id: PublicEndpointType; label: string }> = [
-  { id: "openai", label: "Chat Completions" },
-  { id: "openai-response", label: "Responses" },
-  { id: "openai-image", label: "Images" },
-  { id: "openai-audio", label: "Audio" },
-  { id: "openai-video", label: "Video" },
-];
+function logActionLabel(action: string): string {
+  if (action === "add") return m.log_action_add();
+  if (action === "update") return m.log_action_update();
+  if (action === "remove") return m.log_action_remove();
+  return action;
+}
+
+function credentialModeLabel(mode: CredentialMode): string {
+  if (mode === "form") return m.mode_form();
+  if (mode === "paste") return m.mode_paste();
+  return m.mode_oauth();
+}
+
+const PUBLIC_ENDPOINT_TYPES: PublicEndpointType[] = ["openai", "openai-response", "openai-image", "openai-audio", "openai-video"];
+
+function endpointLabel(type: PublicEndpointType): string {
+  if (type === "openai") return m.endpoint_chat_completions();
+  if (type === "openai-response") return m.endpoint_responses();
+  if (type === "openai-image") return m.endpoint_images();
+  if (type === "openai-audio") return m.endpoint_audio();
+  return m.endpoint_video();
+}
 
 function credentialModes(provider: AdminPlugin | null): CredentialMode[] {
   const modes: CredentialMode[] = [];
@@ -81,7 +101,7 @@ function AdminApp() {
         if (isApiError(error) && error.status === 503) {
           setDisabled(true);
         } else {
-          setBootError(isApiError(error) ? error.message : "failed to load session");
+          setBootError(isApiError(error) ? error.message : m.error_load_session());
         }
         setReady(true);
       });
@@ -91,14 +111,20 @@ function AdminApp() {
   }, []);
 
   if (!ready) {
-    return <p className="empty">Loading administration…</p>;
+    return <p className="empty">{m.admin_loading()}</p>;
   }
   if (disabled) {
     return (
       <div className="login-screen">
       <main className="login">
-        <h1>Administration disabled</h1>
-        <p>Set <code>VIATE_ADMIN_PASSWORD</code> and restart the server to enable management.</p>
+        <div className="login-locale"><LocaleSwitch /></div>
+        <h1>{m.admin_disabled_title()}</h1>
+        <p>
+          <ParaglideMessage
+            message={m.admin_disabled_body}
+            markup={{ code: ({ children }) => <code>{children}</code> }}
+          />
+        </p>
       </main>
       </div>
     );
@@ -107,7 +133,8 @@ function AdminApp() {
     return (
       <div className="login-screen">
       <main className="login">
-        <h1>Unable to load admin</h1>
+        <div className="login-locale"><LocaleSwitch /></div>
+        <h1>{m.admin_boot_title()}</h1>
         <p className="banner error">{bootError}</p>
       </main>
       </div>
@@ -127,15 +154,16 @@ function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
   return (
     <div className="login-screen">
     <main className="login">
+      <div className="login-locale"><LocaleSwitch /></div>
       <div className="brand">
         <span className="brand-mark" aria-hidden="true">V</span>
         <div>
           <div className="brand-name">Viate</div>
-          <div className="brand-sub">Admin</div>
+          <div className="brand-sub">{m.admin_brand()}</div>
         </div>
       </div>
-      <h1>Viate administrator</h1>
-      <p className="meta">Sign in to manage plugins and provider connections.</p>
+      <h1>{m.admin_login_title()}</h1>
+      <p className="meta">{m.admin_login_subtitle()}</p>
       <form
         className="form"
         onSubmit={async (event) => {
@@ -146,14 +174,14 @@ function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
             await login(password);
             onLoggedIn();
           } catch (err) {
-            setError(isApiError(err) ? err.message : "login failed");
+            setError(isApiError(err) ? err.message : m.error_login());
           } finally {
             setBusy(false);
           }
         }}
       >
         <label>
-          Password
+          {m.label_password()}
           <input
             type="password"
             name="password"
@@ -165,7 +193,7 @@ function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
         </label>
         {error ? <p className="banner error" role="alert">{error}</p> : null}
         <button className="primary" type="submit" disabled={busy}>
-          {busy ? "Signing in…" : "Sign in"}
+          {busy ? m.busy_signing_in() : m.action_sign_in()}
         </button>
       </form>
     </main>
@@ -187,20 +215,20 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <span className="brand-mark" aria-hidden="true">V</span>
           <div>
             <div className="brand-name">Viate</div>
-            <div className="brand-sub">Gateway admin</div>
+            <div className="brand-sub">{m.admin_shell_brand()}</div>
           </div>
         </div>
-        <nav className="nav" aria-label="Administration">
-          <NavButton page="plugins" current={page} onClick={setPage}>Plugins</NavButton>
-          <NavButton page="connections" current={page} onClick={setPage}>Connections</NavButton>
-          <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
-          <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
-          <NavButton page="prices" current={page} onClick={setPage}>Prices</NavButton>
-          <NavButton page="channels" current={page} onClick={setPage}>Channels</NavButton>
-          <NavButton page="users" current={page} onClick={setPage}>Users</NavButton>
-          <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
-          <NavButton page="requests" current={page} onClick={setPage}>Requests</NavButton>
-          <NavButton page="logs" current={page} onClick={setPage}>Logs</NavButton>
+        <nav className="nav" aria-label={m.nav_label()}>
+          <NavButton page="plugins" current={page} onClick={setPage}>{m.nav_plugins()}</NavButton>
+          <NavButton page="connections" current={page} onClick={setPage}>{m.nav_connections()}</NavButton>
+          <NavButton page="balances" current={page} onClick={setPage}>{m.nav_balances()}</NavButton>
+          <NavButton page="models" current={page} onClick={setPage}>{m.nav_models()}</NavButton>
+          <NavButton page="prices" current={page} onClick={setPage}>{m.nav_prices()}</NavButton>
+          <NavButton page="channels" current={page} onClick={setPage}>{m.nav_channels()}</NavButton>
+          <NavButton page="users" current={page} onClick={setPage}>{m.nav_users()}</NavButton>
+          <NavButton page="api-keys" current={page} onClick={setPage}>{m.nav_api_keys()}</NavButton>
+          <NavButton page="requests" current={page} onClick={setPage}>{m.nav_requests()}</NavButton>
+          <NavButton page="logs" current={page} onClick={setPage}>{m.nav_logs()}</NavButton>
         </nav>
         <div className="sidebar-footer">
           <button
@@ -211,7 +239,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
               onLogout();
             }}
           >
-            Log out
+            {m.action_log_out()}
           </button>
         </div>
       </aside>
@@ -221,16 +249,19 @@ function Console({ onLogout }: { onLogout: () => void }) {
             <h1>{pageLabel(page)}</h1>
             <p className="page-desc">{pageDescription(page)}</p>
           </div>
-          <button
-            className="logout-mobile ghost"
-            type="button"
-            onClick={async () => {
-              await logout();
-              onLogout();
-            }}
-          >
-            Log out
-          </button>
+          <div className="topbar-actions">
+            <LocaleSwitch />
+            <button
+              className="logout-mobile ghost"
+              type="button"
+              onClick={async () => {
+                await logout();
+                onLogout();
+              }}
+            >
+              {m.action_log_out()}
+            </button>
+          </div>
         </div>
         {notice ? <p className="banner ok" role="status">{notice}</p> : null}
         {page === "plugins" ? <PluginsPage onNotice={setNotice} /> : null}
@@ -272,17 +303,17 @@ function Console({ onLogout }: { onLogout: () => void }) {
         {page === "requests" ? <RequestsPage /> : null}
         {page === "logs" ? <LogsPage /> : null}
       </main>
-      <nav className="mobile-nav" aria-label="Administration">
-        <NavButton page="plugins" current={page} onClick={setPage}>Plugins</NavButton>
-        <NavButton page="connections" current={page} onClick={setPage}>Connections</NavButton>
-        <NavButton page="balances" current={page} onClick={setPage}>Balances</NavButton>
-        <NavButton page="models" current={page} onClick={setPage}>Models</NavButton>
-        <NavButton page="prices" current={page} onClick={setPage}>Prices</NavButton>
-        <NavButton page="channels" current={page} onClick={setPage}>Channels</NavButton>
-        <NavButton page="users" current={page} onClick={setPage}>Users</NavButton>
-        <NavButton page="api-keys" current={page} onClick={setPage}>API keys</NavButton>
-        <NavButton page="requests" current={page} onClick={setPage}>Requests</NavButton>
-        <NavButton page="logs" current={page} onClick={setPage}>Logs</NavButton>
+      <nav className="mobile-nav" aria-label={m.nav_label()}>
+        <NavButton page="plugins" current={page} onClick={setPage}>{m.nav_plugins()}</NavButton>
+        <NavButton page="connections" current={page} onClick={setPage}>{m.nav_connections()}</NavButton>
+        <NavButton page="balances" current={page} onClick={setPage}>{m.nav_balances()}</NavButton>
+        <NavButton page="models" current={page} onClick={setPage}>{m.nav_models()}</NavButton>
+        <NavButton page="prices" current={page} onClick={setPage}>{m.nav_prices()}</NavButton>
+        <NavButton page="channels" current={page} onClick={setPage}>{m.nav_channels()}</NavButton>
+        <NavButton page="users" current={page} onClick={setPage}>{m.nav_users()}</NavButton>
+        <NavButton page="api-keys" current={page} onClick={setPage}>{m.nav_api_keys()}</NavButton>
+        <NavButton page="requests" current={page} onClick={setPage}>{m.nav_requests()}</NavButton>
+        <NavButton page="logs" current={page} onClick={setPage}>{m.nav_logs()}</NavButton>
       </nav>
     </div>
   );
@@ -307,65 +338,29 @@ function NavButton({
 }
 
 function pageLabel(page: Page): string {
-  if (page === "plugins") {
-    return "Installed plugins";
-  }
-  if (page === "connections") {
-    return "Connections";
-  }
-  if (page === "balances") {
-    return "Balances";
-  }
-  if (page === "models") {
-    return "Models";
-  }
-  if (page === "prices") {
-    return "Model prices";
-  }
-  if (page === "channels") {
-    return "Channels";
-  }
-  if (page === "users") {
-    return "Users";
-  }
-  if (page === "api-keys") {
-    return "Client API keys";
-  }
-  if (page === "requests") {
-    return "Requests";
-  }
-  return "Operation logs";
+  if (page === "plugins") return m.page_plugins();
+  if (page === "connections") return m.page_connections();
+  if (page === "balances") return m.page_balances();
+  if (page === "models") return m.page_models();
+  if (page === "prices") return m.page_prices();
+  if (page === "channels") return m.page_channels();
+  if (page === "users") return m.page_users();
+  if (page === "api-keys") return m.page_api_keys();
+  if (page === "requests") return m.page_requests();
+  return m.page_logs();
 }
 
 function pageDescription(page: Page): string {
-  if (page === "plugins") {
-    return "Install trusted packages, then restart to load them. Protocol toggles only change /v1/models discovery.";
-  }
-  if (page === "connections") {
-    return "Store encrypted provider credentials. Enable any number of connections.";
-  }
-  if (page === "balances") {
-    return "Cached upstream subscription remaining. Refresh reads the provider.";
-  }
-  if (page === "models") {
-    return "Sync inventory per connection. Same ids publish as one aggregated /v1/models entry.";
-  }
-  if (page === "prices") {
-    return "Set a USD price per million tokens when models.dev has no row for that id.";
-  }
-  if (page === "channels") {
-    return "Create a price multiplier and the models it covers. Assign channels to each customer.";
-  }
-  if (page === "users") {
-    return "Provision customers and grant a dollar balance. Customers sign in at /portal.";
-  }
-  if (page === "api-keys") {
-    return "Customers create keys at /portal. This page lists prefixes and revokes leaked keys.";
-  }
-  if (page === "requests") {
-    return "Per-request cache, first token, TPS, and token usage. Statistics use the same filters. Detail is kept for 7 days.";
-  }
-  return "Install, update, and remove operations.";
+  if (page === "plugins") return m.page_plugins_desc();
+  if (page === "connections") return m.page_connections_desc();
+  if (page === "balances") return m.page_balances_desc();
+  if (page === "models") return m.page_models_desc();
+  if (page === "prices") return m.page_prices_desc();
+  if (page === "channels") return m.page_channels_desc();
+  if (page === "users") return m.page_users_desc();
+  if (page === "api-keys") return m.page_api_keys_desc();
+  if (page === "requests") return m.page_requests_desc();
+  return m.page_logs_desc();
 }
 
 function StatusBadge({
@@ -391,7 +386,7 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : "failed to load plugins"));
+    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_plugins()));
   }, []);
 
   const pending = useMemo(() => plugins?.some((plugin) => plugin.restartRequired) ?? false, [plugins]);
@@ -421,7 +416,7 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
       );
       setPlugins(result.plugins);
     } catch (err) {
-      setError(isApiError(err) ? err.message : "update failed");
+      setError(isApiError(err) ? err.message : m.error_update());
     } finally {
       setBusy(false);
     }
@@ -429,7 +424,7 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
 
   return (
     <section className="stack">
-      {pending ? <p className="banner warn">A plugin change is pending. Restart the server to load it.</p> : null}
+      {pending ? <p className="banner warn">{m.plugins_pending()}</p> : null}
       <form
         className="panel form"
         onSubmit={async (event) => {
@@ -449,36 +444,36 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
               setError(result.log.message);
             }
           } catch (err) {
-            setError(isApiError(err) ? err.message : "install failed");
+            setError(isApiError(err) ? err.message : m.error_install());
           } finally {
             setBusy(false);
           }
         }}
       >
         <div className="panel-header">
-          <h2>Install plugin</h2>
-          <p className="meta">Local path, tarball, git URL, or npm package. Leading dashes are rejected.</p>
+          <h2>{m.plugins_install_title()}</h2>
+          <p className="meta">{m.plugins_install_hint()}</p>
         </div>
         <label>
-          Plugin source
+          {m.label_plugin_source()}
           <input
             name="source"
             value={source}
             onChange={(event) => setSource(event.target.value)}
-            placeholder="/data/plugins/official.tgz"
+            placeholder={m.plugins_source_placeholder()}
             required
           />
         </label>
         <button className="primary" type="submit" disabled={busy || !source.trim()}>
-          {busy ? "Installing…" : "Install plugin"}
+          {busy ? m.busy_installing() : m.action_install()}
         </button>
       </form>
       {error ? <p className="banner error" role="alert">{error}</p> : null}
-      {plugins === null ? <p className="empty">Loading plugins…</p> : null}
+      {plugins === null ? <p className="empty">{m.plugins_loading()}</p> : null}
       {plugins && plugins.length === 0 ? (
         <div className="empty">
-          <strong>No plugins installed</strong>
-          Add an official tarball path to get started.
+          <strong>{m.plugins_empty_title()}</strong>
+          {m.plugins_empty_body()}
         </div>
       ) : null}
       {plugins?.map((plugin) => (
@@ -487,76 +482,34 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
             <div className="resource-title-row">
               <h2>{plugin.name}</h2>
               <StatusBadge tone={plugin.error ? "error" : plugin.status === "active" ? "ok" : "warn"}>
-                {plugin.status}
+                {plugin.status === "active" ? m.status_active() : m.status_pending()}
               </StatusBadge>
-              {plugin.restartRequired ? <StatusBadge tone="warn">restart required</StatusBadge> : null}
+              {plugin.restartRequired ? <StatusBadge tone="warn">{m.status_restart()}</StatusBadge> : null}
             </div>
             <dl className="meta-list">
-              <div><dt>Version</dt><dd>{plugin.version}</dd></div>
-              <div><dt>Source</dt><dd>{plugin.source}</dd></div>
-              {plugin.id ? <div><dt>Provider</dt><dd>{plugin.id}</dd></div> : null}
+              <div><dt>{m.label_version()}</dt><dd>{plugin.version}</dd></div>
+              <div><dt>{m.label_source()}</dt><dd>{plugin.source}</dd></div>
+              {plugin.id ? <div><dt>{m.label_provider()}</dt><dd>{plugin.id}</dd></div> : null}
             </dl>
             {plugin.id ? (
               <div className="protocol-toggles">
-                <p className="meta">Advertised on GET /v1/models. Requests are unchanged.</p>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={plugin.advertisedEndpointTypes.includes("openai")}
-                    disabled={busy}
-                    onChange={(event) => {
-                      void updateAdvertisedEndpoints(plugin, "openai", event.target.checked);
-                    }}
-                  />
-                  Chat Completions
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={plugin.advertisedEndpointTypes.includes("openai-response")}
-                    disabled={busy}
-                    onChange={(event) => {
-                      void updateAdvertisedEndpoints(plugin, "openai-response", event.target.checked);
-                    }}
-                  />
-                  Responses
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={plugin.advertisedEndpointTypes.includes("openai-image")}
-                    disabled={busy}
-                    onChange={(event) => {
-                      void updateAdvertisedEndpoints(plugin, "openai-image", event.target.checked);
-                    }}
-                  />
-                  Images
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={plugin.advertisedEndpointTypes.includes("openai-audio")}
-                    disabled={busy}
-                    onChange={(event) => {
-                      void updateAdvertisedEndpoints(plugin, "openai-audio", event.target.checked);
-                    }}
-                  />
-                  Audio
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={plugin.advertisedEndpointTypes.includes("openai-video")}
-                    disabled={busy}
-                    onChange={(event) => {
-                      void updateAdvertisedEndpoints(plugin, "openai-video", event.target.checked);
-                    }}
-                  />
-                  Video
-                </label>
+                <p className="meta">{m.plugins_advertised()}</p>
+                {PUBLIC_ENDPOINT_TYPES.map((type) => (
+                  <label className="toggle" key={type}>
+                    <input
+                      type="checkbox"
+                      checked={plugin.advertisedEndpointTypes.includes(type)}
+                      disabled={busy}
+                      onChange={(event) => {
+                        void updateAdvertisedEndpoints(plugin, type, event.target.checked);
+                      }}
+                    />
+                    {endpointLabel(type)}
+                  </label>
+                ))}
               </div>
             ) : null}
-            {plugin.error ? <div className="status error">Load error: {plugin.error}</div> : null}
+            {plugin.error ? <div className="status error">{m.plugins_load_error({ error: plugin.error })}</div> : null}
           </div>
           <div className="row-actions">
             <button
@@ -577,25 +530,25 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
                     setError(result.log.message);
                   }
                 } catch (err) {
-                  setError(isApiError(err) ? err.message : "update failed");
+                  setError(isApiError(err) ? err.message : m.error_update());
                 } finally {
                   setBusy(false);
                 }
               }}
             >
-              Update
+              {m.action_update()}
             </button>
             <button className="danger" type="button" disabled={busy} onClick={() => setConfirm(plugin)}>
-              Uninstall
+              {m.action_uninstall()}
             </button>
           </div>
         </article>
       ))}
       {confirm ? (
         <ConfirmDialog
-          title={`Uninstall ${confirm.name}?`}
-          body="Connection credentials are kept. The plugin is staged for removal until the server restarts."
-          confirmLabel="Uninstall"
+          title={m.plugins_uninstall_title({ name: confirm.name })}
+          body={m.plugins_uninstall_body()}
+          confirmLabel={m.action_uninstall()}
           onCancel={() => setConfirm(null)}
           onConfirm={async () => {
             setBusy(true);
@@ -611,7 +564,7 @@ function PluginsPage({ onNotice }: { onNotice: (value: string | null) => void })
                 setError(result.log.message);
               }
             } catch (err) {
-              setError(isApiError(err) ? err.message : "uninstall failed");
+              setError(isApiError(err) ? err.message : m.error_uninstall());
             } finally {
               setBusy(false);
               setConfirm(null);
@@ -640,23 +593,23 @@ function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void })
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : "failed to load API keys"));
+    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_keys()));
   }, []);
 
   return (
     <section className="stack">
       <article className="panel">
         <div className="panel-header">
-          <h2>Client keys</h2>
-          <p className="meta">Customers create keys at /portal. Revoke a leaked key here. Secrets are not shown again.</p>
+          <h2>{m.keys_title()}</h2>
+          <p className="meta">{m.keys_hint()}</p>
         </div>
       </article>
       {error ? <p className="banner error" role="alert">{error}</p> : null}
-      {keys === null ? <p className="empty">Loading API keys…</p> : null}
+      {keys === null ? <p className="empty">{m.keys_loading()}</p> : null}
       {keys && keys.length === 0 ? (
         <div className="empty">
-          <strong>No client API keys</strong>
-          Customers create keys at /portal.
+          <strong>{m.keys_empty_title()}</strong>
+          {m.keys_empty_body()}
         </div>
       ) : null}
       {keys?.map((key) => (
@@ -666,31 +619,31 @@ function ApiKeysPage({ onNotice }: { onNotice: (value: string | null) => void })
               <h2>{key.name}</h2>
               <StatusBadge>{key.prefix}…</StatusBadge>
             </div>
-            <div className="meta">Created {new Date(key.createdAt).toLocaleString()}</div>
+            <div className="meta">{m.keys_created({ time: formatDateTime(key.createdAt) })}</div>
             {key.userId ? (
               <div className="meta">{users.find((user) => user.id === key.userId)?.email ?? key.userId}</div>
             ) : null}
           </div>
           <div className="row-actions">
             <button className="danger" type="button" onClick={() => setConfirm(key)}>
-              Revoke
+              {m.action_revoke()}
             </button>
           </div>
         </article>
       ))}
       {confirm ? (
         <ConfirmDialog
-          title={`Revoke ${confirm.name}?`}
-          body="Clients using this key will receive 401 immediately."
-          confirmLabel="Revoke"
+          title={m.keys_revoke_title({ name: confirm.name })}
+          body={m.keys_revoke_body()}
+          confirmLabel={m.action_revoke()}
           onCancel={() => setConfirm(null)}
           onConfirm={async () => {
             try {
               await api(`/api/admin/api-keys/${confirm.id}`, { method: "DELETE" });
               await refresh();
-              onNotice("API key revoked.");
+              onNotice(m.keys_revoked());
             } catch (err) {
-              setError(isApiError(err) ? err.message : "revoke failed");
+              setError(isApiError(err) ? err.message : m.error_revoke());
             } finally {
               setConfirm(null);
             }
@@ -734,7 +687,7 @@ function ConnectionsPage({
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : "failed to load connections"));
+    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_connections()));
   }, []);
 
   useEffect(() => {
@@ -752,15 +705,15 @@ function ConnectionsPage({
     <section className="stack">
       <div className="toolbar">
         <button className="primary" type="button" onClick={() => setCreating(true)}>
-          New connection
+          {m.connections_new()}
         </button>
       </div>
       {error ? <p className="banner error" role="alert">{error}</p> : null}
-      {connections === null ? <p className="empty">Loading connections…</p> : null}
+      {connections === null ? <p className="empty">{m.connections_loading()}</p> : null}
       {connections && connections.length === 0 ? (
         <div className="empty">
-          <strong>No stored connections</strong>
-          Choose a loaded plugin to create one.
+          <strong>{m.connections_empty_title()}</strong>
+          {m.connections_empty_body()}
         </div>
       ) : null}
       {connections?.map((connection) => {
@@ -775,19 +728,19 @@ function ConnectionsPage({
             <div className="resource-title-row">
               <h2>{connection.displayLabel || connection.providerId}</h2>
               <StatusBadge tone={connection.active ? "ok" : "neutral"}>
-                {connection.active ? "active" : "inactive"}
+                {connection.active ? m.status_active() : m.status_inactive()}
               </StatusBadge>
               <StatusBadge tone={connection.hasCredentials ? "ok" : "warn"}>
-                {connection.hasCredentials ? "credentials saved" : "needs credentials"}
+                {connection.hasCredentials ? m.status_credentials_saved() : m.status_needs_credentials()}
               </StatusBadge>
-              {orphan ? <StatusBadge tone="warn">orphan</StatusBadge> : null}
+              {orphan ? <StatusBadge tone="warn">{m.status_orphan()}</StatusBadge> : null}
             </div>
             <dl className="meta-list">
-              <div><dt>Provider</dt><dd>{connection.providerId}</dd></div>
+              <div><dt>{m.label_provider()}</dt><dd>{connection.providerId}</dd></div>
             </dl>
             {connection.keepaliveStatus !== "idle" ? (
               <div className={`status ${connection.keepaliveStatus === "ok" ? "ok" : "warn"}`}>
-                Keepalive {connection.keepaliveStatus}{connection.keepaliveError ? ` · ${connection.keepaliveError}` : ""}
+                {m.keepalive_status({ status: keepaliveLabel(connection.keepaliveStatus) })}{connection.keepaliveError ? ` · ${connection.keepaliveError}` : ""}
               </div>
             ) : null}
             {subscription ? (
@@ -797,33 +750,36 @@ function ConnectionsPage({
             ) : null}
           </div>
           <div className="row-actions">
-            <button type="button" disabled={orphan} onClick={() => setEditing(connection)}>Configure</button>
+            <button type="button" disabled={orphan} onClick={() => setEditing(connection)}>{m.action_configure()}</button>
             <button
               type="button"
               disabled={orphan || !connection.hasCredentials}
-              title={orphan ? "Reinstall the plugin before managing models" : !connection.hasCredentials ? "Save credentials before managing models" : undefined}
+              title={orphan ? m.connections_reinstall_before_models() : !connection.hasCredentials ? m.connections_credentials_before_models() : undefined}
               onClick={() => onManageModels(connection.id)}
             >
-              Models
+              {m.nav_models()}
             </button>
             <button
               type="button"
               disabled={orphan || !connection.hasCredentials}
-              title={orphan ? "Reinstall the plugin before activation" : !connection.hasCredentials ? "Save credentials before activation" : undefined}
+              title={orphan ? m.connections_reinstall_before_activation() : !connection.hasCredentials ? m.connections_credentials_before_activation() : undefined}
               onClick={async () => {
                 try {
                   await api(`/api/admin/connections/${connection.id}/${connection.active ? "deactivate" : "activate"}`, { method: "POST" });
                   await refresh();
-                  onNotice(`${connection.displayLabel || connection.providerId} is now ${connection.active ? "inactive" : "active"}.`);
+                  onNotice(m.connections_now({
+                    name: connection.displayLabel || connection.providerId,
+                    state: connection.active ? m.status_inactive() : m.status_active(),
+                  }));
                 } catch (err) {
-                  setError(isApiError(err) ? err.message : "activation failed");
+                  setError(isApiError(err) ? err.message : m.error_activation());
                 }
               }}
             >
-              {connection.active ? "Deactivate" : "Activate"}
+              {connection.active ? m.connections_deactivate() : m.connections_activate()}
             </button>
             <button className="danger" type="button" onClick={() => setConfirm(connection)}>
-              Delete
+              {m.action_delete()}
             </button>
           </div>
         </article>
@@ -848,23 +804,23 @@ function ConnectionsPage({
           onSaved={async () => {
             await refresh();
             setEditing(null);
-            onNotice("Connection saved.");
+            onNotice(m.connections_saved());
           }}
         />
       ) : null}
       {confirm ? (
         <ConfirmDialog
-          title={`Delete ${confirm.displayLabel || confirm.providerId}?`}
-          body="This removes the stored connection. Plugin credentials for other connections are kept."
-          confirmLabel="Delete"
+          title={m.connections_delete_title({ name: confirm.displayLabel || confirm.providerId })}
+          body={m.connections_delete_body()}
+          confirmLabel={m.action_delete()}
           onCancel={() => setConfirm(null)}
           onConfirm={async () => {
             try {
               await api(`/api/admin/connections/${confirm.id}`, { method: "DELETE" });
               await refresh();
-              onNotice("Connection deleted.");
+              onNotice(m.connections_deleted());
             } catch (err) {
-              setError(isApiError(err) ? err.message : "delete failed");
+              setError(isApiError(err) ? err.message : m.error_delete());
             } finally {
               setConfirm(null);
             }
@@ -907,24 +863,24 @@ function ProviderPicker({
             });
             await onCreated(result.connection);
           } catch (err) {
-            setError(isApiError(err) ? err.message : "connection creation failed");
+            setError(isApiError(err) ? err.message : m.error_connection_create());
           } finally {
             setBusy(false);
           }
         }}
       >
-        <h2 id="provider-picker-title">New connection</h2>
+        <h2 id="provider-picker-title">{m.connections_new()}</h2>
         <label>
-          Loaded plugin
+          {m.connections_loaded_plugin()}
           <select value={providerId} onChange={(event) => setProviderId(event.target.value)} required>
             {loaded.map((plugin) => <option key={plugin.id} value={plugin.id ?? ""}>{plugin.name}</option>)}
           </select>
         </label>
-        {loaded.length === 0 ? <p className="banner warn">Install and restart a provider plugin first.</p> : null}
+        {loaded.length === 0 ? <p className="banner warn">{m.connections_picker_empty()}</p> : null}
         {error ? <p className="banner error" role="alert">{error}</p> : null}
         <div className="row-actions">
-          <button className="primary" type="submit" disabled={busy || !providerId}>{busy ? "Creating…" : "Continue"}</button>
-          <button type="button" onClick={onCancel}>Cancel</button>
+          <button className="primary" type="submit" disabled={busy || !providerId}>{busy ? m.busy_creating() : m.action_continue()}</button>
+          <button type="button" onClick={onCancel}>{m.action_cancel()}</button>
         </div>
       </form>
     </div>
@@ -970,16 +926,16 @@ function ConnectionForm({
             });
             await onSaved();
           } catch (err) {
-            setError(isApiError(err) ? err.message : "save failed");
+            setError(isApiError(err) ? err.message : m.error_save());
           } finally {
             setBusy(false);
           }
         }}
       >
-        <h2 id="connection-form-title">Configure {existing.displayLabel || existing.providerId}</h2>
-        <p className="meta">Credentials are encrypted and never returned to this page.</p>
+        <h2 id="connection-form-title">{m.credentials_title({ name: existing.displayLabel || existing.providerId })}</h2>
+        <p className="meta">{m.credentials_hint()}</p>
         {modes.length > 1 ? (
-          <div className="segmented" role="tablist" aria-label="Credential method">
+          <div className="segmented" role="tablist" aria-label={m.credentials_method()}>
             {modes.map((item) => (
               <button
                 key={item}
@@ -993,7 +949,7 @@ function ConnectionForm({
                   }
                 }}
               >
-                {CREDENTIAL_MODE_LABEL[item]}
+                {credentialModeLabel(item)}
               </button>
             ))}
           </div>
@@ -1014,11 +970,11 @@ function ConnectionForm({
           : null}
         {mode === "paste" ? (
           <label>
-            Credential JSON or token
+            {m.credentials_paste()}
             <textarea value={paste} onChange={(event) => setPaste(event.target.value)} required />
           </label>
         ) : null}
-        {mode === "oauth" && busy && !oauth ? <p className="meta">Starting OAuth…</p> : null}
+        {mode === "oauth" && busy && !oauth ? <p className="meta">{m.oauth_starting()}</p> : null}
         {mode === "oauth" && oauth?.type === "device_code" ? (
           <DeviceCodePanel connectionId={existing.id} flow={oauth} onComplete={onSaved} onError={setError} />
         ) : null}
@@ -1045,19 +1001,19 @@ function ConnectionForm({
                       window.open(started.authorizationUrl, "_blank", "noopener,noreferrer");
                     }
                   } catch (err) {
-                    setError(isApiError(err) ? err.message : "OAuth start failed");
+                    setError(isApiError(err) ? err.message : m.error_oauth_start());
                   } finally {
                     setBusy(false);
                   }
                 }}
               >
-                {busy ? "Starting…" : "Connect"}
+                {busy ? m.busy_starting() : m.action_connect()}
               </button>
             )
           ) : (
-            <button className="primary" type="submit" disabled={busy}>{busy ? "Saving…" : "Save"}</button>
+            <button className="primary" type="submit" disabled={busy}>{busy ? m.busy_saving() : m.action_save()}</button>
           )}
-          <button type="button" onClick={onCancel}>Cancel</button>
+          <button type="button" onClick={onCancel}>{m.action_cancel()}</button>
         </div>
       </form>
     </div>
@@ -1091,11 +1047,11 @@ function DeviceCodePanel({
         finished = true;
         window.clearInterval(timer);
         if (result.type === "complete") await onComplete();
-        else onError(result.error ?? "OAuth failed");
+        else onError(result.error ?? m.error_oauth());
       } catch (err) {
         if (cancelled || finished) return;
         window.clearInterval(timer);
-        onError(isApiError(err) ? err.message : "OAuth polling failed");
+        onError(isApiError(err) ? err.message : m.error_oauth_poll());
       } finally {
         polling = false;
       }
@@ -1108,7 +1064,16 @@ function DeviceCodePanel({
 
   return (
     <div className="banner ok" role="status">
-      Open <a href={flow.verificationUrl} target="_blank" rel="noreferrer">{flow.verificationUrl}</a> and enter <code>{flow.userCode}</code>. Waiting for authorization…
+      <ParaglideMessage
+        message={m.oauth_device}
+        inputs={{ url: flow.verificationUrl, userCode: flow.userCode }}
+        markup={{
+          link: ({ children, options }) => (
+            <a href={String(options.href)} target="_blank" rel="noreferrer">{children}</a>
+          ),
+          code: ({ children }) => <code>{children}</code>,
+        }}
+      />
     </div>
   );
 }
@@ -1149,11 +1114,15 @@ function AuthUrlPanel({
 
   return (
     <div className="banner ok" role="status">
-      Opened authorization page in a new window. Complete sign-in there, or{" "}
-      <a href={url} target="_blank" rel="noreferrer">
-        click here
-      </a>{" "}
-      if it didn't open. Waiting for authorization…
+      <ParaglideMessage
+        message={m.oauth_browser}
+        inputs={{ url }}
+        markup={{
+          link: ({ children, options }) => (
+            <a href={String(options.href)} target="_blank" rel="noreferrer">{children}</a>
+          ),
+        }}
+      />
     </div>
   );
 }
@@ -1208,7 +1177,7 @@ function ModelsPage({
         }
       })
       .catch((err) => {
-        setError(isApiError(err) ? err.message : "failed to load connections");
+        setError(isApiError(err) ? err.message : m.error_load_connections());
       });
     return () => {
       active = false;
@@ -1231,7 +1200,7 @@ function ModelsPage({
       .catch((err) => {
         if (!cancelled) {
           setCatalog(null);
-          setError(isApiError(err) ? err.message : "failed to load models");
+          setError(isApiError(err) ? err.message : m.error_load_models());
         }
       });
     return () => {
@@ -1281,7 +1250,7 @@ function ModelsPage({
       );
       setPublished(result.models);
     } catch (err) {
-      setError(isApiError(err) ? err.message : "reorder failed");
+      setError(isApiError(err) ? err.message : m.error_reorder());
     }
   }
 
@@ -1299,7 +1268,7 @@ function ModelsPage({
       const publishedResult = await api<{ models: AdminPublishedModel[] }>("/api/admin/published-models");
       setPublished(publishedResult.models);
     } catch (err) {
-      setError(isApiError(err) ? err.message : "update failed");
+      setError(isApiError(err) ? err.message : m.error_update());
     }
   }
 
@@ -1333,9 +1302,9 @@ function ModelsPage({
       setCustomId("");
       setCustomName("");
       setCustomTypes([]);
-      onNotice(`Added ${id}.`);
+      onNotice(m.models_add_failed_id({ id }));
     } catch (err) {
-      setError(isApiError(err) ? err.message : "add failed");
+      setError(isApiError(err) ? err.message : m.error_add());
     } finally {
       setSaving(false);
     }
@@ -1353,7 +1322,7 @@ function ModelsPage({
       return;
     }
     const current = endpointSelection(model);
-    const next = PUBLIC_ENDPOINT_TYPES.map((item) => item.id).filter((id) => (id === type ? enabled : current.includes(id)));
+    const next = PUBLIC_ENDPOINT_TYPES.filter((id) => (id === type ? enabled : current.includes(id)));
     if (next.length === 0) {
       return;
     }
@@ -1367,7 +1336,7 @@ function ModelsPage({
       setCatalog(result);
       await refreshPublished();
     } catch (err) {
-      setError(isApiError(err) ? err.message : "update failed");
+      setError(isApiError(err) ? err.message : m.error_update());
     } finally {
       setSaving(false);
     }
@@ -1386,9 +1355,9 @@ function ModelsPage({
       );
       setCatalog(result);
       await refreshPublished();
-      onNotice(`Removed ${modelId}.`);
+      onNotice(m.models_removed({ id: modelId }));
     } catch (err) {
-      setError(isApiError(err) ? err.message : "remove failed");
+      setError(isApiError(err) ? err.message : m.error_remove());
     } finally {
       setSaving(false);
     }
@@ -1398,7 +1367,7 @@ function ModelsPage({
     <section className="stack">
       <div className="toolbar model-toolbar">
         <label className="connection-picker">
-          Connection
+          {m.models_connection()}
           <select
             value={selectedConnectionId ?? ""}
             onChange={(event) => onSelectConnection(event.target.value)}
@@ -1407,7 +1376,7 @@ function ModelsPage({
             {connections?.map((connection) => (
               <option key={connection.id} value={connection.id}>
                 {connection.displayLabel || connection.providerId}
-                {connection.active ? " (active)" : ""}
+                {connection.active ? m.connections_active_suffix() : ""}
               </option>
             ))}
           </select>
@@ -1416,7 +1385,7 @@ function ModelsPage({
           className="primary"
           type="button"
           disabled={busy || !canSync}
-          title={!selected ? "Create a connection first" : !selected.hasCredentials ? "Save credentials before syncing" : !selectedPlugin?.capabilities.includes("listModels") ? "This provider does not list models" : undefined}
+          title={!selected ? m.models_need_connection() : !selected.hasCredentials ? m.models_credentials_before_sync() : !selectedPlugin?.capabilities.includes("listModels") ? m.models_no_list_title() : undefined}
           onClick={async () => {
             if (!selectedConnectionId) {
               return;
@@ -1430,106 +1399,108 @@ function ModelsPage({
               setCatalog(result);
               const publishedResult = await api<{ models: AdminPublishedModel[] }>("/api/admin/published-models");
               setPublished(publishedResult.models);
-              onNotice(`Synced ${result.models.length} model${result.models.length === 1 ? "" : "s"}.`);
+              onNotice(m.count_models({ count: result.models.length }));
             } catch (err) {
-              setError(isApiError(err) ? err.message : "sync failed");
+              setError(isApiError(err) ? err.message : m.error_sync());
             } finally {
               setBusy(false);
             }
           }}
         >
-          {busy ? "Syncing…" : "Sync models"}
+          {busy ? m.busy_syncing() : m.action_sync()}
         </button>
       </div>
       {error ? <p className="banner error" role="alert">{error}</p> : null}
-      {connections === null ? <p className="empty">Loading connections…</p> : null}
+      {connections === null ? <p className="empty">{m.connections_loading()}</p> : null}
       {connections && connections.length === 0 ? (
         <div className="empty">
-          <strong>No stored connections</strong>
-          Create a connection before syncing models.
+          <strong>{m.connections_empty_title()}</strong>
+          {m.models_need_sync_body()}
         </div>
       ) : null}
       {selected && !selected.hasCredentials ? (
-        <p className="banner warn">Save credentials on this connection before syncing models.</p>
+        <p className="banner warn">{m.models_clear_credentials()}</p>
       ) : null}
       {selected && selected.hasCredentials && selectedPlugin && !selectedPlugin.capabilities.includes("listModels") ? (
-        <p className="banner warn">This provider does not implement listModels.</p>
+        <p className="banner warn">{m.models_no_list()}</p>
       ) : null}
       {connections && connections.length > 0 ? (
         <div className="models-workspace">
           <section className="models-pane" aria-labelledby="model-inventory-title">
             <div className="models-pane-head">
               <div className="models-pane-title">
-                <h2 id="model-inventory-title">Inventory</h2>
+                <h2 id="model-inventory-title">{m.models_inventory()}</h2>
                 <p className="meta">
-                  {!catalog
-                    ? "Loading this connection."
-                    : `${catalog.syncedAt ? `Last synced ${new Date(catalog.syncedAt).toLocaleString()}.` : "Not synced yet."} ${totals.enabled} enabled of ${totals.total}.${filtering ? ` Showing ${filtered.length}.` : ""}`}
+                  {!catalog ? m.models_inventory_loading() : null}
+                  {catalog ? (
+                    catalog.syncedAt
+                      ? m.models_inventory_synced({ time: formatDateTime(catalog.syncedAt), enabled: String(totals.enabled), total: String(totals.total) })
+                      : m.models_inventory_never({ enabled: String(totals.enabled), total: String(totals.total) })
+                  ) : null}
+                  {catalog && filtering ? m.models_inventory_showing({ count: String(filtered.length) }) : null}
                 </p>
               </div>
               <div className="models-pane-tools">
                 <label className="model-filter">
-                  Filter
+                  {m.label_filter()}
                   <input
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="name or id"
+                    placeholder={m.models_filter_placeholder()}
                     type="search"
                   />
                 </label>
-               <div className="segmented" role="group" aria-label="Model status">
+               <div className="segmented" role="group" aria-label={m.models_status()}>
                  <button type="button" aria-pressed={visibility === "all"} onClick={() => setVisibility("all")}>
-                   All {totals.total}
+                   {m.visibility_all({ count: String(totals.total) })}
                  </button>
                  <button type="button" aria-pressed={visibility === "enabled"} onClick={() => setVisibility("enabled")}>
-                   Enabled {totals.enabled}
+                   {m.visibility_enabled({ count: String(totals.enabled) })}
                  </button>
                  <button type="button" aria-pressed={visibility === "disabled"} onClick={() => setVisibility("disabled")}>
-                   Disabled {totals.disabled}
+                   {m.visibility_disabled({ count: String(totals.disabled) })}
                  </button>
                 </div>
               </div>
               <form className="custom-model-form" onSubmit={(event) => void addCustomModel(event)}>
                 <label>
-                  Model id
+                  {m.label_model_id()}
                   <input
                     value={customId}
                     onChange={(event) => setCustomId(event.target.value)}
-                    placeholder="grok-voice-transcribe-2.0"
+                    placeholder={m.models_custom_placeholder()}
                     autoComplete="off"
                     disabled={!selected || !catalog || saving}
                     required
                   />
                 </label>
                 <label>
-                  Name
+                  {m.label_name()}
                   <input
                     value={customName}
                     onChange={(event) => setCustomName(event.target.value)}
-                    placeholder="optional"
+                    placeholder={m.models_optional()}
                     autoComplete="off"
                     disabled={!selected || !catalog || saving}
                   />
                 </label>
                 <fieldset className="endpoint-fieldset">
-                  <legend>Endpoints</legend>
+                  <legend>{m.label_endpoints()}</legend>
                   <div className="endpoint-choices">
                     {PUBLIC_ENDPOINT_TYPES.map((type) => (
-                      <label key={type.id} className="endpoint-choice">
+                      <label key={type} className="endpoint-choice">
                         <input
                           type="checkbox"
-                          checked={customTypes.includes(type.id)}
+                          checked={customTypes.includes(type)}
                           disabled={!selected || !catalog || saving}
                           onChange={(event) => {
                             const enabled = event.target.checked;
                             setCustomTypes(
-                              PUBLIC_ENDPOINT_TYPES.map((item) => item.id).filter((id) =>
-                                id === type.id ? enabled : customTypes.includes(id),
-                              ),
+                              PUBLIC_ENDPOINT_TYPES.filter((id) => (id === type ? enabled : customTypes.includes(id))),
                             );
                           }}
                         />
-                        {type.label}
+                        {endpointLabel(type)}
                       </label>
                     ))}
                   </div>
@@ -1539,21 +1510,21 @@ function ModelsPage({
                   type="submit"
                   disabled={!selected || !catalog || saving || !customId.trim() || customTypes.length === 0}
                 >
-                  {saving ? "Saving…" : "Add"}
+                  {saving ? m.busy_saving() : m.action_add()}
                 </button>
               </form>
             </div>
             <div className="model-scroll">
               {!catalog ? (
-                <p className="empty">Loading models…</p>
+                <p className="empty">{m.models_loading()}</p>
               ) : catalog.models.length === 0 ? (
                 <div className="empty">
-                  <strong>No models yet</strong>
-                  Sync this connection to fetch the provider catalog.
+                  <strong>{m.models_empty_title()}</strong>
+                  {m.models_empty_body()}
                 </div>
               ) : filtered.length === 0 ? (
                 <div className="empty">
-                  <strong>No matching models</strong>
+                  <strong>{m.models_no_match_title()}</strong>
                   <button
                     className="ghost"
                     type="button"
@@ -1562,17 +1533,17 @@ function ModelsPage({
                       setVisibility("all");
                     }}
                   >
-                    Clear filter
+                    {m.action_clear_filter()}
                   </button>
                 </div>
               ) : (
                 <table className="model-table">
                   <caption className="visually-hidden">
-                    Models for {selected?.displayLabel || selected?.providerId || "this connection"}
+                    {m.models_caption({ name: selected?.displayLabel || selected?.providerId || m.models_none() })}
                   </caption>
                   <thead>
                     <tr>
-                      <th scope="col">Model</th>
+                      <th scope="col">{m.label_model()}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1584,7 +1555,7 @@ function ModelsPage({
                               <input
                                 type="checkbox"
                                 checked={model.enabled}
-                                aria-label={`${model.enabled ? "Disable" : "Enable"} ${model.name}`}
+                                aria-label={model.enabled ? m.models_disable({ name: model.name }) : m.models_enable({ name: model.name })}
                                 onChange={(event) => {
                                   void setModelEnabled(model.id, event.target.checked);
                                 }}
@@ -1596,35 +1567,35 @@ function ModelsPage({
                             </label>
                             {model.custom ? (
                               <span className="model-actions">
-                                <span className="endpoint-choices" role="group" aria-label={`Endpoints for ${model.name}`}>
+                                <span className="endpoint-choices" role="group" aria-label={m.models_endpoints_for({ name: model.name })}>
                                   {PUBLIC_ENDPOINT_TYPES.map((type) => {
                                     const selectedTypes = endpointSelection(model);
-                                    const checked = selectedTypes.includes(type.id);
+                                    const checked = selectedTypes.includes(type);
                                     return (
-                                      <label key={type.id} className="endpoint-choice">
+                                      <label key={type} className="endpoint-choice">
                                         <input
                                           type="checkbox"
                                           checked={checked}
                                           disabled={saving || (checked && selectedTypes.length === 1)}
-                                          aria-label={`${type.label} for ${model.name}`}
+                                          aria-label={m.models_endpoint_for({ endpoint: endpointLabel(type), name: model.name })}
                                           onChange={(event) => {
-                                            void setCustomEndpoints(model, type.id, event.target.checked);
+                                            void setCustomEndpoints(model, type, event.target.checked);
                                           }}
                                         />
-                                        {type.label}
+                                        {endpointLabel(type)}
                                       </label>
                                     );
                                   })}
                                 </span>
-                                {model.endpointTypes == null ? <span className="meta">Inherited</span> : null}
-                                <span className="badge">Custom</span>
+                                {model.endpointTypes == null ? <span className="meta">{m.status_inherited()}</span> : null}
+                                <span className="badge">{m.status_custom()}</span>
                                 <button
                                   className="danger"
                                   type="button"
                                   disabled={saving}
                                   onClick={() => void removeCustomModel(model.id)}
                                 >
-                                  Remove
+                                  {m.action_remove()}
                                 </button>
                               </span>
                             ) : null}
@@ -1640,26 +1611,26 @@ function ModelsPage({
           <section className="models-pane" aria-labelledby="published-models-title">
             <div className="models-pane-head">
               <div className="models-pane-title">
-                <h2 id="published-models-title">Published</h2>
+                <h2 id="published-models-title">{m.models_published()}</h2>
                 <p className="meta">
                   {published === null
-                    ? "Loading public catalog."
+                    ? m.models_published_loading()
                     : published.length === 0
-                      ? "Nothing is on /v1/models yet."
-                      : `${published.length} public id${published.length === 1 ? "" : "s"}.`}
+                      ? m.models_published_empty()
+                      : m.count_public_ids({ count: published.length })}
                   {published?.some((model) => model.providers.length > 1)
-                    ? " First provider is the default route."
+                    ? m.models_published_default()
                     : ""}
                 </p>
               </div>
             </div>
             <div className="model-scroll">
               {published === null ? (
-                <p className="empty">Loading published models…</p>
+                <p className="empty">{m.models_published_loading_rows()}</p>
               ) : published.length === 0 ? (
                 <div className="empty">
-                  <strong>No published models</strong>
-                  Enable models on an active connection.
+                  <strong>{m.models_published_empty_title()}</strong>
+                  {m.models_published_empty_body()}
                 </div>
               ) : published.map((model) => (
                 <article className="published-row" key={model.publicId}>
@@ -1683,14 +1654,14 @@ function ModelsPage({
                               disabled={index === 0}
                               onClick={() => void movePublishedProvider(model, index, -1)}
                             >
-                              Up
+                              {m.models_up()}
                             </button>
                             <button
                               type="button"
                               disabled={index === model.providers.length - 1}
                               onClick={() => void movePublishedProvider(model, index, 1)}
                             >
-                              Down
+                              {m.models_down()}
                             </button>
                           </div>
                         </div>
@@ -1714,33 +1685,33 @@ function LogsPage() {
   useEffect(() => {
     api<{ logs: OperationLog[] }>("/api/admin/logs")
       .then((result) => setLogs(result.logs))
-      .catch((err) => setError(isApiError(err) ? err.message : "failed to load logs"));
+      .catch((err) => setError(isApiError(err) ? err.message : m.error_load_logs()));
   }, []);
 
   return (
     <section className="stack">
       {error ? <p className="banner error" role="alert">{error}</p> : null}
-      {logs === null ? <p className="empty">Loading logs…</p> : null}
+      {logs === null ? <p className="empty">{m.logs_loading()}</p> : null}
       {logs && logs.length === 0 ? (
         <div className="empty">
-          <strong>No operations yet</strong>
-          Install, update, or remove a plugin to see logs here.
+          <strong>{m.logs_empty_title()}</strong>
+          {m.logs_empty_body()}
         </div>
       ) : null}
       {logs && logs.length > 0 ? (
         <div className="log-list">
           {logs.map((log) => (
             <article className="log-row" key={log.id}>
-              <time dateTime={log.createdAt}>{new Date(log.createdAt).toLocaleString()}</time>
+              <time dateTime={log.createdAt}>{formatDateTime(log.createdAt)}</time>
               <div className="resource-main">
                 <div className="resource-title-row">
-                  <h2>{log.action}</h2>
-                  <StatusBadge tone={log.status === "success" ? "ok" : "error"}>{log.status}</StatusBadge>
-                  {log.restartRequired ? <StatusBadge tone="warn">restart required</StatusBadge> : null}
+                  <h2>{logActionLabel(log.action)}</h2>
+                  <StatusBadge tone={log.status === "success" ? "ok" : "error"}>{log.status === "success" ? m.status_success() : m.status_failure()}</StatusBadge>
+                  {log.restartRequired ? <StatusBadge tone="warn">{m.status_restart()}</StatusBadge> : null}
                 </div>
                 <dl className="meta-list">
-                  {log.name ? <div><dt>Plugin</dt><dd>{log.name}</dd></div> : null}
-                  {log.source ? <div><dt>Source</dt><dd>{log.source}</dd></div> : null}
+                  {log.name ? <div><dt>{m.logs_plugin()}</dt><dd>{log.name}</dd></div> : null}
+                  {log.source ? <div><dt>{m.label_source()}</dt><dd>{log.source}</dd></div> : null}
                 </dl>
                 <div className="meta">{log.message}</div>
               </div>
@@ -1775,7 +1746,7 @@ function ConfirmDialog({
             {confirmLabel}
           </button>
           <button type="button" onClick={onCancel}>
-            Cancel
+            {m.action_cancel()}
           </button>
         </div>
       </div>

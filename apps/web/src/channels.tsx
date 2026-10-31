@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, isApiError, type ChannelRule, type ChannelView } from "./api";
+import { m } from "./paraglide/messages.js";
 
 const EMPTY_MATCH: ChannelRule = {
   kind: "match",
@@ -24,7 +25,7 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : "failed to load channels"));
+    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_channels()));
   }, []);
 
   function load(channel: ChannelView) {
@@ -56,63 +57,60 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
             const body = JSON.stringify({ name, ratio, rule });
             if (editing) {
               await api(`/api/admin/channels/${editing}`, { method: "PUT", body });
-              onNotice("Channel saved.");
+              onNotice(m.channels_saved());
             } else {
               await api("/api/admin/channels", { method: "POST", body });
-              onNotice("Channel created.");
+              onNotice(m.channels_created());
             }
             reset();
             await refresh();
           } catch (err) {
-            setError(isApiError(err) ? err.message : "save failed");
+            setError(isApiError(err) ? err.message : m.error_save());
           } finally {
             setBusy(false);
           }
         }}
       >
         <div className="panel-header">
-          <h2>{editing ? "Edit channel" : "Create channel"}</h2>
-          <p className="meta">
-            A channel sets the price multiplier and which published models a key on that channel can call. Nothing is
-            created until you save one.
-          </p>
+          <h2>{editing ? m.channels_edit() : m.channels_create()}</h2>
+          <p className="meta">{m.channels_intro()}</p>
         </div>
         <label>
-          Name
+          {m.label_name()}
           <input value={name} onChange={(event) => setName(event.target.value)} required />
         </label>
         <label>
-          Ratio
+          {m.label_ratio()}
           <input value={ratio} onChange={(event) => setRatio(event.target.value)} required />
         </label>
         <label>
-          Models
+          {m.label_models()}
           <select
             value={rule.kind}
             onChange={(event) => setRule(event.target.value === "match" ? { ...EMPTY_MATCH } : { kind: "all" })}
           >
-            <option value="all">All published models</option>
-            <option value="match">Match a provider and model id</option>
+            <option value="all">{m.coverage_all()}</option>
+            <option value="match">{m.channels_match()}</option>
           </select>
         </label>
         {rule.kind === "match" ? (
           <>
             <label>
-              Provider id
+              {m.channels_provider_id()}
               <input
                 value={rule.providerId ?? ""}
                 onChange={(event) => setRule({ ...rule, providerId: event.target.value || null })}
               />
             </label>
             <label>
-              Model id prefix
+              {m.channels_model_prefix()}
               <input
                 value={rule.prefix ?? ""}
                 onChange={(event) => setRule({ ...rule, prefix: event.target.value || null })}
               />
             </label>
             <label>
-              Exclude prefix
+              {m.channels_exclude_prefix()}
               <input
                 value={rule.excludePrefix ?? ""}
                 onChange={(event) => setRule({ ...rule, excludePrefix: event.target.value || null })}
@@ -124,23 +122,23 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
                 checked={rule.chatOnly}
                 onChange={(event) => setRule({ ...rule, chatOnly: event.target.checked })}
               />
-              Chat routes only
+              {m.channels_chat_only()}
             </label>
           </>
         ) : null}
         <div className="row-actions">
           <button className="primary" type="submit" disabled={busy || !name.trim()}>
-            {busy ? "Saving…" : editing ? "Save channel" : "Create channel"}
+            {busy ? m.busy_saving() : editing ? m.action_save_channel() : m.action_create_channel()}
           </button>
           {editing ? (
             <button className="ghost" type="button" disabled={busy} onClick={reset}>
-              Cancel
+              {m.action_cancel()}
             </button>
           ) : null}
         </div>
       </form>
-      {channels === null ? <p className="meta">Loading channels…</p> : null}
-      {channels && channels.length === 0 ? <p className="meta">No channels yet.</p> : null}
+      {channels === null ? <p className="meta">{m.channels_loading()}</p> : null}
+      {channels && channels.length === 0 ? <p className="meta">{m.channels_empty()}</p> : null}
       {channels?.map((channel) => (
         <article className="resource" key={channel.id}>
           <div className="resource-main">
@@ -152,7 +150,7 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
           </div>
           <div className="row-actions">
             <button type="button" onClick={() => load(channel)}>
-              Edit
+              {m.action_edit()}
             </button>
             <button
               className="danger"
@@ -165,14 +163,14 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
                     await api(`/api/admin/channels/${channel.id}`, { method: "DELETE" });
                     if (editing === channel.id) reset();
                     await refresh();
-                    onNotice("Channel deleted.");
+                    onNotice(m.channels_deleted());
                   } catch (err) {
-                    setError(isApiError(err) ? err.message : "delete failed");
+                    setError(isApiError(err) ? err.message : m.error_delete());
                   }
                 })();
               }}
             >
-              Delete
+              {m.action_delete()}
             </button>
           </div>
         </article>
@@ -183,13 +181,13 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
 
 function describeRule(rule: ChannelRule): string {
   if (rule.kind === "all") {
-    return "All published models, including ones published later.";
+    return m.channels_rule_all();
   }
   const parts = [
-    rule.providerId ? `provider ${rule.providerId}` : null,
-    rule.prefix ? `id starts with ${rule.prefix}` : null,
-    rule.excludePrefix ? `except ${rule.excludePrefix}` : null,
-    rule.chatOnly ? "chat routes only" : null,
-  ].filter((part): part is string => Boolean(part));
-  return parts.length > 0 ? parts.join(", ") : "Match";
+    rule.providerId ? m.channels_rule_provider({ id: rule.providerId }) : "",
+    rule.prefix ? m.channels_rule_prefix({ prefix: rule.prefix }) : "",
+    rule.excludePrefix ? m.channels_rule_exclude({ prefix: rule.excludePrefix }) : "",
+    rule.chatOnly ? m.channels_rule_chat() : "",
+  ].filter((part) => part !== "");
+  return parts.length > 0 ? parts.join(", ") : m.channels_rule_match();
 }
