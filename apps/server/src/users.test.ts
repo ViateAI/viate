@@ -474,7 +474,7 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     const granted = store.createChannel({
       name: "Granted",
       ratio: "2",
-      rule: { kind: "match", providerId: null, prefix: "portal-", excludePrefix: null, chatOnly: false },
+      rule: { kind: "models", modelIds: ["portal-only"] },
     });
     const hidden = store.createChannel({ name: "Other", ratio: "3", rule: { kind: "all" } });
     store.setUserChannels(user.id, [granted.id]);
@@ -505,7 +505,7 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     );
     assert.equal(store.listPublicCatalog().data.some((model) => model.id === "demo"), true);
     assert.equal(body.channels[0]?.models.some((model) => model.id === "demo"), false);
-    assert.equal(body.channels[0]?.models.some((model) => !model.id.startsWith("portal-")), false);
+    assert.deepEqual(body.channels[0]?.models, []);
   });
 
   it("leaves unbound keys unchanged, bills a bound chat once, and blocks an empty balance", async () => {

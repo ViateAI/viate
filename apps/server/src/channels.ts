@@ -1,12 +1,17 @@
 export type ChannelModelRule =
   | { kind: "all" }
   | {
-      kind: "match";
-      providerId: string | null;
-      prefix: string | null;
-      excludePrefix: string | null;
-      chatOnly: boolean;
+      kind: "models";
+      modelIds: string[];
     };
+
+export type LegacyChannelMatch = {
+  kind: "match";
+  providerId: string | null;
+  prefix: string | null;
+  excludePrefix: string | null;
+  chatOnly: boolean;
+};
 
 export type Channel = {
   id: string;
@@ -14,12 +19,6 @@ export type Channel = {
   ratioNumerator: number;
   ratioDenominator: number;
   rule: ChannelModelRule;
-};
-
-const CHAT_CAPABILITIES: Record<string, true> = {
-  chatCompletions: true,
-  responses: true,
-  responsesCompact: true,
 };
 
 const CHAT_ENDPOINTS: Record<string, true> = {
@@ -60,33 +59,91 @@ export function parseChannelRule(value: unknown): ChannelModelRule {
   if (record.kind === "all") {
     return { kind: "all" };
   }
-  if (record.kind !== "match") {
+  if (record.kind !== "models") {
     throw Object.assign(new Error("rule is invalid"), { statusCode: 400 });
   }
-  const providerId = optionalRuleString(record.providerId);
-  const prefix = optionalRuleString(record.prefix);
-  const excludePrefix = optionalRuleString(record.excludePrefix);
-  if (record.chatOnly !== undefined && typeof record.chatOnly !== "boolean") {
+  if (!Array.isArray(record.modelIds)) {
     throw Object.assign(new Error("rule is invalid"), { statusCode: 400 });
   }
-  const chatOnly = record.chatOnly === true;
-  if (!providerId && !prefix && !excludePrefix && !chatOnly) {
+  const modelIds = normalizeModelIds(record.modelIds, true);
+  if (modelIds.length === 0) {
     throw Object.assign(new Error("rule is empty"), { statusCode: 400 });
   }
-  return { kind: "match", providerId, prefix, excludePrefix, chatOnly };
+  return { kind: "models", modelIds };
 }
 
-export function channelMatchesModel(
-  rule: ChannelModelRule,
+export function readLegacyChannelMatch(value: unknown): LegacyChannelMatch | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.kind !== "match") {
+    return null;
+  }
+  return {
+    kind: "match",
+    providerId: typeof record.providerId === "string" && record.providerId.trim() ? record.providerId.trim() : null,
+    prefix: typeof record.prefix === "string" && record.prefix.trim() ? record.prefix.trim() : null,
+    excludePrefix:
+      typeof record.excludePrefix === "string" && record.excludePrefix.trim() ? record.excludePrefix.trim() : null,
+    chatOnly: record.chatOnly === true,
+  };
+}
+
+export function legacyMatchModelIds(
+  rule: LegacyChannelMatch,
+  models: readonly { id: string; providerIds: readonly string[]; endpointTypes: readonly string[] }[],
+): string[] {
+  return models.filter((model) => legacyChannelMatches(rule, model)).map((model) => model.id).sort();
+}
+
+export function channelMatchesModel(rule: ChannelModelRule, modelId: string): boolean {
+  return rule.kind === "all" || rule.modelIds.includes(modelId);
+}
+
+export function applyChannelRatio(charge: bigint, numerator: number, denominator: number): bigint {
+  if (!Number.isInteger(numerator) || !Number.isInteger(denominator) || numerator < 0 || denominator <= 0) {
+    return charge;
+  }
+  if (charge <= 0n || numerator === denominator) {
+    return charge;
+  }
+  const num = BigInt(numerator);
+  const den = BigInt(denominator);
+  return (charge * num + den / 2n) / den;
+}
+
+export function normalizeModelIds(value: readonly unknown[], strict: boolean): string[] {
+  const ids: string[] = [];
+  const seen: Record<string, true> = {};
+  for (const item of value) {
+    if (typeof item !== "string") {
+      if (strict) {
+        throw Object.assign(new Error("rule is invalid"), { statusCode: 400 });
+      }
+      continue;
+    }
+    const trimmed = item.trim();
+    if (!trimmed || trimmed.length > 200 || /\s/.test(trimmed)) {
+      if (strict) {
+        throw Object.assign(new Error("rule is invalid"), { statusCode: 400 });
+      }
+      continue;
+    }
+    if (seen[trimmed]) {
+      continue;
+    }
+    seen[trimmed] = true;
+    ids.push(trimmed);
+  }
+  ids.sort();
+  return ids;
+}
+
+function legacyChannelMatches(
+  rule: LegacyChannelMatch,
   model: { id: string; providerIds: readonly string[]; endpointTypes: readonly string[] },
-  capability: string | null,
 ): boolean {
-  if (rule.kind === "all") {
-    return true;
-  }
-  if (rule.chatOnly && capability && !CHAT_CAPABILITIES[capability]) {
-    return false;
-  }
   if (rule.prefix && !model.id.startsWith(rule.prefix)) {
     return false;
   }
@@ -104,33 +161,6 @@ export function channelMatchesModel(
     return false;
   }
   return true;
-}
-
-export function channelProviderLimit(rule: ChannelModelRule): readonly string[] | null {
-  return rule.kind === "match" && rule.providerId ? [rule.providerId] : null;
-}
-
-export function applyChannelRatio(charge: bigint, numerator: number, denominator: number): bigint {
-  if (!Number.isInteger(numerator) || !Number.isInteger(denominator) || numerator < 0 || denominator <= 0) {
-    return charge;
-  }
-  if (charge <= 0n || numerator === denominator) {
-    return charge;
-  }
-  const num = BigInt(numerator);
-  const den = BigInt(denominator);
-  return (charge * num + den / 2n) / den;
-}
-
-function optionalRuleString(value: unknown): string | null {
-  if (value === undefined || value === null || value === "") {
-    return null;
-  }
-  if (typeof value !== "string") {
-    throw Object.assign(new Error("rule is invalid"), { statusCode: 400 });
-  }
-  const trimmed = value.trim();
-  return trimmed || null;
 }
 
 function gcd(left: number, right: number): number {

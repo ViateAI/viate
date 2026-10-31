@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { parseOpenAIChatUsage, type ProviderHandler } from "@viateai/sdk";
-import { formatChannelRatio, parseChannelRatio } from "./channels.js";
+import { formatChannelRatio, legacyMatchModelIds, parseChannelRatio, parseChannelRule } from "./channels.js";
 import { buildApp, type App } from "./app.js";
 import { resetRoutingStateForTests } from "./routing.js";
 import { AdminStore } from "./store.js";
@@ -17,6 +17,42 @@ describe("channel ratio", () => {
     assert.equal(formatChannelRatio(1, 10), "0.1");
     assert.equal(formatChannelRatio(7, 1), "7");
     assert.throws(() => parseChannelRatio("0"), (error: unknown) => error instanceof Error && error.message === "ratio is invalid");
+  });
+
+  it("keeps an explicit model list and rejects a prefix rule", () => {
+    assert.deepEqual(parseChannelRule({ kind: "models", providerId: "xai", modelIds: ["grok-4", "grok-4"] }), {
+      kind: "models",
+      modelIds: ["grok-4"],
+    });
+    assert.throws(
+      () => parseChannelRule({ kind: "match", providerId: "xai", prefix: "grok-" }),
+      (error: unknown) => error instanceof Error && error.message === "rule is invalid",
+    );
+    assert.throws(
+      () => parseChannelRule({ kind: "models", providerId: null, modelIds: [] }),
+      (error: unknown) => error instanceof Error && error.message === "rule is empty",
+    );
+  });
+
+  it("freezes a prefix rule to the chat models it covered", () => {
+    assert.deepEqual(
+      legacyMatchModelIds(
+        {
+          kind: "match",
+          providerId: "xai",
+          prefix: "grok-",
+          excludePrefix: "grok-imagine",
+          chatOnly: true,
+        },
+        [
+          { id: "grok-4", providerIds: ["xai"], endpointTypes: ["openai"] },
+          { id: "grok-imagine-image", providerIds: ["xai"], endpointTypes: ["openai"] },
+          { id: "gpt-4o", providerIds: ["openai"], endpointTypes: ["openai"] },
+          { id: "grok-tts", providerIds: ["xai"], endpointTypes: ["openai-audio"] },
+        ],
+      ),
+      ["grok-4"],
+    );
   });
 });
 
@@ -30,11 +66,8 @@ describe("channels", () => {
         name: "Grok",
         ratio: "0.1",
         rule: {
-          kind: "match",
-          providerId: "xai",
-          prefix: "grok-",
-          excludePrefix: "grok-imagine",
-          chatOnly: true,
+          kind: "models",
+          modelIds: ["grok-4"],
         },
       });
       assert.equal(fixture.store.channelView(created).ratio, "0.1");
@@ -52,6 +85,14 @@ describe("channels", () => {
       const allowed = await chat(fixture.app, secret, "grok-4");
       assert.equal(allowed.statusCode, 200);
       assert.deepEqual(fixture.calls, ["xai:grok-4"]);
+      const xai = fixture.store.listConnections().find((connection) => connection.providerId === "xai");
+      fixture.store.replaceConnectionModels(xai!.id, [
+        { id: "grok-4", name: "Grok 4" },
+        { id: "grok-4.1", name: "Grok 4.1" },
+      ]);
+      const later = await chat(fixture.app, secret, "grok-4.1");
+      assert.equal(later.statusCode, 403);
+      assert.equal(later.json().error.message, "model not available");
       await waitForBalance(fixture.dataDir, fixture.userId, 1_000_000_000 - 100_000);
     } finally {
       await fixture.close();
@@ -145,11 +186,8 @@ describe("channel migration", () => {
       const standard = channels.find((channel) => channel.name === "Standard");
       assert.equal(store.channelView(grok!).ratio, "0.1");
       assert.deepEqual(grok?.rule, {
-        kind: "match",
-        providerId: "xai",
-        prefix: "grok-",
-        excludePrefix: "grok-imagine",
-        chatOnly: true,
+        kind: "models",
+        modelIds: [],
       });
       assert.equal(store.channelView(standard!).ratio, "7");
       assert.deepEqual(standard?.rule, { kind: "all" });
@@ -164,6 +202,35 @@ describe("channel migration", () => {
     } finally {
       store.close();
       await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("freezes a stored prefix rule onto the models published at startup", async () => {
+    const fixture = await openFixture();
+    const channel = fixture.store.createChannel({ name: "Legacy", ratio: "1", rule: { kind: "all" } });
+    const db = new DatabaseSync(join(fixture.dataDir, "viate.sqlite"));
+    db.prepare("UPDATE channels SET model_rule = ? WHERE id = ?").run(
+      JSON.stringify({
+        kind: "match",
+        providerId: "xai",
+        prefix: "grok-",
+        excludePrefix: "grok-imagine",
+        chatOnly: true,
+      }),
+      channel.id,
+    );
+    db.close();
+    await fixture.app.close();
+    fixture.store.close();
+    const reopened = await AdminStore.open(fixture.dataDir);
+    try {
+      assert.deepEqual(reopened.getChannel(channel.id)?.rule, {
+        kind: "models",
+        modelIds: ["grok-4"],
+      });
+    } finally {
+      reopened.close();
+      await rm(fixture.dataDir, { recursive: true, force: true });
     }
   });
 });

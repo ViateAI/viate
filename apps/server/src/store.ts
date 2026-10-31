@@ -15,9 +15,11 @@ import { hashPassword, verifyPassword } from "./passwords.js";
 import {
   applyChannelRatio,
   channelMatchesModel,
-  channelProviderLimit,
   formatChannelRatio,
+  legacyMatchModelIds,
+  normalizeModelIds,
   parseChannelRatio,
+  readLegacyChannelMatch,
   type Channel,
   type ChannelModelRule,
 } from "./channels.js";
@@ -612,7 +614,9 @@ export class AdminStore {
     migrateSubscription(db);
     migrateUsers(db);
     db.exec("UPDATE users SET inflight = 0");
-    return new AdminStore(db, key, dataDir);
+    const store = new AdminStore(db, key, dataDir);
+    store.freezeLegacyChannelRules();
+    return store;
   }
 
   close(): void {
@@ -1144,20 +1148,10 @@ export class AdminStore {
   }
 
   listChannelCatalog(channel: Channel): { object: "list"; data: PublicModel[] } {
-    const catalog = this.listPublicCatalog(channelProviderLimit(channel.rule));
+    const catalog = this.listPublicCatalog();
     return {
       object: "list",
-      data: catalog.data.filter((model) =>
-        channelMatchesModel(
-          channel.rule,
-          {
-            id: model.id,
-            providerIds: model.owned_by === "viate" ? [] : [model.owned_by],
-            endpointTypes: model.supported_endpoint_types,
-          },
-          null,
-        ),
-      ),
+      data: catalog.data.filter((model) => channelMatchesModel(channel.rule, model.id)),
     };
   }
 
@@ -1206,6 +1200,51 @@ export class AdminStore {
       throw Object.assign(new Error("channel in use"), { statusCode: 409 });
     }
     this.db.prepare("DELETE FROM channels WHERE id = ?").run(id);
+  }
+
+  private freezeLegacyChannelRules(): void {
+    const rows = this.db.prepare("SELECT id, model_rule FROM channels").all() as Array<{
+      id: string;
+      model_rule: string;
+    }>;
+    const update = this.db.prepare("UPDATE channels SET model_rule = ? WHERE id = ?");
+    for (const row of rows) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.model_rule) as unknown;
+      } catch {
+        continue;
+      }
+      const legacy = readLegacyChannelMatch(parsed);
+      if (legacy) {
+        const catalog = this.listPublicCatalog(legacy.providerId ? [legacy.providerId] : null);
+        const modelIds = legacyMatchModelIds(
+          legacy,
+          catalog.data.map((model) => ({
+            id: model.id,
+            providerIds: model.owned_by === "viate" ? [] : [model.owned_by],
+            endpointTypes: model.supported_endpoint_types,
+          })),
+        );
+        update.run(JSON.stringify({ kind: "models", modelIds } satisfies ChannelModelRule), row.id);
+        continue;
+      }
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        !("kind" in parsed) ||
+        parsed.kind !== "models" ||
+        !("providerId" in parsed)
+      ) {
+        continue;
+      }
+      const modelIds = "modelIds" in parsed && Array.isArray(parsed.modelIds) ? parsed.modelIds : [];
+      update.run(
+        JSON.stringify({ kind: "models", modelIds: normalizeModelIds(modelIds, false) } satisfies ChannelModelRule),
+        row.id,
+      );
+    }
   }
 
   channelView(channel: Channel): { id: string; name: string; ratio: string; rule: ChannelModelRule } {
@@ -2798,11 +2837,16 @@ function migrateChannels(db: DatabaseSync): void {
 function toChannel(row: ChannelRow): Channel {
   let rule: ChannelModelRule = { kind: "all" };
   try {
-    rule = JSON.parse(row.model_rule) as ChannelModelRule;
+    const parsed: unknown = JSON.parse(row.model_rule);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "kind" in parsed) {
+      if (parsed.kind === "models") {
+        const modelIds = "modelIds" in parsed && Array.isArray(parsed.modelIds) ? parsed.modelIds : [];
+        rule = { kind: "models", modelIds: normalizeModelIds(modelIds, false) };
+      } else if (parsed.kind !== "all") {
+        rule = { kind: "models", modelIds: [] };
+      }
+    }
   } catch {
-    rule = { kind: "all" };
-  }
-  if (rule.kind !== "all" && rule.kind !== "match") {
     rule = { kind: "all" };
   }
   return {

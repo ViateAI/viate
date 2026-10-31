@@ -578,6 +578,20 @@ textarea {
   overflow: auto;
 }
 
+.model-checklist {
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 12px;
+}
+
+.model-checklist .toggle {
+  width: 100%;
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+
 .model-table {
   width: 100%;
   border-collapse: collapse;

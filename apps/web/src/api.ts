@@ -153,11 +153,8 @@ export type ClientApiKey = {
 export type ChannelRule =
   | { kind: "all" }
   | {
-      kind: "match";
-      providerId: string | null;
-      prefix: string | null;
-      excludePrefix: string | null;
-      chatOnly: boolean;
+      kind: "models";
+      modelIds: string[];
     };
 
 export type ChannelView = {

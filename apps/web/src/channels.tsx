@@ -1,27 +1,36 @@
 import { useEffect, useState } from "react";
-import { api, isApiError, type ChannelRule, type ChannelView } from "./api";
+import { api, isApiError, type AdminPlugin, type AdminPublishedModel, type ChannelRule, type ChannelView } from "./api";
 import { m } from "./paraglide/messages.js";
 
-const EMPTY_MATCH: ChannelRule = {
-  kind: "match",
-  providerId: null,
-  prefix: null,
-  excludePrefix: null,
-  chatOnly: false,
+type CatalogModel = {
+  id: string;
+  providers: string[];
 };
 
 export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) => void }) {
   const [channels, setChannels] = useState<ChannelView[] | null>(null);
+  const [catalog, setCatalog] = useState<CatalogModel[] | null>(null);
+  const [providers, setProviders] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [ratio, setRatio] = useState("1");
-  const [rule, setRule] = useState<ChannelRule>({ kind: "all" });
+  const [coverage, setCoverage] = useState<"all" | "models">("all");
+  const [providerId, setProviderId] = useState("");
+  const [modelIds, setModelIds] = useState<string[]>([]);
+  const [filter, setFilter] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
-    const result = await api<{ channels: ChannelView[] }>("/api/admin/channels");
-    setChannels(result.channels);
+    const [channelResult, publishedResult, pluginResult] = await Promise.all([
+      api<{ channels: ChannelView[] }>("/api/admin/channels"),
+      api<{ models: AdminPublishedModel[] }>("/api/admin/published-models"),
+      api<{ plugins: AdminPlugin[] }>("/api/admin/plugins"),
+    ]);
+    const models = channelCatalog(publishedResult.models);
+    setChannels(channelResult.channels);
+    setCatalog(models);
+    setProviders(providerChoices(pluginResult.plugins, models));
   }
 
   useEffect(() => {
@@ -32,7 +41,15 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
     setEditing(channel.id);
     setName(channel.name);
     setRatio(channel.ratio);
-    setRule(channel.rule);
+    setFilter("");
+    setProviderId("");
+    if (channel.rule.kind === "all") {
+      setCoverage("all");
+      setModelIds([]);
+    } else {
+      setCoverage("models");
+      setModelIds(channel.rule.modelIds);
+    }
     setError(null);
   }
 
@@ -40,8 +57,21 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
     setEditing(null);
     setName("");
     setRatio("1");
-    setRule({ kind: "all" });
+    setCoverage("all");
+    setProviderId("");
+    setModelIds([]);
+    setFilter("");
   }
+
+  const needle = filter.trim().toLowerCase();
+  const visible = (catalog ?? []).filter((model) => {
+    if (providerId && !model.providers.includes(providerId)) {
+      return false;
+    }
+    return !needle || model.id.toLowerCase().includes(needle);
+  });
+  const missing = modelIds.filter((id) => !(catalog ?? []).some((model) => model.id === id));
+  const rule: ChannelRule = coverage === "all" ? { kind: "all" } : { kind: "models", modelIds };
 
   return (
     <section className="stack">
@@ -73,7 +103,7 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
       >
         <div className="panel-header">
           <h2>{editing ? m.channels_edit() : m.channels_create()}</h2>
-          <p className="meta">{m.channels_intro()}</p>
+          <p className="meta">{m.channels_hint()}</p>
         </div>
         <label>
           {m.label_name()}
@@ -86,48 +116,85 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
         <label>
           {m.label_models()}
           <select
-            value={rule.kind}
-            onChange={(event) => setRule(event.target.value === "match" ? { ...EMPTY_MATCH } : { kind: "all" })}
+            value={coverage}
+            onChange={(event) => setCoverage(event.target.value === "models" ? "models" : "all")}
           >
             <option value="all">{m.coverage_all()}</option>
-            <option value="match">{m.channels_match()}</option>
+            <option value="models">{m.coverage_selected()}</option>
           </select>
         </label>
-        {rule.kind === "match" ? (
+        {coverage === "models" ? (
           <>
             <label>
-              {m.channels_provider_id()}
-              <input
-                value={rule.providerId ?? ""}
-                onChange={(event) => setRule({ ...rule, providerId: event.target.value || null })}
-              />
+              {m.label_provider()}
+              <select value={providerId} onChange={(event) => setProviderId(event.target.value)}>
+                <option value="">{m.label_any_provider()}</option>
+                {providers.map((id) => (
+                  <option key={id} value={id}>{id}</option>
+                ))}
+              </select>
             </label>
+            <p className="meta">{m.channels_filter_keeps()}</p>
             <label>
-              {m.channels_model_prefix()}
-              <input
-                value={rule.prefix ?? ""}
-                onChange={(event) => setRule({ ...rule, prefix: event.target.value || null })}
-              />
+              {m.label_filter()}
+              <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={m.channels_filter_placeholder()} />
             </label>
-            <label>
-              {m.channels_exclude_prefix()}
-              <input
-                value={rule.excludePrefix ?? ""}
-                onChange={(event) => setRule({ ...rule, excludePrefix: event.target.value || null })}
-              />
-            </label>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={rule.chatOnly}
-                onChange={(event) => setRule({ ...rule, chatOnly: event.target.checked })}
-              />
-              {m.channels_chat_only()}
-            </label>
+            <div className="row-actions">
+              <button
+                className="ghost"
+                type="button"
+                onClick={() => setModelIds((current) => uniqueIds([...current, ...visible.map((model) => model.id)]))}
+              >
+                {m.action_select_shown()}
+              </button>
+              <button
+                className="ghost"
+                type="button"
+                onClick={() => setModelIds((current) => current.filter((id) => !visible.some((model) => model.id === id)))}
+              >
+                {m.action_clear_shown()}
+              </button>
+            </div>
+            <div className="model-checklist" role="group" aria-label={m.channels_published_models()}>
+              {catalog === null ? <p className="meta">{m.channels_loading_models()}</p> : null}
+              {catalog && visible.length === 0 && missing.length === 0 ? (
+                <p className="meta">{m.channels_no_match()}</p>
+              ) : null}
+              {visible.map((model) => (
+                <label className="toggle" key={model.id}>
+                  <input
+                    type="checkbox"
+                    checked={modelIds.includes(model.id)}
+                    onChange={(event) =>
+                      setModelIds((current) =>
+                        event.target.checked ? uniqueIds([...current, model.id]) : current.filter((id) => id !== model.id),
+                      )
+                    }
+                  />
+                  <span>
+                    {model.id}
+                    <span className="meta"> {model.providers.join(", ")}</span>
+                  </span>
+                </label>
+              ))}
+              {missing.map((id) => (
+                <label className="toggle" key={id}>
+                  <input
+                    type="checkbox"
+                    checked
+                    onChange={() => setModelIds((current) => current.filter((item) => item !== id))}
+                  />
+                  <span>
+                    {id}
+                    <span className="meta"> {m.channels_not_published()}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
           </>
         ) : null}
         <div className="row-actions">
-          <button className="primary" type="submit" disabled={busy || !name.trim()}>
+          <button className="primary" type="submit" disabled={busy || !name.trim() || (coverage === "models" && modelIds.length === 0)}>
             {busy ? m.busy_saving() : editing ? m.action_save_channel() : m.action_create_channel()}
           </button>
           {editing ? (
@@ -179,15 +246,37 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
   );
 }
 
+function channelCatalog(models: AdminPublishedModel[]): CatalogModel[] {
+  return models
+    .map((model) => ({
+      id: model.publicId,
+      providers: model.providers.map((provider) => provider.providerId),
+    }))
+    .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+}
+
+function providerChoices(plugins: AdminPlugin[], models: CatalogModel[]): string[] {
+  const ids = new Set<string>();
+  for (const plugin of plugins) {
+    if (plugin.id) {
+      ids.add(plugin.id);
+    }
+  }
+  for (const model of models) {
+    for (const providerId of model.providers) {
+      ids.add(providerId);
+    }
+  }
+  return [...ids].sort();
+}
+
+function uniqueIds(ids: string[]): string[] {
+  return [...new Set(ids)].sort();
+}
+
 function describeRule(rule: ChannelRule): string {
   if (rule.kind === "all") {
     return m.channels_rule_all();
   }
-  const parts = [
-    rule.providerId ? m.channels_rule_provider({ id: rule.providerId }) : "",
-    rule.prefix ? m.channels_rule_prefix({ prefix: rule.prefix }) : "",
-    rule.excludePrefix ? m.channels_rule_exclude({ prefix: rule.excludePrefix }) : "",
-    rule.chatOnly ? m.channels_rule_chat() : "",
-  ].filter((part) => part !== "");
-  return parts.length > 0 ? parts.join(", ") : m.channels_rule_match();
+  return rule.modelIds.length <= 4 ? rule.modelIds.join(", ") : m.count_rule_models({ count: rule.modelIds.length });
 }

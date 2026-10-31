@@ -10,8 +10,8 @@ import {
   type ProviderHandler,
 } from "@viateai/sdk";
 import { dispatchRouted, RouteError } from "./routing.js";
-import { parseRequestModel, resolvePublishedMembers } from "./catalog.js";
-import { channelMatchesModel, channelProviderLimit, type Channel } from "./channels.js";
+import { parseRequestModel } from "./catalog.js";
+import { channelMatchesModel, type Channel } from "./channels.js";
 import {
   classifyOutcome,
   endpointForCapability,
@@ -209,10 +209,12 @@ async function dispatch(
     if (channel === "denied") {
       throw Object.assign(new Error("channel not available"), { statusCode: 403 });
     }
-    const routeProviders = channel ? channelProviderLimit(channel.rule) : null;
     if (channel && options.store) {
       const requested = requestModelFrom(request.body);
-      if (requested && !modelAllowedByChannel(options.store, channel, requested, providers.keys(), capability)) {
+      if (
+        requested &&
+        !channelMatchesModel(channel.rule, parseRequestModel(requested, providers.keys()).modelId)
+      ) {
         throw Object.assign(new Error("model not available"), { statusCode: 403 });
       }
     }
@@ -250,7 +252,6 @@ async function dispatch(
       { body: request.body, headers, signal },
       clientAbort.signal,
       options.onUpstreamAuthFailure,
-      routeProviders ? new Set(routeProviders) : null,
     );
     const captured = isVideoSubmit(capability)
       ? await captureVideoJob(routed.exchange, routed, options.store, apiKey)
@@ -492,28 +493,6 @@ function publicCatalogFor(store: AdminStore | undefined, channel: Channel | null
     return store.listPublicCatalog();
   }
   return store.listChannelCatalog(channel);
-}
-
-function modelAllowedByChannel(
-  store: AdminStore,
-  channel: Channel,
-  requested: string,
-  loadedProviderIds: Iterable<string>,
-  capability: string,
-): boolean {
-  const parsed = parseRequestModel(requested, loadedProviderIds);
-  const members = resolvePublishedMembers(store, requested, loadedProviderIds);
-  const providerIds: string[] = [];
-  const seen: Record<string, true> = {};
-  for (const member of members) {
-    if (seen[member.providerId]) {
-      continue;
-    }
-    seen[member.providerId] = true;
-    providerIds.push(member.providerId);
-  }
-  const endpointTypes = providerIds.flatMap((providerId) => store.getAdvertisedEndpointTypes(providerId));
-  return channelMatchesModel(channel.rule, { id: parsed.modelId, providerIds, endpointTypes }, capability);
 }
 
 function sendUpstream(reply: FastifyReply, upstream: HttpExchange): FastifyReply {
