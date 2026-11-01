@@ -1,5 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "e36eb446055b5658271271eaef0679193fabfa90",
   "packages": {
     ".": {
       "release-type": "node",
@@ -9,7 +10,9 @@
       "extra-files": [
         { "type": "json", "path": "apps/server/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "apps/web/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/sdk/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/plugin-manager/package.json", "jsonpath": "$.version" }
       ]
     }
   }

@@ -1,8 +1,15 @@
 {
   "name": "@viateai/sdk",
   "version": "0.0.0",
-  "private": true,
+  "description": "Plugin contract for Viate providers.",
+  "license": "MIT",
+  "private": false,
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ViateAI/viate.git",
+    "directory": "packages/sdk"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -12,6 +19,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
