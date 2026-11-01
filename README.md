@@ -57,9 +57,9 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 
 ## HTTP
 
-`GET /health` returns `{ "status": "ok" }`.
+`GET /health` is always registered and returns `{ "status": "ok" }`.
 
-`GET /` is a 302 to `/portal`. `GET /portal` and `GET /admin` serve the built UI when it is present. `/api/portal` is the customer API and works without the admin password. `/api/admin` is the operator API.
+`GET /`, `GET /portal`, and `GET /admin` are registered only when a built admin `index.html` is loaded. Then `GET /` is a 302 to `/portal`, and `/portal` and `/admin` serve that UI. Without that UI, `GET /` is not a 302. `/api/portal` is the customer API and works without the admin password. `/api/admin` is the operator API.
 
 `/v1` routes:
 
@@ -101,7 +101,7 @@ Without `VIATE_ADMIN_PASSWORD`, every `/api/admin` route returns 503:
 
 Admin and portal mutations need a same-origin request and an `X-Viate-Csrf` header. Login needs a same-origin request. The check compares `Origin` to `X-Forwarded-Proto` (or the request protocol) plus `Host`. A public HTTPS proxy must forward `Host` and `X-Forwarded-Proto`.
 
-A key with no user skips balance and price checks. A key bound to a user checks the channel, then the price, then admission. A missing channel, a disallowed model, or a missing price does not admit.
+A key with no `userId` skips price lookup and `admitUser`. It does not skip the channel check. A key with no `channelId` is not denied. A denied channel, a model outside that channel's rule, or a missing price for a requested model rejects before admission. Price lookup and admission run only for a key bound to a user.
 
 ## Cookies
 
