@@ -448,7 +448,9 @@
   "users_password_reset": "Password reset.",
 
   "portal_account": "Account",
+  "portal_account_desc": "Your balance and password.",
   "portal_activity": "Activity",
+  "portal_activity_desc": "Charges and recent requests. Request logs expire after 7 days.",
   "portal_audio_hint": "Transcriptions are POST /v1/audio/transcriptions multipart file + model.",
   "portal_balance_label": "Balance",
   "portal_boot_title": "Unable to load account",

@@ -412,7 +412,9 @@
   "users_password_reset": "密码已重置。",
 
   "portal_account": "账户",
+  "portal_account_desc": "余额和密码。",
   "portal_activity": "活动",
+  "portal_activity_desc": "扣费和最近的请求。请求日志保留 7 天。",
   "portal_audio_hint": "转写是 POST /v1/audio/transcriptions，使用 multipart 的 file 和 model。",
   "portal_balance_label": "余额",
   "portal_boot_title": "无法加载账户",

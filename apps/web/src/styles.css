@@ -212,8 +212,9 @@ textarea {
 
 .app-shell {
   min-height: 100dvh;
+  min-width: 0;
   display: grid;
-  grid-template-columns: 232px 1fr;
+  grid-template-columns: minmax(0, 232px) minmax(0, 1fr);
 }
 
 .sidebar {
@@ -256,6 +257,17 @@ textarea {
   font-size: 0.75rem;
 }
 
+.sidebar-user {
+  margin: 4px 0 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.portal-identity {
+  display: none;
+}
+
 .nav {
   display: flex;
   flex-direction: column;
@@ -263,7 +275,8 @@ textarea {
   flex: 1;
 }
 
-.nav button {
+.nav button,
+.nav a {
   justify-content: flex-start;
   text-align: left;
   background: transparent;
@@ -271,14 +284,25 @@ textarea {
   min-height: 36px;
   color: var(--muted-foreground);
   font-weight: 500;
+  text-decoration: none;
 }
 
-.nav button:hover:not(:disabled) {
+.nav a {
+  display: flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 0 12px;
+}
+
+.nav button:hover:not(:disabled),
+.nav a:hover {
   background: var(--accent);
   color: var(--foreground);
 }
 
-.nav button[aria-current="page"] {
+.nav button[aria-current="page"],
+.nav a[aria-current="page"] {
   background: var(--background);
   border-color: var(--border);
   color: var(--foreground);
@@ -302,10 +326,13 @@ textarea {
 
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
   margin-bottom: 22px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .topbar-actions {
@@ -325,11 +352,14 @@ textarea {
 .page-heading {
   display: grid;
   gap: 4px;
+  min-width: 0;
+  flex: 1 1 12rem;
 }
 
 .page-desc {
   color: var(--muted-foreground);
   font-size: 0.9rem;
+  overflow-wrap: anywhere;
 }
 
 .logout-mobile {
@@ -339,6 +369,8 @@ textarea {
 .stack {
   display: grid;
   gap: 16px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .panel, .resource, .login {
@@ -351,6 +383,8 @@ textarea {
   padding: 16px;
   display: grid;
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .panel-header {
@@ -364,6 +398,8 @@ textarea {
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .resource-main {
@@ -382,6 +418,7 @@ textarea {
 .meta, .meta-list {
   color: var(--muted-foreground);
   font-size: 0.85rem;
+  overflow-wrap: anywhere;
 }
 
 .meta {
@@ -796,6 +833,8 @@ textarea {
 .form {
   display: grid;
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 form.panel .primary,
@@ -816,6 +855,7 @@ label {
   border-radius: var(--radius);
   overflow: hidden;
   width: fit-content;
+  min-width: 0;
   max-width: 100%;
   flex-wrap: wrap;
 }
@@ -1152,14 +1192,22 @@ label {
   }
 
   .app-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     padding-bottom: calc(220px + env(safe-area-inset-bottom));
+  }
+
+  .app-shell.portal-shell {
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
   }
 
   .sidebar { display: none; }
 
   .logout-mobile {
     display: inline-flex;
+  }
+
+  .portal-identity {
+    display: block;
   }
 
   .mobile-nav {
@@ -1175,15 +1223,26 @@ label {
     z-index: 5;
   }
 
-  .mobile-nav button {
+  .mobile-nav button,
+  .mobile-nav a {
     min-height: 52px;
     border: 0;
     background: transparent;
     font-size: 0.8rem;
     color: var(--muted-foreground);
+    text-decoration: none;
   }
 
-  .mobile-nav button[aria-current="page"] {
+  .mobile-nav a {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius);
+    padding: 0 8px;
+  }
+
+  .mobile-nav button[aria-current="page"],
+  .mobile-nav a[aria-current="page"] {
     color: var(--foreground);
     font-weight: 650;
   }
@@ -1263,7 +1322,14 @@ label {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin: 0 0 18px;
+  margin: 0;
+}
+
+.portal-balance-chip {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .portal-balance-amount {
@@ -1284,6 +1350,7 @@ label {
   margin: 0;
   padding: 0;
   min-width: 0;
+  min-inline-size: 0;
   display: grid;
   gap: 8px;
 }
@@ -1381,16 +1448,24 @@ label {
   min-width: 0;
 }
 
+.portal-shell {
+  overflow-x: clip;
+}
+
 .portal-example-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .portal-example {
   margin: 0;
+  min-width: 0;
+  max-width: 100%;
   max-height: 240px;
   overflow: auto;
   white-space: pre-wrap;

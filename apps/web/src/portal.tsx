@@ -39,6 +39,29 @@ function endpointLabel(endpoint: PortalEndpointType): string {
 
 const LATEST_ROWS = 5;
 
+const PORTAL_PAGES = ["keys", "activity", "account"] as const;
+
+type PortalPage = (typeof PORTAL_PAGES)[number];
+
+function pageFromLocation(): PortalPage {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/portal/activity") return "activity";
+  if (path === "/portal/account") return "account";
+  return "keys";
+}
+
+function pagePath(page: PortalPage): string {
+  if (page === "activity") return "/portal/activity";
+  if (page === "account") return "/portal/account";
+  return "/portal";
+}
+
+function pageLabel(page: PortalPage): string {
+  if (page === "activity") return m.portal_activity();
+  if (page === "account") return m.portal_account();
+  return m.portal_keys();
+}
+
 export function PortalApp() {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState<GatewayUser | null>(null);
@@ -168,24 +191,21 @@ function PortalHome({
   onUser: (user: GatewayUser) => void;
   onLoggedOut: () => void;
 }) {
-  const [usage, setUsage] = useState<PortalUsage | null>(null);
-  const [keys, setKeys] = useState<ClientApiKey[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-
-  async function refresh() {
-    const [usageResult, keyResult] = await Promise.all([
-      api<PortalUsage>("/api/portal/usage"),
-      api<{ apiKeys: ClientApiKey[] }>("/api/portal/keys"),
-    ]);
-    setUsage(usageResult);
-    setKeys(keyResult.apiKeys);
-    onUser(usageResult.user);
-  }
+  const [page, setPage] = useState<PortalPage>(pageFromLocation);
 
   useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_account()));
+    const sync = () => setPage(pageFromLocation());
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
   }, []);
+
+  function openPage(next: PortalPage) {
+    const path = pagePath(next);
+    if ((window.location.pathname.replace(/\/+$/, "") || "/") !== path) {
+      history.pushState(null, "", path);
+    }
+    setPage(next);
+  }
 
   async function logout() {
     try {
@@ -197,75 +217,163 @@ function PortalHome({
     onLoggedOut();
   }
 
-  const balance = usage?.user.balanceUsd ?? user.balanceUsd;
-
   return (
-    <main className="main">
-      <div className="topbar" aria-label={m.portal_account()}>
-        <div className="page-heading">
-          <h1>{user.email}</h1>
-          <p className="page-desc">{user.name}</p>
+    <div className="app-shell portal-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">V</span>
+          <div>
+            <div className="brand-name">Viate</div>
+            <div className="brand-sub">{m.portal_brand()}</div>
+            <p className="sidebar-user">{user.email}</p>
+          </div>
         </div>
-        <div className="topbar-actions">
-          <LocaleSwitch />
+        <nav className="nav" aria-label={m.portal_login_title()}>
+          <PortalNav page={page} onNavigate={openPage} />
+        </nav>
+        <div className="sidebar-footer">
           <button className="ghost" type="button" onClick={() => void logout()}>
             {m.action_log_out()}
           </button>
         </div>
-      </div>
+      </aside>
+      <main className="main">
+        <div className="topbar">
+          <div className="page-heading">
+            <h1>{pageLabel(page)}</h1>
+            <p className="meta portal-identity">{user.email}</p>
+            <p className="page-desc">
+              {page === "activity" ? m.portal_activity_desc() : page === "account" ? m.portal_account_desc() : m.portal_keys_hint()}
+            </p>
+          </div>
+          <div className="topbar-actions">
+            {page === "account" ? null : <BalanceChip balance={user.balanceUsd} />}
+            <LocaleSwitch />
+            <button className="logout-mobile ghost" type="button" onClick={() => void logout()}>
+              {m.action_log_out()}
+            </button>
+          </div>
+        </div>
+        {page === "keys" ? <KeysPanel /> : null}
+        {page === "activity" ? <ActivityPage onUser={onUser} /> : null}
+        {page === "account" ? <AccountPage user={user} onUser={onUser} /> : null}
+      </main>
+      <nav className="mobile-nav" aria-label={m.portal_login_title()}>
+        <PortalNav page={page} onNavigate={openPage} />
+      </nav>
+    </div>
+  );
+}
+
+function PortalNav({ page, onNavigate }: { page: PortalPage; onNavigate: (page: PortalPage) => void }) {
+  return PORTAL_PAGES.map((item) => (
+    <a
+      key={item}
+      href={pagePath(item)}
+      aria-current={page === item ? "page" : undefined}
+      onClick={(event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        onNavigate(item);
+      }}
+    >
+      {pageLabel(item)}
+    </a>
+  ));
+}
+
+function BalanceChip({ balance }: { balance: string }) {
+  return (
+    <p className="portal-balance-chip">
+      <span className="visually-hidden">{m.portal_balance_label()} </span>
+      {balance} USD
+    </p>
+  );
+}
+
+function AccountPage({ user, onUser }: { user: GatewayUser; onUser: (user: GatewayUser) => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api<PortalUsage>("/api/portal/usage")
+      .then((result) => {
+        if (!cancelled) onUser(result.user);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(isApiError(err) ? err.message : m.error_load_account());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [onUser]);
+
+  return (
+    <section className="stack">
       {notice ? <p className="banner ok" role="status">{notice}</p> : null}
       {error ? <p className="banner error" role="alert">{error}</p> : null}
       <p className="portal-balance">
         <span className="visually-hidden">{m.portal_balance_label()} </span>
-        <span className="portal-balance-amount">{balance}</span>
+        <span className="portal-balance-amount">{user.balanceUsd}</span>
         <span className="portal-balance-unit">USD</span>
       </p>
-      <section className="stack">
-        <KeysPanel
-          keys={keys}
-          onError={setError}
-          onNotice={setNotice}
-          onChanged={refresh}
-        />
-        <ActivityPanel ledger={usage?.ledger ?? null} requests={usage?.requests ?? null} />
-        <PasswordPanel onError={setError} onNotice={setNotice} />
-      </section>
-    </main>
+      <p className="meta">{user.email} · {user.name}</p>
+      <PasswordPanel onError={setError} onNotice={setNotice} />
+    </section>
   );
 }
 
-function ActivityPanel({
-  ledger,
-  requests,
-}: {
-  ledger: LedgerEntry[] | null;
-  requests: UserUsageRequest[] | null;
-}) {
+function ActivityPage({ onUser }: { onUser: (user: GatewayUser) => void }) {
+  const [usage, setUsage] = useState<PortalUsage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api<PortalUsage>("/api/portal/usage")
+      .then((result) => {
+        if (cancelled) return;
+        setUsage(result);
+        onUser(result.user);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(isApiError(err) ? err.message : m.error_load_account());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [onUser]);
+
+  const ledger = usage?.ledger ?? null;
+  const requests = usage?.requests ?? null;
   const summary = ledger && requests
     ? m.count_activity({ charges: String(ledger.length), requests: String(requests.length) })
     : m.busy_loading();
 
   return (
-    <section className="panel portal-activity">
-      <div className="panel-header">
-        <h2>{m.portal_activity()}</h2>
-        <p className="meta">{summary}</p>
-        <p className="meta">{m.portal_expire()}</p>
+    <section className="stack portal-activity">
+      {error ? <p className="banner error" role="alert">{error}</p> : null}
+      <p className="meta">{summary}</p>
+      <div className="panel">
+        <LogBlock
+          title={m.portal_charges()}
+          rows={ledger}
+          empty={m.portal_no_charges()}
+          table={(rows) => <ChargeTable rows={rows} />}
+          cards={(rows) => <ChargeCards rows={rows} />}
+        />
       </div>
-      <LogBlock
-        title={m.portal_charges()}
-        rows={ledger}
-        empty={m.portal_no_charges()}
-        table={(rows) => <ChargeTable rows={rows} />}
-        cards={(rows) => <ChargeCards rows={rows} />}
-      />
-      <LogBlock
-        title={m.portal_recent()}
-        rows={requests}
-        empty={m.portal_no_requests()}
-        table={(rows) => <RequestTable rows={rows} />}
-        cards={(rows) => <RequestCards rows={rows} />}
-      />
+      <div className="panel">
+        <LogBlock
+          title={m.portal_recent()}
+          rows={requests}
+          empty={m.portal_no_requests()}
+          table={(rows) => <RequestTable rows={rows} />}
+          cards={(rows) => <RequestCards rows={rows} />}
+        />
+      </div>
     </section>
   );
 }
@@ -408,25 +516,24 @@ function RequestCards({ rows }: { rows: UserUsageRequest[] }) {
   );
 }
 
-function KeysPanel({
-  keys,
-  onError,
-  onNotice,
-  onChanged,
-}: {
-  keys: ClientApiKey[] | null;
-  onError: (value: string | null) => void;
-  onNotice: (value: string | null) => void;
-  onChanged: () => Promise<void>;
-}) {
+function KeysPanel() {
   const [name, setName] = useState("");
   const [channels, setChannels] = useState<PortalChannel[] | null>(null);
   const [channelId, setChannelId] = useState("");
+  const [keys, setKeys] = useState<ClientApiKey[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState<{ name: string; secret: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const selected = channels?.find((channel) => channel.id === channelId) ?? null;
 
+  async function refresh() {
+    const result = await api<{ apiKeys: ClientApiKey[] }>("/api/portal/keys");
+    setKeys(result.apiKeys);
+  }
+
   useEffect(() => {
+    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_keys()));
     api<{ channels: PortalChannel[] }>("/api/portal/channels")
       .then((result) => {
         setChannels(result.channels);
@@ -434,22 +541,20 @@ function KeysPanel({
           result.channels.some((channel) => channel.id === current) ? current : result.channels[0]?.id ?? "",
         );
       })
-      .catch((err) => onError(isApiError(err) ? err.message : m.error_load_channels()));
-  }, [onError]);
+      .catch((err) => setError(isApiError(err) ? err.message : m.error_load_channels()));
+  }, []);
 
   return (
     <section className="panel stack portal-keys">
-      <div className="panel-header">
-        <h2>{m.portal_keys()}</h2>
-        <p className="meta">{m.portal_keys_hint()}</p>
-      </div>
+      {notice ? <p className="banner ok" role="status">{notice}</p> : null}
+      {error ? <p className="banner error" role="alert">{error}</p> : null}
       <form
         className="form"
         onSubmit={async (event) => {
           event.preventDefault();
           setBusy(true);
-          onError(null);
-          onNotice(null);
+          setError(null);
+          setNotice(null);
           try {
             const result = await api<{ apiKey: ClientApiKey; secret: string }>("/api/portal/keys", {
               method: "POST",
@@ -457,10 +562,10 @@ function KeysPanel({
             });
             setName("");
             setSecret({ name: result.apiKey.name, secret: result.secret });
-            await onChanged();
-            onNotice(m.portal_copy_once());
+            await refresh();
+            setNotice(m.portal_copy_once());
           } catch (err) {
-            onError(isApiError(err) ? err.message : m.error_create());
+            setError(isApiError(err) ? err.message : m.error_create());
           } finally {
             setBusy(false);
           }
@@ -530,23 +635,23 @@ function KeysPanel({
               </div>
             </div>
             <div className="row-actions">
-              <button
-                className="danger"
-                type="button"
-                onClick={() => {
-                  void (async () => {
-                    onError(null);
-                    try {
-                      await api(`/api/portal/keys/${key.id}`, { method: "DELETE" });
-                      if (secret?.name === key.name) setSecret(null);
-                      await onChanged();
-                      onNotice(m.portal_revoked());
-                    } catch (err) {
-                      onError(isApiError(err) ? err.message : m.error_revoke());
-                    }
-                  })();
-                }}
-              >
+            <button
+              className="danger"
+              type="button"
+              onClick={() => {
+                void (async () => {
+                  setError(null);
+                  try {
+                    await api(`/api/portal/keys/${key.id}`, { method: "DELETE" });
+                    if (secret?.name === key.name) setSecret(null);
+                    await refresh();
+                    setNotice(m.portal_revoked());
+                  } catch (err) {
+                    setError(isApiError(err) ? err.message : m.error_revoke());
+                  }
+                })();
+              }}
+            >
                 {m.action_revoke()}
               </button>
             </div>
