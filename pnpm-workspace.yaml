@@ -1,3 +1,6 @@
 packages:
   - "apps/*"
   - "packages/*"
+engineStrict: true
+allowBuilds:
+  esbuild: false

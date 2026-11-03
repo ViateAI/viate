@@ -5,7 +5,7 @@ Gateway for OpenAI-shaped `/v1` traffic. Provider capabilities come from plugins
 ## Requirements
 
 - Node.js `>=24`
-- pnpm `9.12.0`
+- pnpm `12.16.1`
 
 ## Local
 
@@ -144,16 +144,17 @@ Install rejects a package with no `viate.entry`. The entry must export `definePl
 
 Subcommands are `plugin list`, `plugin add <source>`, `plugin remove <name>`, and `plugin update <name>`. `--data-dir <path>` (or `--data-dir=<path>`) overrides the data directory for that invocation. `<source>` is passed to `pnpm add`. `<name>` is the installed package name and must not start with `-`.
 
-The repo script is `pnpm viate`, which runs `pnpm --filter @viateai/cli run viate --`. On pnpm 9.12.0 these do not reach the parser:
+The repo script is `pnpm viate`, which runs `pnpm --filter @viateai/cli run viate --`. On pnpm 12.16.1 that script inserts a `--` before the arguments, so these do not reach the parser:
 
 ```bash
+pnpm viate plugin list
 pnpm viate -- plugin list
 pnpm viate -- plugin add <source>
 pnpm viate -- plugin remove <name>
 pnpm viate -- plugin update <name>
 ```
 
-`pnpm viate -- plugin list` becomes `node dist/main.js "--" "--" "plugin" "list"`. The parser requires the first argument to be `plugin`, so a leading `--` is a usage error. `pnpm viate plugin list` still inserts one `--`.
+`pnpm viate plugin list` becomes `node dist/main.js "--" "plugin" "list"`. `pnpm viate -- plugin list` becomes `node dist/main.js "--" "--" "plugin" "list"`. The parser requires the first argument to be `plugin`, so a leading `--` is a usage error.
 
 After `pnpm build`, call the built entry. This argv is `plugin list` with no leading `--`:
 

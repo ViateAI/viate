@@ -22,7 +22,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
       - uses: pnpm/action-setup@v4
         with:
-          version: 9.12.0
+          version: 12.16.1
       - uses: actions/setup-node@v4
         with:
           node-version: 24

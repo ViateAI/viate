@@ -23,7 +23,10 @@ const DROP_ENV: Record<string, true> = {
 };
 
 export function pluginSubprocessEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const next: NodeJS.ProcessEnv = { npm_config_ignore_scripts: "true" };
+  const next: NodeJS.ProcessEnv = {
+    npm_config_ignore_scripts: "true",
+    pnpm_config_ignoreScripts: "true",
+  };
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined || DROP_ENV[key]) {
       continue;
@@ -33,6 +36,8 @@ export function pluginSubprocessEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     }
     next[key] = value;
   }
+  next.npm_config_ignore_scripts = "true";
+  next.pnpm_config_ignoreScripts = "true";
   return next;
 }
 

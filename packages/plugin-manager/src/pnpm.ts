@@ -32,7 +32,19 @@ export async function ensureHostSdkPeerRule(dir: string): Promise<void> {
     join(dir, ".npmrc"),
     ["ignore-scripts=true", "link-workspace-packages=false"].join("\n") + "\n",
   );
-  await writeFile(join(dir, "pnpm-workspace.yaml"), 'packages:\n  - "."\n');
+  await writeFile(
+    join(dir, "pnpm-workspace.yaml"),
+    [
+      "packages:",
+      '  - "."',
+      "ignoreScripts: true",
+      "linkWorkspacePackages: false",
+      "strictDepBuilds: false",
+      "minimumReleaseAge: 0",
+      "blockExoticSubdeps: false",
+      "",
+    ].join("\n"),
+  );
   await writeFile(join(dir, ".pnpmfile.cjs"), hostSdkPnpmfile());
 }
 

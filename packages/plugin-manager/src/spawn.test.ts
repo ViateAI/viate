@@ -18,6 +18,7 @@ describe("pluginSubprocessEnv", () => {
     assert.equal(env.VIATE_DATA_DIR, "/data");
     assert.equal(env.SAFE, "ok");
     assert.equal(env.npm_config_ignore_scripts, "true");
+    assert.equal(env.pnpm_config_ignoreScripts, "true");
     assert.equal(env.VIATE_ADMIN_PASSWORD, undefined);
     assert.equal(env.VIATE_UPSTREAM_API_KEY, undefined);
     assert.equal(env.NPM_TOKEN, undefined);
