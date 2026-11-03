@@ -33,14 +33,22 @@ pnpm test
 
 ## Docker
 
-`compose.yaml` builds the local `Dockerfile`. This repo does not publish a registry image.
+`compose.yaml` sets `image: ghcr.io/viateai/viate:latest` and still builds the local `Dockerfile`.
 
 ```bash
 export VIATE_ADMIN_PASSWORD='replace-me'
 docker compose up -d --build
 ```
 
-`VIATE_ADMIN_PASSWORD` can also live in a gitignored `.env` beside `compose.yaml`. Compose reads `${VIATE_ADMIN_PASSWORD:-}`. Empty means admin stays disabled.
+`docker compose up -d --build` builds locally and tags `ghcr.io/viateai/viate:latest`. `VIATE_ADMIN_PASSWORD` comes from the environment or a gitignored `.env` beside `compose.yaml`. `.env.example` is the template. Compose reads `${VIATE_ADMIN_PASSWORD:-}`. Empty means admin stays disabled.
+
+A published GitHub Release builds `ghcr.io/viateai/viate:latest` and `ghcr.io/viateai/viate:<release tag>` from that tag. `workflow_dispatch` pushes only `ghcr.io/viateai/viate:sha-<full commit sha>` and does not move `:latest`.
+
+To run the published image without a local build:
+
+```bash
+docker compose pull && docker compose up -d
+```
 
 The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMIN_UI_DIST=/app/web`, and publishes `4317`. State is the `viate-data` volume mounted at `/data`. `viate` is on `PATH` inside the image.
 
