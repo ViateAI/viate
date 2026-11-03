@@ -1,5 +1,6 @@
 services:
   server:
+    image: ghcr.io/viateai/viate:latest
     build:
       context: .
       dockerfile: Dockerfile
