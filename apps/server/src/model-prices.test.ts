@@ -104,6 +104,35 @@ describe("model price catalog", () => {
     });
   });
 
+  it("stores cache_read when present and doubles it only for a fast suffix", () => {
+    const rows = modelPriceRowsFromDocument({
+      xai: {
+        models: {
+          "grok-4.7": { cost: { input: 2, output: 6, cache_read: 0.5 } },
+          "plain-4": { cost: { input: 2, output: 6 } },
+        },
+      },
+    });
+    assert.equal(rows.find((row) => row.modelId === "grok-4.7")?.cacheReadNanoPerMillion, 500_000_000);
+    assert.equal("cacheReadNanoPerMillion" in (rows.find((row) => row.modelId === "plain-4") ?? {}), false);
+
+    const index = indexModelPrices(rows);
+    assert.deepEqual(lookupModelPrice(index, "grok-4.7-high"), {
+      inputNanoPerMillion: 2_000_000_000,
+      outputNanoPerMillion: 6_000_000_000,
+      cacheReadNanoPerMillion: 500_000_000,
+    });
+    assert.deepEqual(lookupModelPrice(index, "grok-4.7-fast"), {
+      inputNanoPerMillion: 4_000_000_000,
+      outputNanoPerMillion: 12_000_000_000,
+      cacheReadNanoPerMillion: 1_000_000_000,
+    });
+    assert.deepEqual(lookupModelPrice(index, "plain-4"), {
+      inputNanoPerMillion: 2_000_000_000,
+      outputNanoPerMillion: 6_000_000_000,
+    });
+  });
+
   it("prefers a later vendor price over an earlier reseller id", () => {
     const index = indexModelPrices(
       modelPriceRowsFromDocument({
@@ -188,7 +217,7 @@ describe("model price catalog", () => {
           throw new Error("network down");
         }
         return Response.json({
-          openrouter: { models: { "openai/gpt-4o": { cost: { input: 1, output: 2 } } } },
+          openrouter: { models: { "openai/gpt-4o": { cost: { input: 1, output: 2, cache_read: 0.5 } } } },
         });
       },
     });
@@ -204,11 +233,13 @@ describe("model price catalog", () => {
       assert.deepEqual(catalog.lookup("openai/gpt-4o"), {
         inputNanoPerMillion: 1_000_000_000,
         outputNanoPerMillion: 2_000_000_000,
+        cacheReadNanoPerMillion: 500_000_000,
       });
       assert.deepEqual(captured, GPT4O);
       const saved = store.listModelPrices();
       assert.equal(saved.rows.length, 1);
       assert.equal(saved.rows[0]?.inputNanoPerMillion, 1_000_000_000);
+      assert.equal(saved.rows[0]?.cacheReadNanoPerMillion, 500_000_000);
       assert.notEqual(saved.fetchedAt, null);
       store.setModelPriceOverride("grok-4.7-build-fast", "4.50", "9");
       assert.deepEqual(catalog.lookup("grok-4.7-build-fast"), {

@@ -194,6 +194,35 @@ describe("AdminStore users", { concurrency: false }, () => {
     assert.throws(() => store.admitUser(user.id), (error: unknown) => statusCode(error) === 402);
   });
 
+  it("bills priced cache reads below the input rate and keeps unpriced cache reads inside input", () => {
+    const user = store.createUser({ email: "cache@example.com", name: "Cache", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    store.admitUser(user.id);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "cache-priced",
+      inputTokens: 1000,
+      outputTokens: 0,
+      cacheReadTokens: 800,
+      inputNanoPerMillion: 3_000_000_000,
+      outputNanoPerMillion: 0,
+      cacheReadNanoPerMillion: 300_000_000,
+    });
+    assert.equal(readBalanceNano(dataDir, user.id), 1_000_000_000 - 840_000);
+
+    store.admitUser(user.id);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "cache-unpriced",
+      inputTokens: 1000,
+      outputTokens: 0,
+      cacheReadTokens: 800,
+      inputNanoPerMillion: 3_000_000_000,
+      outputNanoPerMillion: 0,
+    });
+    assert.equal(readBalanceNano(dataDir, user.id), 1_000_000_000 - 840_000 - 3_000_000);
+  });
+
   it("keeps unbound keys unbound and verifies a key bound to a user", () => {
     const user = store.createUser({ email: "keys@example.com", name: "Keys", password: "password1" });
     const legacy = store.createApiKey("legacy");
@@ -598,6 +627,62 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
       headers: { authorization: `Bearer ${payerKey}` },
     });
     assert.equal(disabledModels.statusCode, 403);
+  });
+
+  it("bills cached prompt tokens at the captured cache-read price", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "viate-users-cache-read-"));
+    const cacheStore = await AdminStore.open(dir);
+    const cacheUpstream = await listen((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "chatcmpl-cache",
+          choices: [{ message: { content: "ok" } }],
+          usage: { prompt_tokens: 100, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 80 } },
+        }),
+      );
+    });
+    enablePublished(cacheStore, { baseUrl: cacheUpstream.url, apiKey: "env-key" });
+    const user = cacheStore.createUser({ email: "cache-http@example.com", name: "Cache", password: "password1" });
+    cacheStore.grantUsd(user.id, "1.00");
+    const secret = cacheStore.createApiKey("cache", user.id).secret;
+    const cacheApp = await buildApp({
+      logger: false,
+      pluginManager: emptyPlugins(),
+      providers: [billingProvider()],
+      store: cacheStore,
+      adminPassword: "correct-horse",
+      adminEnabled: true,
+      modelPrices: {
+        ready: true,
+        lookup(modelId: string) {
+          if (modelId !== "demo") {
+            return null;
+          }
+          return {
+            inputNanoPerMillion: 2_000_000_000,
+            outputNanoPerMillion: 0,
+            cacheReadNanoPerMillion: 100_000_000,
+          };
+        },
+      },
+    });
+    try {
+      const billed = await cacheApp.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${secret}` },
+        payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
+      });
+      assert.equal(billed.statusCode, 200);
+      await waitForUser(cacheStore, user.id, "0.999952");
+      assert.equal(readBalanceNano(dir, user.id), 1_000_000_000 - 48_000);
+    } finally {
+      await cacheApp.close();
+      await cacheUpstream.close();
+      cacheStore.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("does not reserve inflight for an invalid JSON body or an unknown route", async () => {

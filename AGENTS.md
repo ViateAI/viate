@@ -69,7 +69,7 @@ Public routes are `GET /health`, `GET /` redirecting to `/portal`, and OpenAI-sh
 
 `/v1` accepts `Authorization: Bearer` or `x-api-key` only. Admin cookies do not authenticate `/v1`. No client keys means 401.
 
-A key with no user skips balance and price checks. A bound key checks the channel, then the price, then admission. The channel allows every published model, or an exact model-id list that does not grow when later models are published. It does not name a provider. Routing uses the published connections for that model id. A missing channel, a disallowed model, or a missing price does not admit. Settlement uses the rates captured for that request and, when the key has a channel, its ratio.
+A key with no user skips balance and price checks. A bound key checks the channel, then the price, then admission. The channel allows every published model, or an exact model-id list that does not grow when later models are published. It does not name a provider. Routing uses the published connections for that model id. A missing channel, a disallowed model, or a missing price does not admit. Settlement uses the rates captured for that request and, when the key has a channel, its ratio. A captured cache-read price, including zero, charges cache-read tokens at that rate and the remaining input tokens at the input rate. Cache reads above the input count are not billed. No cache-read price leaves those tokens inside the input charge. Cache writes stay in the input bucket.
 
 Admin UI is `GET /admin`. `/api/admin/*` requires `VIATE_ADMIN_PASSWORD` and is 503 without it. Mutations need a same-origin request plus `X-Viate-Csrf`. The admin console does not issue client keys; customers create them at `/portal`.
 

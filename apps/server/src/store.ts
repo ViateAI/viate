@@ -1837,16 +1837,15 @@ export class AdminStore {
     requestId: string;
     inputTokens: number;
     outputTokens: number;
+    cacheReadTokens?: number;
     inputNanoPerMillion: number;
     outputNanoPerMillion: number;
+    cacheReadNanoPerMillion?: number;
     perRequestNano?: number;
     ratioNumerator?: number;
     ratioDenominator?: number;
   }): void {
-    const base =
-      chargeNano(input.inputTokens, input.inputNanoPerMillion) +
-      chargeNano(input.outputTokens, input.outputNanoPerMillion) +
-      asNano(input.perRequestNano);
+    const base = usageBaseNano(input);
     const charge = applyChannelRatio(base, input.ratioNumerator ?? 1, input.ratioDenominator ?? 1);
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
@@ -1895,7 +1894,12 @@ export class AdminStore {
   }
 
   replaceModelPrices(
-    rows: Array<{ modelId: string; inputNanoPerMillion: number; outputNanoPerMillion: number }>,
+    rows: Array<{
+      modelId: string;
+      inputNanoPerMillion: number;
+      outputNanoPerMillion: number;
+      cacheReadNanoPerMillion?: number;
+    }>,
     fetchedAt: string,
     source = "https://models.dev/api.json",
   ): void {
@@ -1903,11 +1907,18 @@ export class AdminStore {
     try {
       this.db.prepare("DELETE FROM model_prices").run();
       const insert = this.db.prepare(
-        `INSERT INTO model_prices (model_id, input_nano_per_million, output_nano_per_million, updated_at)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO model_prices (
+           model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, updated_at
+         ) VALUES (?, ?, ?, ?, ?)`,
       );
       for (const row of rows) {
-        insert.run(row.modelId, row.inputNanoPerMillion, row.outputNanoPerMillion, fetchedAt);
+        insert.run(
+          row.modelId,
+          row.inputNanoPerMillion,
+          row.outputNanoPerMillion,
+          row.cacheReadNanoPerMillion ?? null,
+          fetchedAt,
+        );
       }
       this.db
         .prepare(
@@ -1924,17 +1935,26 @@ export class AdminStore {
 
   listModelPrices(): {
     fetchedAt: string | null;
-    rows: Array<{ modelId: string; inputNanoPerMillion: number; outputNanoPerMillion: number }>;
+    rows: Array<{
+      modelId: string;
+      inputNanoPerMillion: number;
+      outputNanoPerMillion: number;
+      cacheReadNanoPerMillion?: number;
+    }>;
   } {
     const meta = this.db.prepare("SELECT fetched_at FROM model_price_meta WHERE id = 1").get() as
       | { fetched_at: string }
       | undefined;
     const rows = this.db
-      .prepare("SELECT model_id, input_nano_per_million, output_nano_per_million FROM model_prices")
+      .prepare(
+        `SELECT model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million
+         FROM model_prices`,
+      )
       .all() as Array<{
       model_id: string;
       input_nano_per_million: number | bigint;
       output_nano_per_million: number | bigint;
+      cache_read_nano_per_million: number | bigint | null;
     }>;
     return {
       fetchedAt: meta?.fetched_at ?? null,
@@ -1942,6 +1962,9 @@ export class AdminStore {
         modelId: row.model_id,
         inputNanoPerMillion: numberFrom(row.input_nano_per_million),
         outputNanoPerMillion: numberFrom(row.output_nano_per_million),
+        ...(row.cache_read_nano_per_million == null
+          ? {}
+          : { cacheReadNanoPerMillion: numberFrom(row.cache_read_nano_per_million) }),
       })),
     };
   }
@@ -2753,6 +2776,10 @@ function migrateUsers(db: DatabaseSync): void {
   if (!overrideColumns.some((column) => column.name === "per_request_nano")) {
     db.exec("ALTER TABLE model_price_overrides ADD COLUMN per_request_nano INTEGER");
   }
+  const priceColumns = db.prepare("PRAGMA table_info(model_prices)").all() as Array<{ name: string }>;
+  if (!priceColumns.some((column) => column.name === "cache_read_nano_per_million")) {
+    db.exec("ALTER TABLE model_prices ADD COLUMN cache_read_nano_per_million INTEGER");
+  }
   const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
   if (!apiKeyColumns.some((column) => column.name === "user_id")) {
     db.exec("ALTER TABLE api_keys ADD COLUMN user_id TEXT REFERENCES users(id)");
@@ -2918,6 +2945,44 @@ function numberFrom(value: number | bigint | null | undefined): number {
     return Number(value);
   }
   return value ?? 0;
+}
+
+function usageBaseNano(input: {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  inputNanoPerMillion: number;
+  outputNanoPerMillion: number;
+  cacheReadNanoPerMillion?: number;
+  perRequestNano?: number;
+}): bigint {
+  const cacheRate = input.cacheReadNanoPerMillion;
+  if (typeof cacheRate !== "number" || !Number.isFinite(cacheRate) || cacheRate < 0) {
+    return (
+      chargeNano(input.inputTokens, input.inputNanoPerMillion) +
+      chargeNano(input.outputTokens, input.outputNanoPerMillion) +
+      asNano(input.perRequestNano)
+    );
+  }
+  let inputTokens = input.inputTokens;
+  let cacheTokens = 0;
+  const cacheReadTokens = input.cacheReadTokens;
+  if (
+    Number.isInteger(input.inputTokens) &&
+    input.inputTokens > 0 &&
+    typeof cacheReadTokens === "number" &&
+    Number.isInteger(cacheReadTokens) &&
+    cacheReadTokens > 0
+  ) {
+    cacheTokens = Math.min(cacheReadTokens, input.inputTokens);
+    inputTokens = input.inputTokens - cacheTokens;
+  }
+  return (
+    chargeNano(inputTokens, input.inputNanoPerMillion) +
+    chargeNano(cacheTokens, cacheRate) +
+    chargeNano(input.outputTokens, input.outputNanoPerMillion) +
+    asNano(input.perRequestNano)
+  );
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

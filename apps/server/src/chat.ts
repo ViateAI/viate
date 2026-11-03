@@ -31,6 +31,7 @@ export type ModelPriceLookup = {
   lookup(modelId: string): {
     inputNanoPerMillion: number;
     outputNanoPerMillion: number;
+    cacheReadNanoPerMillion?: number;
     perRequestNano?: number;
   } | null;
   ready: boolean;
@@ -163,11 +164,15 @@ async function dispatch(
   const billUserId = apiKey?.userId ?? null;
   let admitted = false;
   let billRequestId: string | null = null;
-  let billedRates: { inputNanoPerMillion: number; outputNanoPerMillion: number } | null = null;
+  let billedRates: {
+    inputNanoPerMillion: number;
+    outputNanoPerMillion: number;
+    cacheReadNanoPerMillion?: number;
+  } | null = null;
   let billedPerRequestNano = 0;
   let billedRatioNumerator = 1;
   let billedRatioDenominator = 1;
-  const settle = (inputTokens: number, outputTokens: number, includePerRequest = false) => {
+  const settle = (inputTokens: number, outputTokens: number, cacheReadTokens = 0, includePerRequest = false) => {
     if (!admitted || !billRequestId || !billUserId || !options.store) {
       return;
     }
@@ -177,8 +182,12 @@ async function dispatch(
       requestId: billRequestId,
       inputTokens,
       outputTokens,
+      cacheReadTokens,
       inputNanoPerMillion: rates?.inputNanoPerMillion ?? 0,
       outputNanoPerMillion: rates?.outputNanoPerMillion ?? 0,
+      ...(rates?.cacheReadNanoPerMillion != null
+        ? { cacheReadNanoPerMillion: rates.cacheReadNanoPerMillion }
+        : {}),
       perRequestNano: includePerRequest ? billedPerRequestNano : 0,
       ratioNumerator: billedRatioNumerator,
       ratioDenominator: billedRatioDenominator,
@@ -236,6 +245,9 @@ async function dispatch(
         billedRates = {
           inputNanoPerMillion: rate.inputNanoPerMillion,
           outputNanoPerMillion: rate.outputNanoPerMillion,
+          ...(rate.cacheReadNanoPerMillion != null
+            ? { cacheReadNanoPerMillion: rate.cacheReadNanoPerMillion }
+            : {}),
         };
         billedPerRequestNano = rate.perRequestNano ?? 0;
       }
@@ -261,7 +273,12 @@ async function dispatch(
     void tap
       .then((result) => {
         const succeeded = exchange.status >= 200 && exchange.status < 300;
-        settle(result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0, succeeded);
+        settle(
+          result.usage?.inputTokens ?? 0,
+          result.usage?.outputTokens ?? 0,
+          result.usage?.cacheReadTokens ?? 0,
+          succeeded,
+        );
         options.requestLogs?.record({
           id: billRequestId ?? undefined,
           startedAt,

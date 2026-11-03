@@ -9,6 +9,7 @@ const VENDOR_PROVIDER_IDS = ["openai", "anthropic", "google", "google-vertex", "
 export type ModelPriceRate = {
   inputNanoPerMillion: number;
   outputNanoPerMillion: number;
+  cacheReadNanoPerMillion?: number;
   perRequestNano?: number;
 };
 
@@ -67,6 +68,7 @@ export function indexModelPrices(rows: readonly ModelPriceRow[]): ModelPriceInde
     byId.set(row.modelId, {
       inputNanoPerMillion: row.inputNanoPerMillion,
       outputNanoPerMillion: row.outputNanoPerMillion,
+      ...(row.cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion: row.cacheReadNanoPerMillion } : {}),
     });
     const slash = row.modelId.lastIndexOf("/");
     if (slash <= 0 || slash >= row.modelId.length - 1) {
@@ -115,10 +117,18 @@ export function resolveModelPrice(
   }
   const inputNanoPerMillion = base.inputNanoPerMillion * 2;
   const outputNanoPerMillion = base.outputNanoPerMillion * 2;
-  if (!Number.isSafeInteger(inputNanoPerMillion) || !Number.isSafeInteger(outputNanoPerMillion)) {
+  const cacheReadNanoPerMillion =
+    base.cacheReadNanoPerMillion == null ? undefined : base.cacheReadNanoPerMillion * 2;
+  if (
+    !Number.isSafeInteger(inputNanoPerMillion) ||
+    !Number.isSafeInteger(outputNanoPerMillion) ||
+    (cacheReadNanoPerMillion != null && !Number.isSafeInteger(cacheReadNanoPerMillion))
+  ) {
     return null;
   }
-  return { inputNanoPerMillion, outputNanoPerMillion };
+  return cacheReadNanoPerMillion == null
+    ? { inputNanoPerMillion, outputNanoPerMillion }
+    : { inputNanoPerMillion, outputNanoPerMillion, cacheReadNanoPerMillion };
 }
 
 const SAME_PRICE_SEGMENTS: Record<string, true> = {
@@ -250,10 +260,16 @@ function priceRow(modelId: string, model: unknown): ModelPriceRow | null {
   }
   const inputNanoPerMillion = nanoPerMillionFromUsd("input" in cost ? cost.input : undefined);
   const outputNanoPerMillion = nanoPerMillionFromUsd("output" in cost ? cost.output : undefined);
+  const cacheReadNanoPerMillion = nanoPerMillionFromUsd("cache_read" in cost ? cost.cache_read : undefined);
   if (inputNanoPerMillion === null || outputNanoPerMillion === null) {
     return null;
   }
-  return { modelId, inputNanoPerMillion, outputNanoPerMillion };
+  return {
+    modelId,
+    inputNanoPerMillion,
+    outputNanoPerMillion,
+    ...(cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion } : {}),
+  };
 }
 
 function absorbProvider(chosen: Map<string, ModelPriceRow>, provider: unknown): void {
