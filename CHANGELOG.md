@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/ViateAI/viate/compare/v1.0.0...v1.0.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* deploy the server image without refetching metadata ([8906cc4](https://github.com/ViateAI/viate/commit/8906cc4e04f2fb26b2417e9a8e4aa4447d9c510e))
+
 ## 1.0.0 (2026-11-04)
 
 
