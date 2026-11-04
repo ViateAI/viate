@@ -15,7 +15,7 @@
     "build": "pnpm -r --filter @viateai/sdk --filter @viateai/plugin-manager --filter @viateai/cli --filter @viateai/web --filter @viateai/server build",
     "start": "pnpm --filter @viateai/server start",
     "viate": "pnpm --filter @viateai/cli run viate --",
-    "typecheck": "pnpm -r --filter @viateai/sdk --filter @viateai/plugin-manager --filter @viateai/cli --filter @viateai/web --filter @viateai/server typecheck",
-    "test": "pnpm -r --filter @viateai/sdk --filter @viateai/plugin-manager --filter @viateai/cli --filter @viateai/server test"
+    "typecheck": "pnpm -r --filter @viateai/sdk --filter @viateai/plugin-manager build && pnpm -r --filter @viateai/sdk --filter @viateai/plugin-manager --filter @viateai/cli --filter @viateai/web --filter @viateai/server typecheck",
+    "test": "pnpm -r --filter @viateai/sdk --filter @viateai/plugin-manager build && pnpm -r --filter @viateai/sdk --filter @viateai/plugin-manager --filter @viateai/cli --filter @viateai/server test"
   }
 }
