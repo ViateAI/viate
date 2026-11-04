@@ -176,6 +176,8 @@ The admin connection list returns `hasCredentials`, not the secret.
 | `packages/plugin-manager` | `@viateai/plugin-manager` |
 | `packages/cli` | `@viateai/cli` |
 
+`@viateai/sdk` is published to npm. `@viateai/server`, `@viateai/web`, `@viateai/plugin-manager`, and `@viateai/cli` are private.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
