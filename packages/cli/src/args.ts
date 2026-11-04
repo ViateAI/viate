@@ -31,6 +31,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       dataDir = value;
       continue;
     }
+    if (token === "--") {
+      continue;
+    }
     rest.push(token);
   }
 

@@ -46,7 +46,7 @@ pnpm build
 pnpm dev          # @viateai/server via tsx watch
 pnpm dev:web      # Vite on 5173, proxies /api and /health to 4317
 pnpm start        # built server
-pnpm viate -- plugin list
+pnpm viate plugin list
 ```
 
 Node tests use `node --import tsx --test`. There is no ESLint/Prettier toolchain; do not add one unless asked.

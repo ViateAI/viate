@@ -17,6 +17,21 @@ describe("parseArgs", () => {
     });
   });
 
+  it("ignores bare -- separators", () => {
+    assert.deepEqual(parseArgs(["--", "plugin", "list"]), {
+      dataDir: undefined,
+      command: { kind: "list" },
+    });
+    assert.deepEqual(parseArgs(["--", "--", "plugin", "list"]), {
+      dataDir: undefined,
+      command: { kind: "list" },
+    });
+    assert.deepEqual(parseArgs(["--", "--data-dir", "/tmp/viate", "--", "plugin", "add", "pkg"]), {
+      dataDir: "/tmp/viate",
+      command: { kind: "add", source: "pkg" },
+    });
+  });
+
   it("rejects leading-dash plugin sources and names", () => {
     assert.throws(() => parseArgs(["plugin", "add", "--reporter=json"]), /must not start with "-"/);
     assert.throws(() => parseArgs(["plugin", "remove", "-rf"]), /must not start with "-"/);
