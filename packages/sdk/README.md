@@ -4,16 +4,16 @@ Contract for a Viate provider plugin.
 
 On plugin install the gateway removes `@viateai/sdk` from that plugin's `dependencies`, `optionalDependencies`, and `peerDependencies`. `import "@viateai/sdk"` then resolves to the copy built into that gateway.
 
-For local typechecking, pin the gateway release you build against in both places:
+For local typechecking, set both ranges to the gateway release you build against:
 
 ```json
 {
   "type": "module",
   "peerDependencies": {
-    "@viateai/sdk": "0.1.0"
+    "@viateai/sdk": "<gateway release>"
   },
   "devDependencies": {
-    "@viateai/sdk": "0.1.0"
+    "@viateai/sdk": "<gateway release>"
   },
   "viate": {
     "id": "your-provider",
