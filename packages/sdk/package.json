@@ -1,6 +1,6 @@
 {
   "name": "@viateai/sdk",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "Plugin contract for Viate providers.",
   "license": "MIT",
   "private": false,
