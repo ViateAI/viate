@@ -26,7 +26,10 @@ RUN pnpm --filter @viateai/plugin-manager build
 RUN pnpm --filter @viateai/cli build
 RUN pnpm --filter @viateai/web build
 RUN pnpm --filter @viateai/server build
-RUN pnpm --filter @viateai/server deploy --prod --offline /out
+# The workspace lockfile was already checked online by pnpm install.
+# deploy writes a smaller lockfile and would refetch full metadata that
+# the offline store does not keep.
+RUN pnpm --filter @viateai/server deploy --prod --offline --trust-lockfile /out
 RUN cp -a apps/server/dist /out/dist
 RUN mkdir -p /out/web && cp -a apps/web/dist/. /out/web/
 RUN mkdir -p /out/cli && cp -a packages/cli/package.json /out/cli/package.json && cp -a packages/cli/dist /out/cli/dist
