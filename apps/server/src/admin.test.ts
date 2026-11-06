@@ -547,7 +547,8 @@ describe("admin API", () => {
 
   it("lists client API key prefixes, revokes them, and does not issue keys", async () => {
     const session = await login(app, "correct-horse");
-    const created = store.createApiKey("codex");
+    const user = store.createUser({ email: "codex@example.com", name: "Codex", password: "password1" });
+    const created = store.createApiKey("codex", user.id);
     assert.match(created.secret, /^viate_/);
 
     const listed = await authed(app, session, { method: "GET", url: "/api/admin/api-keys" });

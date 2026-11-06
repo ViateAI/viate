@@ -14,6 +14,7 @@ import { parseRequestModel } from "./catalog.js";
 import { channelMatchesModel, type Channel } from "./channels.js";
 import {
   classifyOutcome,
+  clientErrorMessage,
   endpointForCapability,
   isStreamRequest,
   requestModelFrom,
@@ -44,6 +45,7 @@ export type ChatRouteOptions = {
   requestLogs?: RequestLogRecorder;
   onUpstreamAuthFailure?: (connectionId: string) => void;
   modelPrices?: ModelPriceLookup;
+  userMaxInflight?: number;
 };
 
 type Capability =
@@ -75,6 +77,9 @@ export async function registerChatRoute(app: FastifyInstance, options: ChatRoute
     const apiKey = options.authenticateClient?.(clientSecretFrom(request)) ?? null;
     if (!apiKey) {
       return viateError(reply, 401, "invalid api key");
+    }
+    if (!apiKey.userId) {
+      return viateError(reply, 403, "api key is not bound to a user");
     }
     (request as AuthenticatedRequest).viateV1 = { apiKey };
   });
@@ -253,7 +258,7 @@ async function dispatch(
       }
     }
     if (billUserId && options.store) {
-      options.store.admitUser(billUserId);
+      options.store.admitUser(billUserId, options.userMaxInflight ?? 8);
       admitted = true;
       billRequestId = randomUUID();
     }
@@ -355,9 +360,9 @@ async function dispatch(
       return;
     }
     if (statusFromError) {
-      return viateError(reply, statusFromError, message);
+      return viateError(reply, statusFromError, clientErrorMessage(message));
     }
-    return viateError(reply, 500, message);
+    return viateError(reply, 500, clientErrorMessage(message));
   }
 }
 
@@ -431,7 +436,7 @@ async function pollVideo(
       responseBody: null,
       payloadTruncated: false,
     });
-    return viateError(reply, status, message);
+    return viateError(reply, status, clientErrorMessage(message));
   }
 }
 

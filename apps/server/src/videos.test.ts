@@ -8,6 +8,7 @@ import type { ProviderHandler } from "@viateai/sdk";
 import { buildApp, type App } from "./app.js";
 import type { ModelPriceLookup } from "./chat.js";
 import { AdminStore } from "./store.js";
+import { issueClient, zeroModelPrices } from "./test-support.js";
 
 type ProviderCall = { capability: string; body: unknown; connectionId: string };
 
@@ -35,7 +36,7 @@ describe("POST /v1/videos", () => {
         connectionId: fixture.connectionId,
         providerId: "fake-video",
         modelId: MODEL,
-        userId: null,
+        userId: fixture.userId,
         apiKeyId: fixture.apiKeyId,
         createdAt: fixture.store.getVideoRequest("vid-123")?.createdAt ?? "",
       });
@@ -212,7 +213,7 @@ describe("GET /v1/videos/:requestId", () => {
     }
   });
 
-  it("keeps an unbound job private to the key that submitted it", async () => {
+  it("keeps a job private to the user that submitted it", async () => {
     const fixture = await openVideoApp();
     try {
       await fixture.app.inject({
@@ -221,7 +222,7 @@ describe("GET /v1/videos/:requestId", () => {
         headers: { authorization: `Bearer ${fixture.secret}` },
         payload: { model: MODEL, prompt: "a lighthouse" },
       });
-      const otherUnbound = fixture.store.createApiKey("second").secret;
+      const otherUnbound = issueClient(fixture.store, "second").secret;
       const response = await fixture.app.inject({
         method: "GET",
         url: "/v1/videos/vid-123",
@@ -283,6 +284,7 @@ type VideoFixture = {
   store: AdminStore;
   dataDir: string;
   secret: string;
+  userId: string;
   apiKeyId: string;
   connectionId: string;
   calls: ProviderCall[];
@@ -294,7 +296,7 @@ async function openVideoApp(
 ): Promise<VideoFixture> {
   const dataDir = await mkdtemp(join(tmpdir(), "viate-videos-"));
   const store = await AdminStore.open(dataDir);
-  const created = store.createApiKey("videos");
+  const created = issueClient(store, "videos");
   const connection = store.createConnection("fake-video");
   store.putCredentials(connection.id, { token: "k" }, "fake");
   store.setActive(connection.id, true);
@@ -304,13 +306,14 @@ async function openVideoApp(
     logger: false,
     providers: [options.provider ?? videoProvider(calls)],
     store,
-    modelPrices: options.modelPrices,
+    modelPrices: options.modelPrices ?? zeroModelPrices,
   });
   return {
     app,
     store,
     dataDir,
     secret: created.secret,
+    userId: created.apiKey.userId ?? "",
     apiKeyId: created.apiKey.id,
     connectionId: connection.id,
     calls,

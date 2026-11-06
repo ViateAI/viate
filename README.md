@@ -62,6 +62,10 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 | `VIATE_ADMIN_PASSWORD` | unset | Enables `/api/admin`. No default |
 | `VIATE_ADMIN_UI_DIST` | built UI, if found | Directory that contains admin `index.html` |
 | `VIATE_PNPM` | `pnpm` | pnpm binary the installer spawns |
+| `VIATE_TRUST_PROXY` | `loopback,uniquelocal` | Addresses allowed to set `X-Forwarded-For`. `false` ignores it. `true` trusts every hop |
+| `VIATE_USER_MAX_INFLIGHT` | `8` | Per-user cap on requests in flight |
+| `VIATE_LOG_PAYLOADS` | off | Store prompt and response bodies with the request log |
+| `VIATE_REQUEST_LOG_RETENTION_DAYS` | `7` | How long request logs and stored bodies are kept |
 
 ## HTTP
 
@@ -89,6 +93,8 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 
 A provider method that is not implemented returns 404 `capability not supported`.
 
+Streaming `POST /v1/chat/completions` is forwarded with `stream_options.include_usage` set, so a completed stream can be billed. Other fields already in `stream_options` are kept.
+
 Video is an xAI-shaped async job, not OpenAI Sora. Submit on the three `POST` routes. A JSON success body with `request_id` is stored with the connection that served it. `GET /v1/videos/:requestId` polls that same connection with `{ "request_id": "<id>" }`.
 
 Advertised endpoint types label `GET /v1/models`. They do not close request routes. Known types are `openai`, `openai-response`, `openai-image`, `openai-audio`, and `openai-video`. The default advertisement is `openai` and `openai-response`.
@@ -107,9 +113,9 @@ Without `VIATE_ADMIN_PASSWORD`, every `/api/admin` route returns 503:
 { "error": { "message": "admin management is disabled", "type": "viate_error" } }
 ```
 
-Admin and portal mutations need a same-origin request and an `X-Viate-Csrf` header. Login needs a same-origin request. The check compares `Origin` to `X-Forwarded-Proto` (or the request protocol) plus `Host`. A public HTTPS proxy must forward `Host` and `X-Forwarded-Proto`.
+Admin and portal mutations need a same-origin request and an `X-Viate-Csrf` header. Login needs a same-origin request. The check compares `Origin` to `X-Forwarded-Proto` (or the request protocol) plus `Host`. A public HTTPS proxy must forward `Host`, `X-Forwarded-Proto`, and `X-Forwarded-For`. `VIATE_TRUST_PROXY` defaults to `loopback,uniquelocal`, so a proxy on localhost or a private address can set the client IP and a public client cannot. A hop count is rejected: this Fastify version does not honor one. Set the value to the proxy's address when that proxy connects from a public IP, or `false` when nothing sits in front. Portal login is limited per client address and email. Admin login is limited per client address.
 
-A key with no `userId` skips price lookup and `admitUser`. It does not skip the channel check. A key with no `channelId` is not denied. A denied channel, a model outside that channel's rule, or a missing price for a requested model rejects before admission. Price lookup and admission run only for a key bound to a user.
+Every client key belongs to a user. `POST /api/portal/keys` is the only way to issue one. A key whose `userId` is missing is rejected with 403 `api key is not bound to a user`. A key with no `channelId` is not denied. A denied channel, a model outside that channel's rule, or a missing price for a requested model rejects before admission. Price lookup and admission run for every accepted key. A user can have at most `VIATE_USER_MAX_INFLIGHT` requests in flight (default 8).
 
 ## Cookies
 
@@ -163,6 +169,7 @@ Default data directory is `~/.viate`. Docker uses `/data`.
 - SQLite: `$VIATE_DATA_DIR/viate.sqlite`
 - Connection secrets: AES-256-GCM, key file `$VIATE_DATA_DIR/credential.key`, mode `0600`
 - Plugin install state: `$VIATE_DATA_DIR/plugins/` (`active/`, `pending/`, `state.json`, lock)
+- Request metadata: `request_logs` in SQLite, kept for `VIATE_REQUEST_LOG_RETENTION_DAYS` (default 7). Prompt and response bodies are written under `$VIATE_DATA_DIR/request-logs/` only when `VIATE_LOG_PAYLOADS` is on (default off), and removed with the same retention.
 
 The admin connection list returns `hasCredentials`, not the secret.
 

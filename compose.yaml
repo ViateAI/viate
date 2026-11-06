@@ -11,6 +11,7 @@ services:
       PORT: "4317"
       VIATE_DATA_DIR: "/data"
       VIATE_ADMIN_PASSWORD: "${VIATE_ADMIN_PASSWORD:-}"
+      VIATE_TRUST_PROXY: "${VIATE_TRUST_PROXY:-loopback,uniquelocal}"
     volumes:
       - viate-data:/data
     stop_grace_period: 10s

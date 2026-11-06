@@ -86,6 +86,30 @@ describe("AdminStore users", { concurrency: false }, () => {
     assert.equal(store.listLedger(user.id).length, 2);
   });
 
+  it("honors a caller-supplied in-flight limit", () => {
+    const user = store.createUser({ email: "cap@example.com", name: "Cap", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    store.admitUser(user.id, 1);
+    assert.throws(() => store.admitUser(user.id, 1), (error: unknown) => statusCode(error) === 402);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "cap-release",
+      inputTokens: 0,
+      outputTokens: 0,
+      inputNanoPerMillion: 0,
+      outputNanoPerMillion: 0,
+    });
+    store.admitUser(user.id, 1);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "cap-release-2",
+      inputTokens: 0,
+      outputTokens: 0,
+      inputNanoPerMillion: 0,
+      outputNanoPerMillion: 0,
+    });
+  });
+
   it("blocks admission at balance 0, at eight in-flight calls, and when the user is disabled", () => {
     const user = store.createUser({ email: "admit@example.com", name: "Admit", password: "password1" });
     assert.throws(
@@ -223,17 +247,17 @@ describe("AdminStore users", { concurrency: false }, () => {
     assert.equal(readBalanceNano(dataDir, user.id), 1_000_000_000 - 840_000 - 3_000_000);
   });
 
-  it("keeps unbound keys unbound and verifies a key bound to a user", () => {
+  it("requires a user on a client key and verifies the binding", () => {
     const user = store.createUser({ email: "keys@example.com", name: "Keys", password: "password1" });
-    const legacy = store.createApiKey("legacy");
-    assert.equal(legacy.apiKey.userId, null);
-    assert.equal(store.verifyApiKey(legacy.secret)?.userId, null);
+    assert.throws(
+      () => store.createApiKey("legacy", " "),
+      (error: unknown) => statusCode(error) === 400 && error instanceof Error && error.message === "user is required",
+    );
+    assert.throws(() => store.createApiKey("missing", "no-such-user"), (error: unknown) => statusCode(error) === 404);
 
     const bound = store.createApiKey("bound", user.id);
     assert.equal(store.verifyApiKey(bound.secret)?.userId, user.id);
     assert.equal(store.listApiKeys(user.id).some((key) => key.id === bound.apiKey.id), true);
-    assert.equal(store.listApiKeys(user.id).some((key) => key.id === legacy.apiKey.id), false);
-    assert.throws(() => store.createApiKey("missing", "no-such-user"), (error: unknown) => statusCode(error) === 404);
   });
 
   it("clears inflight admissions when the store opens again", async () => {
@@ -537,17 +561,22 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     assert.deepEqual(body.channels[0]?.models, []);
   });
 
-  it("leaves unbound keys unchanged, bills a bound chat once, and blocks an empty balance", async () => {
-    const unbound = store.createApiKey("unbound").secret;
+  it("rejects a detached key, bills a bound chat once, and blocks an empty balance", async () => {
+    const legacyUser = store.createUser({ email: "legacy-key@example.com", name: "Legacy", password: "password1" });
+    const legacy = store.createApiKey("unbound", legacyUser.id);
+    const detached = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    detached.prepare("UPDATE api_keys SET user_id = NULL WHERE id = ?").run(legacy.apiKey.id);
+    detached.close();
+    const beforeOpen = upstreamCalls;
     const openChat = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
-      headers: { authorization: `Bearer ${unbound}` },
+      headers: { authorization: `Bearer ${legacy.secret}` },
       payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
     });
-    assert.equal(openChat.statusCode, 200);
-    const unboundLogs = await waitForLogs(store, (rows) => rows.some((row) => row.apiKeyPrefix === unbound.slice(0, 12)));
-    assert.equal(unboundLogs.find((row) => row.apiKeyPrefix === unbound.slice(0, 12))?.userId ?? null, null);
+    assert.equal(openChat.statusCode, 403);
+    assert.equal(openChat.json().error.message, "api key is not bound to a user");
+    assert.equal(upstreamCalls, beforeOpen);
 
     const broke = store.createUser({ email: "broke@example.com", name: "Broke", password: "password1" });
     const brokeKey = store.createApiKey("broke", broke.id).secret;
@@ -766,7 +795,7 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     }
   });
 
-  it("proxies an unbound key when no price catalog is configured", async () => {
+  it("rejects a detached key when no price catalog is configured", async () => {
     const dir = await mkdtemp(join(tmpdir(), "viate-users-unbound-"));
     const openStore = await AdminStore.open(dir);
     const openUpstream = await listen((_req, res) => {
@@ -774,7 +803,11 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
       res.end(JSON.stringify({ id: "chatcmpl-open", choices: [{ message: { content: "ok" } }] }));
     });
     enablePublished(openStore, { baseUrl: openUpstream.url, apiKey: "env-key" });
-    const secret = openStore.createApiKey("plain").secret;
+    const user = openStore.createUser({ email: "plain@example.com", name: "Plain", password: "password1" });
+    const created = openStore.createApiKey("plain", user.id);
+    const detached = new DatabaseSync(join(dir, "viate.sqlite"));
+    detached.prepare("UPDATE api_keys SET user_id = NULL WHERE id = ?").run(created.apiKey.id);
+    detached.close();
     const openApp = await buildApp({
       logger: false,
       pluginManager: emptyPlugins(),
@@ -787,11 +820,11 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
       const response = await openApp.inject({
         method: "POST",
         url: "/v1/chat/completions",
-        headers: { authorization: `Bearer ${secret}` },
+        headers: { authorization: `Bearer ${created.secret}` },
         payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
       });
-      assert.equal(response.statusCode, 200);
-      assert.equal(response.json().id, "chatcmpl-open");
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.json().error.message, "api key is not bound to a user");
     } finally {
       await openApp.close();
       await openUpstream.close();

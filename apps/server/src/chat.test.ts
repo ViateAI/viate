@@ -10,6 +10,7 @@ import type { JsonPostRequest, ProviderConnection, ProviderHandler } from "@viat
 import { buildApp, type App } from "./app.js";
 import { resetRoutingStateForTests } from "./routing.js";
 import { AdminStore, type RequestLogRecord } from "./store.js";
+import { issueClient, zeroModelPrices } from "./test-support.js";
 
 describe("POST /v1/chat/completions", () => {
   let upstream: TestServer;
@@ -17,14 +18,19 @@ describe("POST /v1/chat/completions", () => {
   let store: AdminStore;
   let dataDir = "";
   let clientSecret = "";
+  let lastUpstreamBody: { stream?: boolean; stream_options?: { include_usage?: boolean } } = {};
 
   before(async () => {
     resetRoutingStateForTests();
     dataDir = await mkdtemp(join(tmpdir(), "viate-chat-"));
     store = await AdminStore.open(dataDir);
-    clientSecret = store.createApiKey("tests").secret;
+    clientSecret = issueClient(store, "tests").secret;
     upstream = await listen(async (req, res) => {
-      const payload = JSON.parse((await readBody(req)) || "{}") as { stream?: boolean };
+      const payload = JSON.parse((await readBody(req)) || "{}") as {
+        stream?: boolean;
+        stream_options?: { include_usage?: boolean };
+      };
+      lastUpstreamBody = payload;
       if (req.headers.authorization !== "Bearer env-key") {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: "unauthorized" } }));
@@ -40,7 +46,7 @@ describe("POST /v1/chat/completions", () => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ id: "chatcmpl-local", choices: [{ message: { content: "ok" } }] }));
     });
-    app = await buildApp({
+    app = await buildTestApp({
       logger: false,
       providers: [passthroughProvider()],
       store,
@@ -65,6 +71,7 @@ describe("POST /v1/chat/completions", () => {
     assert.equal(response.statusCode, 200);
     assert.match(String(response.headers["content-type"]), /application\/json/);
     assert.equal(response.json().id, "chatcmpl-local");
+    assert.equal(lastUpstreamBody.stream_options, undefined);
     const logged = await waitForRequestLog(store, "demo");
     assert.ok(logged.length >= 1);
     assert.equal(logged[0]?.endpoint, "chat.completions");
@@ -72,7 +79,7 @@ describe("POST /v1/chat/completions", () => {
     assert.equal(logged[0]?.outcome, "success");
     assert.equal(logged[0]?.usageSource, "missing");
     assert.equal(logged[0]?.payloadTruncated, false);
-    assert.ok(logged[0]?.payloadPath);
+    assert.equal(logged[0]?.payloadPath, null);
   });
 
   it("hides chat discovery without blocking /v1/chat/completions", async () => {
@@ -104,14 +111,15 @@ describe("POST /v1/chat/completions", () => {
     assert.equal(response.statusCode, 200);
     assert.match(String(response.headers["content-type"]), /text\/event-stream/);
     assert.match(response.body, /data: \[DONE\]/);
+    assert.equal(lastUpstreamBody.stream_options?.include_usage, true);
   });
 
   it("propagates upstream errors", async () => {
     const isolatedDir = await mkdtemp(join(tmpdir(), "viate-chat-unauth-"));
     const isolated = await AdminStore.open(isolatedDir);
-    const secret = isolated.createApiKey("tests").secret;
+    const secret = issueClient(isolated, "tests").secret;
     enablePublished(isolated, { baseUrl: upstream.url, apiKey: "wrong" });
-    const unauthorized = await buildApp({
+    const unauthorized = await buildTestApp({
       logger: false,
       providers: [passthroughProvider()],
       store: isolated,
@@ -154,9 +162,9 @@ describe("POST /v1/chat/completions", () => {
     });
     const isolatedDir = await mkdtemp(join(tmpdir(), "viate-chat-abort-"));
     const isolatedStore = await AdminStore.open(isolatedDir);
-    const secret = isolatedStore.createApiKey("abort").secret;
+    const secret = issueClient(isolatedStore, "abort").secret;
     enablePublished(isolatedStore, { baseUrl: hanging.url, apiKey: "env-key" });
-    const streaming = await buildApp({
+    const streaming = await buildTestApp({
       logger: false,
       providers: [passthroughProvider()],
       store: isolatedStore,
@@ -199,8 +207,8 @@ describe("POST /v1/chat/completions client auth", () => {
   it("rejects requests without a valid client API key", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-chat-auth-"));
     const store = await AdminStore.open(dataDir);
-    const created = store.createApiKey("cli");
-    const app = await buildApp({
+    const created = issueClient(store, "cli");
+    const app = await buildTestApp({
       logger: false,
       providers: [passthroughProvider()],
       store,
@@ -242,7 +250,7 @@ describe("core capability dispatcher", () => {
   it("dispatches models, embeddings, and responses with filtered headers", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-capabilities-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("capabilities").secret;
+    const secret = issueClient(store, "capabilities").secret;
     const created = store.createConnection("all");
     store.putCredentials(created.id, { token: "k" }, "all");
     store.setActive(created.id, true);
@@ -282,7 +290,7 @@ describe("core capability dispatcher", () => {
         };
       },
     };
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [provider],
       store,
@@ -360,12 +368,12 @@ describe("core capability dispatcher", () => {
   it("returns 404 when the provider does not implement responsesCompact", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-compact-missing-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("compact").secret;
+    const secret = issueClient(store, "compact").secret;
     const created = store.createConnection("all");
     store.putCredentials(created.id, { token: "k" }, "all");
     store.setActive(created.id, true);
     store.replaceConnectionModels(created.id, [{ id: "demo" }]);
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{
         id: "all",
@@ -396,12 +404,12 @@ describe("core capability dispatcher", () => {
   it("answers POST /v1/responses/compact over a real HTTP listener", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-compact-http-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("compact-http").secret;
+    const secret = issueClient(store, "compact-http").secret;
     const created = store.createConnection("all");
     store.putCredentials(created.id, { token: "k" }, "all");
     store.setActive(created.id, true);
     store.replaceConnectionModels(created.id, [{ id: "demo" }]);
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{
         id: "all",
@@ -442,8 +450,8 @@ describe("core capability dispatcher", () => {
   it("returns 200 empty list when no models are published", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-empty-catalog-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("empty").secret;
-    const app = await buildApp({
+    const secret = issueClient(store, "empty").secret;
+    const app = await buildTestApp({
       logger: false,
       providers: [{ id: "openai-compatible" }],
       store,
@@ -466,7 +474,7 @@ describe("core capability dispatcher", () => {
   it("aggregates the same id and omits pin ids from data", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-agg-catalog-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("agg").secret;
+    const secret = issueClient(store, "agg").secret;
     const openaiA = store.createConnection("openai-compatible");
     const openaiB = store.createConnection("openai-compatible");
     const anthropic = store.createConnection("anthropic");
@@ -478,7 +486,7 @@ describe("core capability dispatcher", () => {
     store.replaceConnectionModels(anthropic.id, [{ id: "gpt-4o" }]);
     store.setActive(openaiA.id, true);
     store.setActive(openaiB.id, true);
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{ id: "openai-compatible" }, { id: "anthropic" }],
       store,
@@ -526,7 +534,7 @@ describe("core capability dispatcher", () => {
   it("excludes disabled models, disabled connections, and needs_reauth", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-exclude-catalog-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("exclude").secret;
+    const secret = issueClient(store, "exclude").secret;
     const disabledConn = store.createConnection("openai-compatible");
     const reauth = store.createConnection("openai-compatible");
     const enabled = store.createConnection("openai-compatible");
@@ -540,7 +548,7 @@ describe("core capability dispatcher", () => {
     store.setActive(reauth.id, true);
     store.setActive(enabled.id, true);
     store.setKeepalive(reauth.id, "needs_reauth", "expired");
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{ id: "openai-compatible" }],
       store,
@@ -573,7 +581,7 @@ describe("core capability dispatcher", () => {
     resetRoutingStateForTests();
     const dataDir = await mkdtemp(join(tmpdir(), "viate-failover-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("failover").secret;
+    const secret = issueClient(store, "failover").secret;
     const openai = store.createConnection("openai-compatible");
     const anthropic = store.createConnection("anthropic");
     store.putCredentials(openai.id, { token: "o" }, "openai");
@@ -593,7 +601,7 @@ describe("core capability dispatcher", () => {
         },
       }),
     });
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       store,
       providers: [
@@ -670,7 +678,7 @@ describe("core capability dispatcher", () => {
   it("does not failover HTTP 400", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-no-failover-400-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("no400").secret;
+    const secret = issueClient(store, "no400").secret;
     const openai = store.createConnection("openai-compatible");
     const anthropic = store.createConnection("anthropic");
     store.putCredentials(openai.id, { token: "o" }, "openai");
@@ -690,7 +698,7 @@ describe("core capability dispatcher", () => {
         },
       }),
     });
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       store,
       providers: [
@@ -718,7 +726,7 @@ describe("core capability dispatcher", () => {
     resetRoutingStateForTests();
     const dataDir = await mkdtemp(join(tmpdir(), "viate-order-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("order").secret;
+    const secret = issueClient(store, "order").secret;
     const openai = store.createConnection("openai-compatible");
     const anthropic = store.createConnection("anthropic");
     store.putCredentials(openai.id, { token: "o" }, "openai");
@@ -739,7 +747,7 @@ describe("core capability dispatcher", () => {
         },
       }),
     });
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       store,
       providers: [
@@ -767,7 +775,7 @@ describe("core capability dispatcher", () => {
     resetRoutingStateForTests();
     const dataDir = await mkdtemp(join(tmpdir(), "viate-failover-403-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("failover403").secret;
+    const secret = issueClient(store, "failover403").secret;
     const openai = store.createConnection("openai-compatible");
     const anthropic = store.createConnection("anthropic");
     store.putCredentials(openai.id, { token: "o" }, "openai");
@@ -787,7 +795,7 @@ describe("core capability dispatcher", () => {
         },
       }),
     });
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       store,
       providers: [
@@ -814,15 +822,20 @@ describe("core capability dispatcher", () => {
   it("maps missing model to 400 and provider throw after exhausting the pool to 503", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-capability-errors-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("errors").secret;
+    const secret = issueClient(store, "errors").secret;
     const created = store.createConnection("throws");
     store.putCredentials(created.id, {});
     store.setActive(created.id, true);
     store.replaceConnectionModels(created.id, [{ id: "demo" }]);
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       store,
-      providers: [{ id: "throws", async chatCompletions() { throw new Error("provider exploded"); } }],
+      providers: [{
+        id: "throws",
+        async chatCompletions() {
+          throw new Error("provider exploded at https://upstream.internal/v1 key sk-supersecretvalue");
+        },
+      }],
     });
     try {
       const missingModel = await app.inject({
@@ -840,7 +853,12 @@ describe("core capability dispatcher", () => {
         payload: { model: "demo", messages: [] },
       });
       assert.equal(thrown.statusCode, 503);
-      assert.match(thrown.json().error.message, /provider exploded/);
+      assert.equal(thrown.json().error.message, "no healthy connection served the model");
+      const logged = await waitForRequestLog(store, "demo");
+      const error = logged.find((row) => row.status === 503)?.error ?? "";
+      assert.match(error, /provider exploded/);
+      assert.equal(error.includes("upstream.internal"), false);
+      assert.equal(error.includes("sk-supersecretvalue"), false);
     } finally {
       await app.close();
       store.close();
@@ -854,7 +872,7 @@ describe("core capability dispatcher", () => {
     const stored = store.createConnection("refreshing");
     store.putCredentials(stored.id, { refreshToken: "old" });
     let calls = 0;
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{
         id: "refreshing",
@@ -892,7 +910,7 @@ describe("core capability dispatcher", () => {
     const stored = store.createConnection("refreshing");
     store.putCredentials(stored.id, {});
     let calls = 0;
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{
         id: "refreshing",
@@ -928,7 +946,7 @@ describe("core capability dispatcher", () => {
     const stored = store.createConnection("hanging");
     store.putCredentials(stored.id, {});
     const pending = new Promise<never>(() => {});
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{ id: "hanging", keepalive: () => pending }],
       store,
@@ -946,7 +964,7 @@ describe("core capability dispatcher", () => {
     const exploding = store.createConnection("codex");
     store.putCredentials(exploding.id, { refreshToken: "old" });
     const lines: string[] = [];
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: {
         level: "warn",
         stream: new Writable({
@@ -1012,7 +1030,7 @@ describe("core capability dispatcher", () => {
     const stored = store.createConnection("refreshing");
     store.putCredentials(stored.id, { refreshToken: "old" });
     let calls = 0;
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{
         id: "refreshing",
@@ -1051,7 +1069,7 @@ describe("core capability dispatcher", () => {
     const stored = store.createConnection("refreshing");
     store.putCredentials(stored.id, { refreshToken: "old" });
     let calls = 0;
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{
         id: "refreshing",
@@ -1082,7 +1100,7 @@ describe("core capability dispatcher", () => {
     store.putCredentials(stored.id, { refreshToken: "old" });
     let calls = 0;
     const seen: unknown[] = [];
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{
         id: "refreshing",
@@ -1116,7 +1134,7 @@ describe("core capability dispatcher", () => {
     const stored = store.createConnection("refreshing");
     store.putCredentials(stored.id, { refreshToken: "old" });
     let calls = 0;
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       providers: [{
         id: "refreshing",
@@ -1147,7 +1165,7 @@ describe("core capability dispatcher", () => {
     resetRoutingStateForTests();
     const dataDir = await mkdtemp(join(tmpdir(), "viate-keepalive-403-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("authfail").secret;
+    const secret = issueClient(store, "authfail").secret;
     const openai = store.createConnection("openai-compatible");
     const anthropic = store.createConnection("anthropic");
     store.putCredentials(openai.id, { token: "o" }, "openai");
@@ -1167,7 +1185,7 @@ describe("core capability dispatcher", () => {
         },
       }),
     });
-    const app = await buildApp({
+    const app = await buildTestApp({
       logger: false,
       store,
       providers: [
@@ -1208,6 +1226,10 @@ describe("core capability dispatcher", () => {
     }
   });
 });
+
+function buildTestApp(options: Parameters<typeof buildApp>[0] = {}) {
+  return buildApp({ modelPrices: zeroModelPrices, ...options });
+}
 
 function bearer(secret: string): Record<string, string> {
   return { authorization: `Bearer ${secret}` };

@@ -89,7 +89,9 @@ describe("AdminStore API keys", () => {
   });
 
   it("hashes client keys, lists prefixes only, verifies, and revokes", () => {
-    const created = store.createApiKey("cli");
+    const user = store.createUser({ email: "cli@example.com", name: "Cli", password: "password1" });
+    const created = store.createApiKey("cli", user.id);
+    assert.equal(created.apiKey.userId, user.id);
     assert.match(created.secret, /^viate_/);
     assert.equal(created.apiKey.prefix, created.secret.slice(0, 12));
     assert.equal(store.listApiKeys()[0]?.prefix, created.apiKey.prefix);
@@ -100,7 +102,10 @@ describe("AdminStore API keys", () => {
   });
 
   it("rejects empty names and missing ids", () => {
-    assert.throws(() => store.createApiKey(" "), /name is required/);
+    const user = store.createUser({ email: "blank@example.com", name: "Blank", password: "password1" });
+    assert.throws(() => store.createApiKey(" ", user.id), /name is required/);
+    assert.throws(() => store.createApiKey("orphan", " "), /user is required/);
+    assert.throws(() => store.createApiKey("missing-user", "no-such-user"), /user not found/);
     assert.throws(() => store.deleteApiKey("missing"), /api key not found/);
   });
 });

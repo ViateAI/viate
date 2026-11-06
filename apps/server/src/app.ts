@@ -8,7 +8,7 @@ import { registerPortalRoutes } from "./portal.js";
 import { createSubscriptionScheduler } from "./subscription.js";
 import type { AdminStore } from "./store.js";
 import type { SessionStore } from "./sessions.js";
-import { RequestLogRecorder } from "./request-logs.js";
+import { REQUEST_LOG_EVENT_TTL_MS, RequestLogRecorder } from "./request-logs.js";
 import { multipartAudioBody } from "./audio.js";
 import { multipartImageBody } from "./images.js";
 import { multipartVideoBody, VIDEO_MULTIPART_PATHS } from "./videos.js";
@@ -19,6 +19,7 @@ export type HealthResponse = {
 
 export type BuildAppOptions = {
   logger?: FastifyServerOptions["logger"];
+  trustProxy?: FastifyServerOptions["trustProxy"];
   providers?: ProviderHandler[];
   pluginFailures?: PluginLoadFailure[];
   pluginManager?: PluginOperator;
@@ -28,6 +29,9 @@ export type BuildAppOptions = {
   adminUiDist?: string | null;
   sessions?: SessionStore;
   modelPrices?: ModelPriceLookup;
+  userMaxInflight?: number;
+  logPayloads?: boolean;
+  requestLogRetentionMs?: number;
 };
 
 export type App = FastifyInstance;
@@ -41,10 +45,11 @@ const healthResponseSchema = {
   },
 } as const;
 
-export function createApp(options: Pick<BuildAppOptions, "logger"> = {}): App {
+export function createApp(options: Pick<BuildAppOptions, "logger" | "trustProxy"> = {}): App {
   const app = Fastify({
     logger: options.logger ?? true,
     bodyLimit: 32 * 1024 * 1024,
+    trustProxy: options.trustProxy ?? false,
   });
   app.addContentTypeParser("text/plain", { parseAs: "string" }, (_request, body, done) => {
     if (body === "") {
@@ -89,7 +94,12 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
   );
 
   const store = options.store;
-  const requestLogs = store ? new RequestLogRecorder(store) : undefined;
+  const requestLogs = store
+    ? new RequestLogRecorder(store, {
+        logPayloads: options.logPayloads ?? false,
+        retentionMs: options.requestLogRetentionMs ?? REQUEST_LOG_EVENT_TTL_MS,
+      })
+    : undefined;
   const providers = new Map((options.providers ?? []).map((provider) => [provider.id, provider]));
   const subscriptions = store
     ? createSubscriptionScheduler({ store, providers, log: app.log })
@@ -112,6 +122,7 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
     store,
     requestLogs,
     modelPrices: options.modelPrices,
+    userMaxInflight: options.userMaxInflight,
   });
 
   if (options.pluginManager && store) {
@@ -138,5 +149,5 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
-  return registerApp(createApp(options), options);
+  return registerApp(createApp({ logger: options.logger, trustProxy: options.trustProxy }), options);
 }

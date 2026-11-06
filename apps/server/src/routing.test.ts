@@ -88,4 +88,118 @@ describe("dispatchRouted", () => {
     assert.equal(routed.upstreamModel, "gpt-5.4-mini-medium");
     assert.equal(routed.attempts[0]?.upstreamModel, "gpt-5.4-mini-medium");
   });
+
+  it("sets include_usage on a streaming chat completion and leaves other requests alone", async () => {
+    let chatBody: unknown;
+    let responseBody: unknown;
+    const providers = new Map<string, ProviderHandler>([
+      [
+        "openai-compatible",
+        {
+          id: "openai-compatible",
+          async chatCompletions(request) {
+            chatBody = request.body;
+            return { status: 200, headers: {}, body: null };
+          },
+          async responses(request) {
+            responseBody = request.body;
+            return { status: 200, headers: {}, body: null };
+          },
+        },
+      ],
+    ]);
+    const store = catalogStore([member("conn-1")]);
+    await dispatchRouted(
+      store,
+      providers,
+      "chatCompletions",
+      {
+        body: { model: "gpt-4o", stream: true, stream_options: { include_obfuscation: false } },
+        headers: {},
+        signal: AbortSignal.timeout(1000),
+      },
+      AbortSignal.timeout(1000),
+    );
+    assert.deepEqual(chatBody, {
+      model: "gpt-4o",
+      stream: true,
+      stream_options: { include_obfuscation: false, include_usage: true },
+    });
+    await dispatchRouted(
+      store,
+      providers,
+      "chatCompletions",
+      { body: { model: "gpt-4o", stream: false }, headers: {}, signal: AbortSignal.timeout(1000) },
+      AbortSignal.timeout(1000),
+    );
+    assert.deepEqual(chatBody, { model: "gpt-4o", stream: false });
+    await dispatchRouted(
+      store,
+      providers,
+      "responses",
+      { body: { model: "gpt-4o", stream: true }, headers: {}, signal: AbortSignal.timeout(1000) },
+      AbortSignal.timeout(1000),
+    );
+    assert.deepEqual(responseBody, { model: "gpt-4o", stream: true });
+  });
+
+  it("cancels a discarded upstream body before the next attempt", async () => {
+    let discarded = false;
+    let kept = false;
+    const providers = new Map<string, ProviderHandler>([
+      [
+        "first",
+        {
+          id: "first",
+          async chatCompletions() {
+            return {
+              status: 500,
+              headers: {},
+              body: new ReadableStream<Uint8Array>({
+                cancel() {
+                  discarded = true;
+                },
+              }),
+            };
+          },
+        },
+      ],
+      [
+        "second",
+        {
+          id: "second",
+          async chatCompletions() {
+            return {
+              status: 200,
+              headers: {},
+              body: new ReadableStream<Uint8Array>({
+                cancel() {
+                  kept = true;
+                },
+              }),
+            };
+          },
+        },
+      ],
+    ]);
+    const routed = await dispatchRouted(
+      catalogStore([member("bad", "first"), member("good", "second")]),
+      providers,
+      "chatCompletions",
+      { body: { model: "gpt-4o" }, headers: {}, signal: AbortSignal.timeout(1000) },
+      AbortSignal.timeout(1000),
+    );
+    assert.equal(routed.connectionId, "good");
+    assert.equal(discarded, true);
+    assert.equal(kept, false);
+  });
 });
+
+function catalogStore(members: PublishedMember[]): AdminStore {
+  return {
+    listPublishedMembers: () => members,
+    orderMembers: (items: PublishedMember[]) => items,
+    getLkgp: () => null,
+    setLkgp: () => undefined,
+  } as unknown as AdminStore;
+}

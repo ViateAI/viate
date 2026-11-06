@@ -253,7 +253,7 @@ async function openFixture() {
   store.replaceConnectionModels(openai.id, [{ id: "gpt-4o", name: "GPT-4o" }]);
   const user = store.createUser({ email: "customer@example.com", name: "Customer", password: "password1" });
   store.grantUsd(user.id, "1");
-  const unbound = store.createApiKey("self-test").secret;
+  const unbound = store.createApiKey("self-test", user.id).secret;
   const provider = (id: string): ProviderHandler => ({
     id,
     async chatCompletions(request) {

@@ -77,15 +77,15 @@ export async function registerPortalRoutes(app: FastifyInstance, options: Portal
   });
 
   app.post("/api/portal/login", async (request, reply) => {
-    const key = request.ip || "unknown";
+    const body = asRecord(request.body);
+    const email = typeof body.email === "string" ? body.email : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    const key = `${request.ip || "unknown"}\n${email.trim().toLowerCase()}`;
     const limited = limiter.consume(key);
     if (!limited.allowed) {
       reply.header("retry-after", String(limited.retryAfterSeconds));
       return reply.code(429).send({ error: { message: "too many login attempts", type: "viate_error" } });
     }
-    const body = asRecord(request.body);
-    const email = typeof body.email === "string" ? body.email : "";
-    const password = typeof body.password === "string" ? body.password : "";
     try {
       const user = options.store.authenticateUser(email, password);
       limiter.reset(key);

@@ -1557,13 +1557,16 @@ export class AdminStore {
     return rows.map((row) => this.toApiKey(row));
   }
 
-  createApiKey(name: string, userId?: string | null, channelId?: string | null): CreatedApiKey {
+  createApiKey(name: string, userId: string, channelId?: string | null): CreatedApiKey {
     const trimmed = name.trim();
     if (!trimmed) {
       throw Object.assign(new Error("name is required"), { statusCode: 400 });
     }
-    const ownerId = userId ?? null;
-    if (ownerId && !this.db.prepare("SELECT id FROM users WHERE id = ?").get(ownerId)) {
+    const ownerId = userId.trim();
+    if (!ownerId) {
+      throw Object.assign(new Error("user is required"), { statusCode: 400 });
+    }
+    if (!this.db.prepare("SELECT id FROM users WHERE id = ?").get(ownerId)) {
       throw Object.assign(new Error("user not found"), { statusCode: 404 });
     }
     const requested = typeof channelId === "string" ? channelId.trim() : "";
@@ -1571,7 +1574,7 @@ export class AdminStore {
     if (boundChannel && !this.getChannel(boundChannel)) {
       throw Object.assign(new Error("unknown channel"), { statusCode: 400 });
     }
-    if (boundChannel && ownerId && !this.userHasChannel(ownerId, boundChannel)) {
+    if (boundChannel && !this.userHasChannel(ownerId, boundChannel)) {
       throw Object.assign(new Error("channel not available"), { statusCode: 400 });
     }
     const secret = `viate_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
@@ -1811,14 +1814,15 @@ export class AdminStore {
     }
   }
 
-  admitUser(userId: string): void {
+  admitUser(userId: string, maxInflight = 8): void {
+    const limit = Number.isInteger(maxInflight) && maxInflight > 0 ? maxInflight : 8;
     const now = new Date().toISOString();
     const result = this.db
       .prepare(
         `UPDATE users SET inflight = inflight + 1, updated_at = ?
-         WHERE id = ? AND status = 'active' AND balance_nano > 0 AND inflight < 8`,
+         WHERE id = ? AND status = 'active' AND balance_nano > 0 AND inflight < ?`,
       )
-      .run(now, userId);
+      .run(now, userId, limit);
     if (Number(result.changes) !== 0) {
       return;
     }
@@ -2419,8 +2423,8 @@ export class AdminStore {
     };
   }
 
-  pruneRequestLogs(now = Date.now()): void {
-    const eventCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+  pruneRequestLogs(now = Date.now(), retentionMs = 7 * 24 * 60 * 60 * 1000): void {
+    const eventCutoff = new Date(now - retentionMs).toISOString();
     const minuteCutoff = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
     this.db.prepare("DELETE FROM request_logs WHERE started_at < ?").run(eventCutoff);
     this.db.prepare("DELETE FROM request_stats_minute WHERE bucket < ?").run(minuteCutoff);

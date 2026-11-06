@@ -7,6 +7,7 @@ import type { ProviderHandler } from "@viateai/sdk";
 import { buildApp } from "./app.js";
 import { multipartImageBody, redactImagePayload } from "./images.js";
 import { AdminStore } from "./store.js";
+import { issueClient, zeroModelPrices } from "./test-support.js";
 
 describe("image request normalization", () => {
   it("inlines multipart files and leaves JSON fields intact", () => {
@@ -63,7 +64,7 @@ describe("POST /v1/images", () => {
   it("rewrites a generation onto the provider and inlines an edit upload", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-images-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("images").secret;
+    const secret = issueClient(store, "images").secret;
     const created = store.createConnection("xai-oauth");
     store.putCredentials(created.id, { token: "k" }, "xai");
     store.setActive(created.id, true);
@@ -80,7 +81,7 @@ describe("POST /v1/images", () => {
         return { status: 200, headers: { "content-type": "application/json" }, body: jsonBody({ ok: true }) };
       },
     };
-    const app = await buildApp({ logger: false, providers: [provider], store });
+    const app = await buildApp({ logger: false, providers: [provider], store, modelPrices: zeroModelPrices });
     try {
       const generated = await app.inject({
         method: "POST",
@@ -132,7 +133,7 @@ describe("POST /v1/images", () => {
   it("returns 404 when the provider does not implement image generation", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-images-missing-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("images").secret;
+    const secret = issueClient(store, "images").secret;
     const created = store.createConnection("xai-oauth");
     store.putCredentials(created.id, { token: "k" }, "xai");
     store.setActive(created.id, true);
@@ -141,6 +142,7 @@ describe("POST /v1/images", () => {
       logger: false,
       providers: [{ id: "xai-oauth", async chatCompletions() { return { status: 200, headers: {}, body: null }; } }],
       store,
+      modelPrices: zeroModelPrices,
     });
     try {
       const response = await app.inject({

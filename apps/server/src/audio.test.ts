@@ -9,6 +9,7 @@ import { buildApp, type App } from "./app.js";
 import { readRequestPayload } from "./request-logs.js";
 import { resetRoutingStateForTests } from "./routing.js";
 import { AdminStore, type RequestLogRecord } from "./store.js";
+import { issueClient, zeroModelPrices } from "./test-support.js";
 
 describe("audio request normalization", () => {
   it("inlines the audio file with model, language, and other text fields", () => {
@@ -39,8 +40,8 @@ describe("POST /v1/audio", () => {
   it("rejects missing, invalid, cookie, and unprovisioned client auth", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-audio-auth-"));
     const store = await AdminStore.open(dataDir);
-    const created = store.createApiKey("audio");
-    const app = await buildApp({ logger: false, providers: [], store });
+    const created = issueClient(store, "audio");
+    const app = await buildApp({ logger: false, providers: [], store, modelPrices: zeroModelPrices });
     const emptyDir = await mkdtemp(join(tmpdir(), "viate-audio-nokeys-"));
     const emptyStore = await AdminStore.open(emptyDir);
     const emptyApp = await buildApp({ logger: false, providers: [], store: emptyStore });
@@ -169,7 +170,7 @@ describe("POST /v1/audio", () => {
   it("returns 404 when the provider does not implement speech", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "viate-audio-missing-cap-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("audio").secret;
+    const secret = issueClient(store, "audio").secret;
     const created = store.createConnection("fake-audio");
     store.putCredentials(created.id, { token: "k" }, "fake");
     store.setActive(created.id, true);
@@ -178,6 +179,7 @@ describe("POST /v1/audio", () => {
       logger: false,
       providers: [{ id: "fake-audio", async chatCompletions() { return { status: 200, headers: {}, body: null }; } }],
       store,
+      modelPrices: zeroModelPrices,
     });
     try {
       const response = await app.inject({
@@ -338,7 +340,7 @@ describe("POST /v1/audio", () => {
     resetRoutingStateForTests();
     const dataDir = await mkdtemp(join(tmpdir(), "viate-audio-custom-"));
     const store = await AdminStore.open(dataDir);
-    const secret = store.createApiKey("audio").secret;
+    const secret = issueClient(store, "audio").secret;
     const created = store.createConnection("xai-oauth");
     store.putCredentials(created.id, { token: "k" }, "xai");
     store.setActive(created.id, true);
@@ -355,7 +357,7 @@ describe("POST /v1/audio", () => {
         };
       },
     };
-    const app = await buildApp({ logger: false, providers: [provider], store });
+    const app = await buildApp({ logger: false, providers: [provider], store, modelPrices: zeroModelPrices });
     const boundary = "viate-custom";
     const wav = Buffer.from("RIFF-audio-bytes");
     const payload = () => Buffer.concat([
@@ -432,13 +434,19 @@ type AudioFixture = {
 async function openAudioApp(methods: Partial<ProviderHandler> = {}): Promise<AudioFixture> {
   const dataDir = await mkdtemp(join(tmpdir(), "viate-audio-"));
   const store = await AdminStore.open(dataDir);
-  const secret = store.createApiKey("audio").secret;
+  const secret = issueClient(store, "audio").secret;
   const created = store.createConnection("fake-audio");
   store.putCredentials(created.id, { token: "k" }, "fake");
   store.setActive(created.id, true);
   store.replaceConnectionModels(created.id, [{ id: "whisper-1" }, { id: "tts-1" }]);
   const provider: ProviderHandler = { id: "fake-audio", ...methods };
-  const app = await buildApp({ logger: false, providers: [provider], store });
+  const app = await buildApp({
+    logger: false,
+    providers: [provider],
+    store,
+    modelPrices: zeroModelPrices,
+    logPayloads: true,
+  });
   return {
     app,
     store,

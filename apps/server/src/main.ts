@@ -7,7 +7,7 @@ import { createModelPriceCatalog } from "./model-prices.js";
 
 const config = loadConfig();
 const manager = new PluginManager({ dataDir: config.dataDir });
-const app = createApp();
+const app = createApp({ trustProxy: config.trustProxy });
 const loaded = await loadActivePlugins(manager, { log: pluginLoggerFromFastify(app.log) });
 const store = await AdminStore.open(config.dataDir);
 const modelPrices = createModelPriceCatalog({
@@ -27,6 +27,9 @@ await registerApp(app, {
   adminEnabled: config.adminEnabled,
   adminUiDist: config.adminUiDist,
   modelPrices,
+  userMaxInflight: config.userMaxInflight,
+  logPayloads: config.logPayloads,
+  requestLogRetentionMs: config.requestLogRetentionMs,
 });
 await modelPrices.start();
 
