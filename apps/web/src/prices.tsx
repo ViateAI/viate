@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, isApiError } from "./api";
 import { m } from "./paraglide/messages.js";
 
@@ -14,6 +14,26 @@ type PriceOverride = {
 type PriceView = {
   overrides: PriceOverride[];
   unpriced: string[];
+  prices: CatalogPrice[];
+  pricesTotal: number;
+  pricesOffset: number;
+  pricesLimit: number;
+};
+
+type CatalogPrice = {
+  modelId: string;
+  inputUsdPerMillion: string;
+  outputUsdPerMillion: string;
+  cacheReadUsdPerMillion: string | null;
+  tiers: CatalogTier[];
+  overridden: boolean;
+};
+
+type CatalogTier = {
+  atTokens: number;
+  inputUsdPerMillion: string;
+  outputUsdPerMillion: string;
+  cacheReadUsdPerMillion: string | null;
 };
 
 export function PricesPage({ onNotice }: { onNotice: (value: string | null) => void }) {
@@ -25,15 +45,7 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
   const [usdPerRequest, setUsdPerRequest] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    const result = await api<PriceView>("/api/admin/model-prices");
-    setView(result);
-  }
-
-  useEffect(() => {
-    refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_prices()));
-  }, []);
+  const catalogRefresh = useRef<() => Promise<void>>(async () => {});
 
   return (
     <section className="stack">
@@ -58,7 +70,7 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
             setInputUsd("");
             setOutputUsd("");
             setUsdPerRequest("");
-            await refresh();
+            await catalogRefresh.current();
             onNotice(m.prices_saved());
           } catch (err) {
             setError(isApiError(err) ? err.message : m.error_save());
@@ -144,7 +156,7 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
                   setError(null);
                   try {
                     await api(`/api/admin/model-prices/${encodeURIComponent(row.modelId)}`, { method: "DELETE" });
-                    await refresh();
+                    await catalogRefresh.current();
                     onNotice(m.prices_removed());
                   } catch (err) {
                     setError(isApiError(err) ? err.message : m.error_remove());
@@ -157,6 +169,197 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
           </div>
         </article>
       ))}
+      <CatalogPrices
+        refreshRef={catalogRefresh}
+        onLoaded={(next) => {
+          setView(next);
+          setError(null);
+        }}
+        onError={setError}
+      />
+    </section>
+  );
+}
+
+const CATALOG_PAGE_SIZE = 50;
+
+function CatalogPrices({
+  refreshRef,
+  onLoaded,
+  onError,
+}: {
+  refreshRef: { current: () => Promise<void> };
+  onLoaded: (view: PriceView) => void;
+  onError: (message: string) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [applied, setApplied] = useState({ q: "", offset: 0 });
+  const [page, setPage] = useState<{
+    q: string;
+    rows: CatalogPrice[];
+    total: number;
+    offset: number;
+    limit: number;
+  } | null>(null);
+  const appliedRef = useRef(applied);
+  const requestSeq = useRef(0);
+  const onLoadedRef = useRef(onLoaded);
+  const onErrorRef = useRef(onError);
+  appliedRef.current = applied;
+  onLoadedRef.current = onLoaded;
+  onErrorRef.current = onError;
+
+  async function refresh() {
+    const current = appliedRef.current;
+    const seq = ++requestSeq.current;
+    const params = new URLSearchParams({
+      q: current.q,
+      offset: String(current.offset),
+      limit: String(CATALOG_PAGE_SIZE),
+    });
+    try {
+      const result = await api<PriceView>(`/api/admin/model-prices?${params}`);
+      if (seq !== requestSeq.current) {
+        return;
+      }
+      setPage({
+        q: current.q,
+        rows: result.prices,
+        total: result.pricesTotal,
+        offset: result.pricesOffset,
+        limit: result.pricesLimit,
+      });
+      onLoadedRef.current(result);
+    } catch (err) {
+      if (seq !== requestSeq.current) {
+        return;
+      }
+      throw err;
+    }
+  }
+  refreshRef.current = refresh;
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      const next = filter.trim();
+      setApplied((current) => (current.q === next ? current : { q: next, offset: 0 }));
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [filter]);
+
+  useEffect(() => {
+    void refreshRef.current().catch((err) => {
+      onErrorRef.current(isApiError(err) ? err.message : m.error_load_prices());
+    });
+  }, [applied]);
+
+  if (!page) {
+    return null;
+  }
+
+  const pending = page.q !== applied.q || page.offset !== applied.offset;
+  const start = page.total === 0 || page.offset >= page.total ? 0 : page.offset + 1;
+  const end = start === 0 ? 0 : Math.min(page.offset + page.rows.length, page.total);
+  const previousDisabled = pending || page.offset <= 0;
+  const nextDisabled = pending || page.offset + page.rows.length >= page.total;
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <h2>{m.prices_catalog_title()}</h2>
+        <p>{m.prices_catalog_hint()}</p>
+      </div>
+      <label className="model-filter">
+        {m.label_filter()}
+        <input
+          type="search"
+          value={filter}
+          placeholder={m.prices_filter_placeholder()}
+          onChange={(event) => setFilter(event.target.value)}
+        />
+      </label>
+      <div className="price-pager">
+        <button
+          className="ghost"
+          type="button"
+          disabled={previousDisabled}
+          onClick={() =>
+            setApplied((current) =>
+              current.q !== page.q || current.offset !== page.offset
+                ? current
+                : { ...current, offset: Math.max(0, page.offset - page.limit) },
+            )
+          }
+        >
+          {m.prices_previous()}
+        </button>
+        <button
+          className="ghost"
+          type="button"
+          disabled={nextDisabled}
+          onClick={() =>
+            setApplied((current) =>
+              current.q !== page.q || current.offset !== page.offset
+                ? current
+                : { ...current, offset: page.offset + page.limit },
+            )
+          }
+        >
+          {m.prices_next()}
+        </button>
+        <span className="meta">{m.prices_page_range({ start: String(start), end: String(end), total: String(page.total) })}</span>
+      </div>
+      {page.total === 0 && page.q.length === 0 ? <p className="empty">{m.prices_catalog_empty()}</p> : null}
+      {page.total === 0 && page.q.length > 0 ? <p className="empty">{m.prices_filter_empty()}</p> : null}
+      {page.rows.length > 0 ? (
+        <div className="model-scroll">
+          <table className="model-table req-table">
+            <caption className="visually-hidden">{m.prices_catalog_title()}</caption>
+            <thead>
+              <tr>
+                <th>{m.prices_col_model()}</th>
+                <th>{m.prices_col_input()}</th>
+                <th>{m.prices_col_cache()}</th>
+                <th>{m.prices_col_output()}</th>
+                <th>{m.prices_col_tiers()}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {page.rows.map((row) => (
+                <tr key={row.modelId} className={row.overridden ? "is-overridden" : undefined}>
+                  <td>
+                    <span className="model-name">
+                      <span className="model-id">{row.modelId}</span>
+                      {row.overridden ? <span className="badge neutral">{m.prices_overridden()}</span> : null}
+                    </span>
+                  </td>
+                  <td>{row.inputUsdPerMillion}</td>
+                  <td>{row.cacheReadUsdPerMillion ?? ""}</td>
+                  <td>{row.outputUsdPerMillion}</td>
+                  <td>
+                    {row.tiers.map((tier) => (
+                      <span className="price-tier" key={tier.atTokens}>
+                        {tier.cacheReadUsdPerMillion == null
+                          ? m.prices_tier({
+                              tokens: String(tier.atTokens),
+                              input: tier.inputUsdPerMillion,
+                              output: tier.outputUsdPerMillion,
+                            })
+                          : m.prices_tier_cache({
+                              tokens: String(tier.atTokens),
+                              input: tier.inputUsdPerMillion,
+                              cache: tier.cacheReadUsdPerMillion,
+                              output: tier.outputUsdPerMillion,
+                            })}
+                      </span>
+                    ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
     </section>
   );
 }

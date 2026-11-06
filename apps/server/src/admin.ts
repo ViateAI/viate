@@ -763,8 +763,10 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     }
   });
 
-  app.get("/api/admin/model-prices", async () => {
-    const overrides = options.store.listModelPriceOverrides().map((row) => ({
+  app.get("/api/admin/model-prices", async (request) => {
+    const page = catalogPricePage(asRecord(request.query));
+    const storedOverrides = options.store.listModelPriceOverrides();
+    const overrides = storedOverrides.map((row) => ({
       modelId: row.modelId,
       mode: row.perRequestNano == null ? "tokens" : "request",
       inputUsdPerMillion: formatUsd(row.inputNanoPerMillion),
@@ -772,12 +774,43 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       usdPerRequest: row.perRequestNano == null ? null : formatUsd(row.perRequestNano),
       updatedAt: row.updatedAt,
     }));
-    const overridden = new Set(overrides.map((row) => row.modelId));
+    const overridden = new Set(storedOverrides.map((row) => row.modelId));
     const unpriced = options.store
       .listPublicCatalog()
       .data.map((model) => model.id)
       .filter((modelId) => !overridden.has(modelId) && !options.modelPrices?.lookup(modelId));
-    return { overrides, unpriced };
+    const catalogIds = options.store.listModelPriceIds();
+    const catalogIdSet = new Set(catalogIds);
+    const ids = catalogIds.slice();
+    for (const row of storedOverrides) {
+      if (!catalogIdSet.has(row.modelId)) {
+        ids.push(row.modelId);
+      }
+    }
+    const needle = page.q.toLowerCase();
+    const matched = needle.length === 0 ? ids : ids.filter((id) => id.toLowerCase().includes(needle));
+    matched.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+    const pageIds = matched.slice(page.offset, page.offset + page.limit);
+    const hydrated = new Map(
+      options.store.listModelPricesByIds(pageIds.filter((id) => catalogIdSet.has(id))).map((row) => [row.modelId, row]),
+    );
+    const overrideById = new Map(storedOverrides.map((row) => [row.modelId, row]));
+    const prices = pageIds.flatMap((modelId) => {
+      const row = hydrated.get(modelId);
+      if (row) {
+        return [catalogPriceJson(row, overridden.has(modelId))];
+      }
+      const manual = overrideById.get(modelId);
+      return manual ? [catalogPriceJson(manual, true)] : [];
+    });
+    return {
+      overrides,
+      unpriced,
+      prices,
+      pricesTotal: matched.length,
+      pricesOffset: page.offset,
+      pricesLimit: page.limit,
+    };
   });
 
   app.put("/api/admin/model-prices", async (request, reply) => {
@@ -934,6 +967,74 @@ function headerValue(value: string | string[] | undefined): string | undefined {
     return value[0];
   }
   return value;
+}
+
+const CATALOG_PRICE_LIMIT_DEFAULT = 50;
+const CATALOG_PRICE_LIMIT_MAX = 100;
+
+function catalogPricePage(query: Record<string, unknown>): { q: string; offset: number; limit: number } {
+  return {
+    q: typeof query.q === "string" ? query.q.trim() : "",
+    offset: catalogPriceOffset(query.offset),
+    limit: catalogPriceLimit(query.limit),
+  };
+}
+
+function catalogPriceOffset(value: unknown): number {
+  if (typeof value !== "string") {
+    return 0;
+  }
+  const text = value.trim();
+  if (!/^\d+$/.test(text)) {
+    return 0;
+  }
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) ? parsed : 0;
+}
+
+function catalogPriceLimit(value: unknown): number {
+  if (typeof value !== "string" || value.trim() === "") {
+    return CATALOG_PRICE_LIMIT_DEFAULT;
+  }
+  const text = value.trim();
+  if (!/^\d+$/.test(text)) {
+    return CATALOG_PRICE_LIMIT_DEFAULT;
+  }
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    return CATALOG_PRICE_LIMIT_DEFAULT;
+  }
+  return Math.min(parsed, CATALOG_PRICE_LIMIT_MAX);
+}
+
+function catalogPriceJson(
+  row: {
+    modelId: string;
+    inputNanoPerMillion: number;
+    outputNanoPerMillion: number;
+    cacheReadNanoPerMillion?: number;
+    contextTiers?: Array<{
+      atTokens: number;
+      inputNanoPerMillion: number;
+      outputNanoPerMillion: number;
+      cacheReadNanoPerMillion?: number;
+    }>;
+  },
+  overridden: boolean,
+) {
+  return {
+    modelId: row.modelId,
+    inputUsdPerMillion: formatUsd(row.inputNanoPerMillion),
+    outputUsdPerMillion: formatUsd(row.outputNanoPerMillion),
+    cacheReadUsdPerMillion: row.cacheReadNanoPerMillion == null ? null : formatUsd(row.cacheReadNanoPerMillion),
+    tiers: (row.contextTiers ?? []).map((tier) => ({
+      atTokens: tier.atTokens,
+      inputUsdPerMillion: formatUsd(tier.inputNanoPerMillion),
+      outputUsdPerMillion: formatUsd(tier.outputNanoPerMillion),
+      cacheReadUsdPerMillion: tier.cacheReadNanoPerMillion == null ? null : formatUsd(tier.cacheReadNanoPerMillion),
+    })),
+    overridden,
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

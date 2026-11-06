@@ -24,6 +24,7 @@ import {
   type ChannelModelRule,
 } from "./channels.js";
 import { asNano, chargeNano, formatUsd, parseRateUsdToNano, parseUsdToNano, sqlInteger } from "./money.js";
+import type { ContextPriceTier } from "./model-prices.js";
 
 const VIDEO_REQUEST_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -1903,6 +1904,7 @@ export class AdminStore {
       inputNanoPerMillion: number;
       outputNanoPerMillion: number;
       cacheReadNanoPerMillion?: number;
+      contextTiers?: ContextPriceTier[];
     }>,
     fetchedAt: string,
     source = "https://models.dev/api.json",
@@ -1912,8 +1914,8 @@ export class AdminStore {
       this.db.prepare("DELETE FROM model_prices").run();
       const insert = this.db.prepare(
         `INSERT INTO model_prices (
-           model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, updated_at
-         ) VALUES (?, ?, ?, ?, ?)`,
+           model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, context_tiers, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
       );
       for (const row of rows) {
         insert.run(
@@ -1921,6 +1923,7 @@ export class AdminStore {
           row.inputNanoPerMillion,
           row.outputNanoPerMillion,
           row.cacheReadNanoPerMillion ?? null,
+          contextTiersJson(row.contextTiers),
           fetchedAt,
         );
       }
@@ -1944,6 +1947,7 @@ export class AdminStore {
       inputNanoPerMillion: number;
       outputNanoPerMillion: number;
       cacheReadNanoPerMillion?: number;
+      contextTiers?: ContextPriceTier[];
     }>;
   } {
     const meta = this.db.prepare("SELECT fetched_at FROM model_price_meta WHERE id = 1").get() as
@@ -1951,26 +1955,40 @@ export class AdminStore {
       | undefined;
     const rows = this.db
       .prepare(
-        `SELECT model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million
+        `SELECT model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, context_tiers
          FROM model_prices`,
       )
-      .all() as Array<{
-      model_id: string;
-      input_nano_per_million: number | bigint;
-      output_nano_per_million: number | bigint;
-      cache_read_nano_per_million: number | bigint | null;
-    }>;
+      .all() as ModelPriceSqlRow[];
     return {
       fetchedAt: meta?.fetched_at ?? null,
-      rows: rows.map((row) => ({
-        modelId: row.model_id,
-        inputNanoPerMillion: numberFrom(row.input_nano_per_million),
-        outputNanoPerMillion: numberFrom(row.output_nano_per_million),
-        ...(row.cache_read_nano_per_million == null
-          ? {}
-          : { cacheReadNanoPerMillion: numberFrom(row.cache_read_nano_per_million) }),
-      })),
+      rows: rows.map(modelPriceFromRow),
     };
+  }
+
+  listModelPriceIds(): string[] {
+    const rows = this.db.prepare("SELECT model_id FROM model_prices").all() as Array<{ model_id: string }>;
+    return rows.map((row) => row.model_id);
+  }
+
+  listModelPricesByIds(modelIds: readonly string[]): Array<{
+    modelId: string;
+    inputNanoPerMillion: number;
+    outputNanoPerMillion: number;
+    cacheReadNanoPerMillion?: number;
+    contextTiers?: ContextPriceTier[];
+  }> {
+    if (modelIds.length === 0) {
+      return [];
+    }
+    const placeholders = modelIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, context_tiers
+         FROM model_prices
+         WHERE model_id IN (${placeholders})`,
+      )
+      .all(...modelIds) as ModelPriceSqlRow[];
+    return rows.map(modelPriceFromRow);
   }
 
   listModelPriceOverrides(): Array<{
@@ -2784,6 +2802,9 @@ function migrateUsers(db: DatabaseSync): void {
   if (!priceColumns.some((column) => column.name === "cache_read_nano_per_million")) {
     db.exec("ALTER TABLE model_prices ADD COLUMN cache_read_nano_per_million INTEGER");
   }
+  if (!priceColumns.some((column) => column.name === "context_tiers")) {
+    db.exec("ALTER TABLE model_prices ADD COLUMN context_tiers TEXT");
+  }
   const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
   if (!apiKeyColumns.some((column) => column.name === "user_id")) {
     db.exec("ALTER TABLE api_keys ADD COLUMN user_id TEXT REFERENCES users(id)");
@@ -2987,6 +3008,88 @@ function usageBaseNano(input: {
     chargeNano(input.outputTokens, input.outputNanoPerMillion) +
     asNano(input.perRequestNano)
   );
+}
+
+type ModelPriceSqlRow = {
+  model_id: string;
+  input_nano_per_million: number | bigint;
+  output_nano_per_million: number | bigint;
+  cache_read_nano_per_million: number | bigint | null;
+  context_tiers: string | null;
+};
+
+function modelPriceFromRow(row: ModelPriceSqlRow): {
+  modelId: string;
+  inputNanoPerMillion: number;
+  outputNanoPerMillion: number;
+  cacheReadNanoPerMillion?: number;
+  contextTiers?: ContextPriceTier[];
+} {
+  const contextTiers = contextTiersFromJson(row.context_tiers);
+  return {
+    modelId: row.model_id,
+    inputNanoPerMillion: numberFrom(row.input_nano_per_million),
+    outputNanoPerMillion: numberFrom(row.output_nano_per_million),
+    ...(row.cache_read_nano_per_million == null
+      ? {}
+      : { cacheReadNanoPerMillion: numberFrom(row.cache_read_nano_per_million) }),
+    ...(contextTiers ? { contextTiers } : {}),
+  };
+}
+
+function contextTiersJson(tiers: readonly ContextPriceTier[] | undefined): string | null {
+  if (!tiers?.length) {
+    return null;
+  }
+  return JSON.stringify(
+    tiers.map((tier) => ({
+      atTokens: tier.atTokens,
+      inputNanoPerMillion: tier.inputNanoPerMillion,
+      outputNanoPerMillion: tier.outputNanoPerMillion,
+      ...(tier.cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion: tier.cacheReadNanoPerMillion } : {}),
+    })),
+  );
+}
+
+function contextTiersFromJson(raw: string | null): ContextPriceTier[] | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) {
+    return undefined;
+  }
+  const tiers: ContextPriceTier[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return undefined;
+    }
+    const atTokens = "atTokens" in entry ? entry.atTokens : undefined;
+    const inputNanoPerMillion = "inputNanoPerMillion" in entry ? entry.inputNanoPerMillion : undefined;
+    const outputNanoPerMillion = "outputNanoPerMillion" in entry ? entry.outputNanoPerMillion : undefined;
+    if (!isStoredCount(atTokens) || atTokens <= 0 || !isStoredCount(inputNanoPerMillion) || !isStoredCount(outputNanoPerMillion)) {
+      return undefined;
+    }
+    if (!("cacheReadNanoPerMillion" in entry)) {
+      tiers.push({ atTokens, inputNanoPerMillion, outputNanoPerMillion });
+      continue;
+    }
+    const cacheReadNanoPerMillion = entry.cacheReadNanoPerMillion;
+    if (!isStoredCount(cacheReadNanoPerMillion)) {
+      return undefined;
+    }
+    tiers.push({ atTokens, inputNanoPerMillion, outputNanoPerMillion, cacheReadNanoPerMillion });
+  }
+  return tiers.length > 0 ? tiers : undefined;
+}
+
+function isStoredCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

@@ -720,6 +720,29 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.price-tier {
+  display: block;
+}
+
+.price-tier + .price-tier {
+  margin-top: 4px;
+}
+
+.price-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.price-pager .meta {
+  display: block;
+}
+
+.req-table tr.is-overridden td:first-child {
+  box-shadow: inset 3px 0 0 var(--foreground);
+}
+
 .published-row {
   display: grid;
   gap: 8px;
