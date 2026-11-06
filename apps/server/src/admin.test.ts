@@ -574,6 +574,133 @@ describe("admin API", () => {
     const after = await authed(app, session, { method: "GET", url: "/api/admin/api-keys" });
     assert.equal(after.json().apiKeys.length, 0);
   });
+
+  it("lists catalog prices with context tiers and marks overrides", async () => {
+    store.replaceModelPrices(
+      [
+        {
+          modelId: "grok-4.7",
+          inputNanoPerMillion: 2_000_000_000,
+          outputNanoPerMillion: 6_000_000_000,
+          cacheReadNanoPerMillion: 500_000_000,
+          contextTiers: [
+            {
+              atTokens: 200000,
+              inputNanoPerMillion: 4_000_000_000,
+              outputNanoPerMillion: 12_000_000_000,
+              cacheReadNanoPerMillion: 1_000_000_000,
+            },
+          ],
+        },
+      ],
+      "2026-04-01T00:00:00.000Z",
+    );
+    store.setModelPriceOverride("grok-4.7", "3", "9");
+    store.setModelPriceOverride("only-manual", "1.5", "2");
+    const session = await login(app, "correct-horse");
+    const response = await authed(app, session, { method: "GET", url: "/api/admin/model-prices?limit=100" });
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as {
+      overrides: unknown[];
+      unpriced: unknown[];
+      prices: Array<{ modelId: string; overridden: boolean; tiers: unknown[] }>;
+    };
+    assert.ok(Array.isArray(body.overrides));
+    assert.ok(Array.isArray(body.unpriced));
+    assert.deepEqual(
+      body.prices.map((row) => row.modelId),
+      ["grok-4.7", "only-manual"],
+    );
+    assert.equal(body.prices.some((row) => row.modelId.endsWith("-fast")), false);
+    assert.deepEqual(
+      body.prices.find((row) => row.modelId === "grok-4.7"),
+      {
+        modelId: "grok-4.7",
+        inputUsdPerMillion: "2.00",
+        outputUsdPerMillion: "6.00",
+        cacheReadUsdPerMillion: "0.50",
+        tiers: [
+          {
+            atTokens: 200000,
+            inputUsdPerMillion: "4.00",
+            outputUsdPerMillion: "12.00",
+            cacheReadUsdPerMillion: "1.00",
+          },
+        ],
+        overridden: true,
+      },
+    );
+    assert.deepEqual(
+      body.prices.find((row) => row.modelId === "only-manual"),
+      {
+        modelId: "only-manual",
+        inputUsdPerMillion: "1.50",
+        outputUsdPerMillion: "2.00",
+        cacheReadUsdPerMillion: null,
+        tiers: [],
+        overridden: true,
+      },
+    );
+  });
+
+  it("pages catalog prices and filters by model id substring", async () => {
+    for (const row of store.listModelPriceOverrides()) {
+      store.deleteModelPriceOverride(row.modelId);
+    }
+    store.replaceModelPrices(
+      [
+        { modelId: "alpha-pro", inputNanoPerMillion: 1_000_000_000, outputNanoPerMillion: 2_000_000_000 },
+        { modelId: "beta-pro", inputNanoPerMillion: 3_000_000_000, outputNanoPerMillion: 4_000_000_000 },
+        { modelId: "gamma-max", inputNanoPerMillion: 5_000_000_000, outputNanoPerMillion: 6_000_000_000 },
+      ],
+      "2026-04-02T00:00:00.000Z",
+    );
+    const session = await login(app, "correct-horse");
+
+    const middle = await authed(app, session, {
+      method: "GET",
+      url: "/api/admin/model-prices?limit=1&offset=1",
+    });
+    assert.equal(middle.statusCode, 200);
+    const middleBody = middle.json() as {
+      prices: Array<{ modelId: string }>;
+      pricesTotal: number;
+      pricesOffset: number;
+      pricesLimit: number;
+    };
+    assert.equal(middleBody.pricesTotal, 3);
+    assert.equal(middleBody.pricesOffset, 1);
+    assert.equal(middleBody.pricesLimit, 1);
+    assert.deepEqual(
+      middleBody.prices.map((row) => row.modelId),
+      ["beta-pro"],
+    );
+
+    const filtered = await authed(app, session, {
+      method: "GET",
+      url: "/api/admin/model-prices?q=PRO",
+    });
+    assert.equal(filtered.statusCode, 200);
+    const filteredBody = filtered.json() as {
+      prices: Array<{ modelId: string }>;
+      pricesTotal: number;
+    };
+    assert.equal(filteredBody.pricesTotal, 2);
+    assert.deepEqual(
+      filteredBody.prices.map((row) => row.modelId),
+      ["alpha-pro", "beta-pro"],
+    );
+
+    const past = await authed(app, session, {
+      method: "GET",
+      url: "/api/admin/model-prices?offset=9",
+    });
+    assert.equal(past.statusCode, 200);
+    const pastBody = past.json() as { prices: unknown[]; pricesTotal: number; pricesOffset: number };
+    assert.deepEqual(pastBody.prices, []);
+    assert.equal(pastBody.pricesTotal, 3);
+    assert.equal(pastBody.pricesOffset, 9);
+  });
 });
 
 describe("admin disabled without password", () => {

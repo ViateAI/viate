@@ -920,6 +920,99 @@ describe("AdminStore request log browsing", () => {
   });
 });
 
+describe("AdminStore model prices", () => {
+  it("round-trips context tiers and reads corrupt JSON as no tiers", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-price-tiers-"));
+    const created = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    created.exec(`
+      CREATE TABLE model_prices (
+        model_id TEXT PRIMARY KEY,
+        input_nano_per_million INTEGER NOT NULL,
+        output_nano_per_million INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        cache_read_nano_per_million INTEGER
+      );
+    `);
+    created.close();
+
+    const store = await AdminStore.open(dataDir);
+    try {
+      store.replaceModelPrices(
+        [
+          {
+            modelId: "grok-4.7",
+            inputNanoPerMillion: 2_000_000_000,
+            outputNanoPerMillion: 6_000_000_000,
+            cacheReadNanoPerMillion: 500_000_000,
+            contextTiers: [
+              {
+                atTokens: 200000,
+                inputNanoPerMillion: 4_000_000_000,
+                outputNanoPerMillion: 12_000_000_000,
+                cacheReadNanoPerMillion: 1_000_000_000,
+              },
+              {
+                atTokens: 1000000,
+                inputNanoPerMillion: 8_000_000_000,
+                outputNanoPerMillion: 24_000_000_000,
+              },
+            ],
+          },
+          {
+            modelId: "plain-4",
+            inputNanoPerMillion: 1_000_000_000,
+            outputNanoPerMillion: 2_000_000_000,
+          },
+        ],
+        "2026-04-01T00:00:00.000Z",
+      );
+      const listed = store.listModelPrices();
+      const grok = listed.rows.find((row) => row.modelId === "grok-4.7");
+      assert.deepEqual(grok?.contextTiers, [
+        {
+          atTokens: 200000,
+          inputNanoPerMillion: 4_000_000_000,
+          outputNanoPerMillion: 12_000_000_000,
+          cacheReadNanoPerMillion: 1_000_000_000,
+        },
+        {
+          atTokens: 1000000,
+          inputNanoPerMillion: 8_000_000_000,
+          outputNanoPerMillion: 24_000_000_000,
+        },
+      ]);
+      assert.equal("cacheReadNanoPerMillion" in (grok?.contextTiers?.[1] ?? {}), false);
+      const plain = listed.rows.find((row) => row.modelId === "plain-4");
+      assert.equal(plain?.inputNanoPerMillion, 1_000_000_000);
+      assert.equal("contextTiers" in (plain ?? {}), false);
+    } finally {
+      store.close();
+    }
+
+    const raw = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    const stored = raw
+      .prepare("SELECT model_id, context_tiers FROM model_prices ORDER BY model_id")
+      .all() as Array<{ model_id: string; context_tiers: string | null }>;
+    assert.equal(stored.find((row) => row.model_id === "plain-4")?.context_tiers, null);
+    const grokJson = stored.find((row) => row.model_id === "grok-4.7")?.context_tiers;
+    assert.equal(typeof grokJson, "string");
+    assert.notEqual(grokJson, "[]");
+    raw.prepare("UPDATE model_prices SET context_tiers = ? WHERE model_id = ?").run("{", "grok-4.7");
+    raw.close();
+
+    const reopened = await AdminStore.open(dataDir);
+    try {
+      const again = reopened.listModelPrices().rows.find((row) => row.modelId === "grok-4.7");
+      assert.equal(again?.inputNanoPerMillion, 2_000_000_000);
+      assert.equal(again?.cacheReadNanoPerMillion, 500_000_000);
+      assert.equal("contextTiers" in (again ?? {}), false);
+    } finally {
+      reopened.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 function insertLog(store: AdminStore, overrides: Partial<RequestLogRecord> & { id: string; startedAt: string }): void {
   store.insertRequestLog(
     {

@@ -24,16 +24,12 @@ import type { AdminStore, StoredApiKey, StoredVideoRequest } from "./store.js";
 import { tapExchange } from "./usage-frames.js";
 import { assertAudioRequest, loggedRequestBody, loggedResponseBody } from "./audio.js";
 import { captureVideoJob } from "./videos.js";
+import { selectContextPrice, type ModelPriceRate } from "./model-prices.js";
 
 export type ClientAuthenticator = (secret: string | undefined) => StoredApiKey | null;
 
 export type ModelPriceLookup = {
-  lookup(modelId: string): {
-    inputNanoPerMillion: number;
-    outputNanoPerMillion: number;
-    cacheReadNanoPerMillion?: number;
-    perRequestNano?: number;
-  } | null;
+  lookup(modelId: string): ModelPriceRate | null;
   ready: boolean;
 };
 
@@ -164,11 +160,7 @@ async function dispatch(
   const billUserId = apiKey?.userId ?? null;
   let admitted = false;
   let billRequestId: string | null = null;
-  let billedRates: {
-    inputNanoPerMillion: number;
-    outputNanoPerMillion: number;
-    cacheReadNanoPerMillion?: number;
-  } | null = null;
+  let billedRates: ModelPriceRate | null = null;
   let billedPerRequestNano = 0;
   let billedRatioNumerator = 1;
   let billedRatioDenominator = 1;
@@ -176,7 +168,7 @@ async function dispatch(
     if (!admitted || !billRequestId || !billUserId || !options.store) {
       return;
     }
-    const rates = billedRates;
+    const rates = billedRates ? selectContextPrice(billedRates, inputTokens) : null;
     options.store.settleUsage({
       userId: billUserId,
       requestId: billRequestId,
@@ -248,6 +240,7 @@ async function dispatch(
           ...(rate.cacheReadNanoPerMillion != null
             ? { cacheReadNanoPerMillion: rate.cacheReadNanoPerMillion }
             : {}),
+          ...(rate.contextTiers?.length ? { contextTiers: rate.contextTiers.map((tier) => ({ ...tier })) } : {}),
         };
         billedPerRequestNano = rate.perRequestNano ?? 0;
       }

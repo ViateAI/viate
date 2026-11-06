@@ -11,6 +11,14 @@ export type ModelPriceRate = {
   outputNanoPerMillion: number;
   cacheReadNanoPerMillion?: number;
   perRequestNano?: number;
+  contextTiers?: ContextPriceTier[];
+};
+
+export type ContextPriceTier = {
+  atTokens: number;
+  inputNanoPerMillion: number;
+  outputNanoPerMillion: number;
+  cacheReadNanoPerMillion?: number;
 };
 
 export type ModelPriceRow = ModelPriceRate & {
@@ -69,6 +77,7 @@ export function indexModelPrices(rows: readonly ModelPriceRow[]): ModelPriceInde
       inputNanoPerMillion: row.inputNanoPerMillion,
       outputNanoPerMillion: row.outputNanoPerMillion,
       ...(row.cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion: row.cacheReadNanoPerMillion } : {}),
+      ...(row.contextTiers?.length ? { contextTiers: row.contextTiers.map((tier) => ({ ...tier })) } : {}),
     });
     const slash = row.modelId.lastIndexOf("/");
     if (slash <= 0 || slash >= row.modelId.length - 1) {
@@ -87,6 +96,28 @@ export function indexModelPrices(rows: readonly ModelPriceRow[]): ModelPriceInde
 
 export function lookupModelPrice(index: ModelPriceIndex, modelId: string): ModelPriceRate | null {
   return resolveModelPrice(index, modelId, () => null);
+}
+
+export function selectContextPrice(rate: ModelPriceRate, inputTokens: number): ModelPriceRate {
+  const tiers = rate.contextTiers;
+  if (!Number.isInteger(inputTokens) || inputTokens <= 0 || !tiers?.length) {
+    return rate;
+  }
+  let chosen: ContextPriceTier | undefined;
+  for (const tier of tiers) {
+    if (inputTokens >= tier.atTokens && (chosen == null || tier.atTokens >= chosen.atTokens)) {
+      chosen = tier;
+    }
+  }
+  if (!chosen) {
+    return rate;
+  }
+  return {
+    inputNanoPerMillion: chosen.inputNanoPerMillion,
+    outputNanoPerMillion: chosen.outputNanoPerMillion,
+    ...(chosen.cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion: chosen.cacheReadNanoPerMillion } : {}),
+    ...(rate.perRequestNano != null ? { perRequestNano: rate.perRequestNano } : {}),
+  };
 }
 
 export function resolveModelPrice(
@@ -126,9 +157,13 @@ export function resolveModelPrice(
   ) {
     return null;
   }
-  return cacheReadNanoPerMillion == null
-    ? { inputNanoPerMillion, outputNanoPerMillion }
-    : { inputNanoPerMillion, outputNanoPerMillion, cacheReadNanoPerMillion };
+  const contextTiers = doubledContextTiers(base.contextTiers);
+  return {
+    inputNanoPerMillion,
+    outputNanoPerMillion,
+    ...(cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion } : {}),
+    ...(contextTiers ? { contextTiers } : {}),
+  };
 }
 
 const SAME_PRICE_SEGMENTS: Record<string, true> = {
@@ -172,7 +207,7 @@ function splitPriceSuffix(modelId: string): { base: string; fast: boolean } | nu
 function lookupIndexedPrice(index: ModelPriceIndex, modelId: string): ModelPriceRate | null {
   const exact = index.byId.get(modelId);
   if (exact) {
-    return { ...exact };
+    return cloneIndexedRate(exact);
   }
   if (modelId.includes("/")) {
     return null;
@@ -181,14 +216,50 @@ function lookupIndexedPrice(index: ModelPriceIndex, modelId: string): ModelPrice
   if (matches.length === 1) {
     const only = matches[0];
     const rate = only ? index.byId.get(only) : undefined;
-    return rate ? { ...rate } : null;
+    return rate ? cloneIndexedRate(rate) : null;
   }
   if (matches.length > 1) {
     const preferredId = `openrouter/${modelId}`;
     const preferred = index.byId.get(preferredId);
-    return preferred && matches.includes(preferredId) ? { ...preferred } : null;
+    return preferred && matches.includes(preferredId) ? cloneIndexedRate(preferred) : null;
   }
   return null;
+}
+
+function cloneIndexedRate(rate: ModelPriceRate): ModelPriceRate {
+  return {
+    inputNanoPerMillion: rate.inputNanoPerMillion,
+    outputNanoPerMillion: rate.outputNanoPerMillion,
+    ...(rate.cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion: rate.cacheReadNanoPerMillion } : {}),
+    ...(rate.contextTiers?.length ? { contextTiers: rate.contextTiers.map((tier) => ({ ...tier })) } : {}),
+  };
+}
+
+function doubledContextTiers(tiers: readonly ContextPriceTier[] | undefined): ContextPriceTier[] | undefined {
+  if (!tiers?.length) {
+    return undefined;
+  }
+  const doubled: ContextPriceTier[] = [];
+  for (const tier of tiers) {
+    const inputNanoPerMillion = tier.inputNanoPerMillion * 2;
+    const outputNanoPerMillion = tier.outputNanoPerMillion * 2;
+    const cacheReadNanoPerMillion =
+      tier.cacheReadNanoPerMillion == null ? undefined : tier.cacheReadNanoPerMillion * 2;
+    if (
+      !Number.isSafeInteger(inputNanoPerMillion) ||
+      !Number.isSafeInteger(outputNanoPerMillion) ||
+      (cacheReadNanoPerMillion != null && !Number.isSafeInteger(cacheReadNanoPerMillion))
+    ) {
+      continue;
+    }
+    doubled.push({
+      atTokens: tier.atTokens,
+      inputNanoPerMillion,
+      outputNanoPerMillion,
+      ...(cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion } : {}),
+    });
+  }
+  return doubled.length > 0 ? doubled : undefined;
 }
 
 export function createModelPriceCatalog(options: CatalogOptions): ModelPriceCatalog {
@@ -264,12 +335,57 @@ function priceRow(modelId: string, model: unknown): ModelPriceRow | null {
   if (inputNanoPerMillion === null || outputNanoPerMillion === null) {
     return null;
   }
+  const contextTiers = contextTiersFromCost(cost);
   return {
     modelId,
     inputNanoPerMillion,
     outputNanoPerMillion,
     ...(cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion } : {}),
+    ...(contextTiers ? { contextTiers } : {}),
   };
+}
+
+function contextTiersFromCost(cost: object): ContextPriceTier[] | undefined {
+  if (!("tiers" in cost) || !Array.isArray(cost.tiers)) {
+    return undefined;
+  }
+  const bySize = new Map<number, ContextPriceTier>();
+  for (const entry of cost.tiers) {
+    const tier = contextTierFromEntry(entry);
+    if (tier) {
+      bySize.set(tier.atTokens, tier);
+    }
+  }
+  if (bySize.size === 0) {
+    return undefined;
+  }
+  return [...bySize.values()].sort((left, right) => left.atTokens - right.atTokens);
+}
+
+function contextTierFromEntry(entry: unknown): ContextPriceTier | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry) || !("tier" in entry)) {
+    return null;
+  }
+  const marker = entry.tier;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker) || !("type" in marker) || marker.type !== "context") {
+    return null;
+  }
+  if (!("size" in marker) || typeof marker.size !== "number" || !Number.isInteger(marker.size) || marker.size <= 0) {
+    return null;
+  }
+  const inputNanoPerMillion = nanoPerMillionFromUsd("input" in entry ? entry.input : undefined);
+  const outputNanoPerMillion = nanoPerMillionFromUsd("output" in entry ? entry.output : undefined);
+  if (inputNanoPerMillion === null || outputNanoPerMillion === null) {
+    return null;
+  }
+  if (!("cache_read" in entry)) {
+    return { atTokens: marker.size, inputNanoPerMillion, outputNanoPerMillion };
+  }
+  const cacheReadNanoPerMillion = nanoPerMillionFromUsd(entry.cache_read);
+  if (cacheReadNanoPerMillion === null) {
+    return null;
+  }
+  return { atTokens: marker.size, inputNanoPerMillion, outputNanoPerMillion, cacheReadNanoPerMillion };
 }
 
 function absorbProvider(chosen: Map<string, ModelPriceRow>, provider: unknown): void {

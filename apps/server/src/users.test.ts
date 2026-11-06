@@ -685,6 +685,73 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     }
   });
 
+  it("bills every token at the context tier the prompt reaches", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "viate-users-context-tier-"));
+    const tierStore = await AdminStore.open(dir);
+    const tiers = [
+      {
+        atTokens: 200000,
+        inputNanoPerMillion: 4_000_000_000,
+        outputNanoPerMillion: 12_000_000_000,
+        cacheReadNanoPerMillion: 1_000_000_000,
+      },
+    ];
+    const tierUpstream = await listen((_req, res) => {
+      tiers[0]!.inputNanoPerMillion = 9;
+      tiers[0]!.outputNanoPerMillion = 9;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "chatcmpl-tier",
+          choices: [{ message: { content: "ok" } }],
+          usage: { prompt_tokens: 200000, completion_tokens: 1000 },
+        }),
+      );
+    });
+    enablePublished(tierStore, { baseUrl: tierUpstream.url, apiKey: "env-key" });
+    const user = tierStore.createUser({ email: "tier-http@example.com", name: "Tier", password: "password1" });
+    tierStore.grantUsd(user.id, "1.00");
+    const secret = tierStore.createApiKey("tier", user.id).secret;
+    const tierApp = await buildApp({
+      logger: false,
+      pluginManager: emptyPlugins(),
+      providers: [billingProvider()],
+      store: tierStore,
+      adminPassword: "correct-horse",
+      adminEnabled: true,
+      modelPrices: {
+        ready: true,
+        lookup(modelId: string) {
+          if (modelId !== "demo") {
+            return null;
+          }
+          return {
+            inputNanoPerMillion: 2_000_000_000,
+            outputNanoPerMillion: 6_000_000_000,
+            cacheReadNanoPerMillion: 500_000_000,
+            contextTiers: tiers,
+          };
+        },
+      },
+    });
+    try {
+      const billed = await tierApp.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${secret}` },
+        payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
+      });
+      assert.equal(billed.statusCode, 200);
+      await waitForUser(tierStore, user.id, "0.188");
+      assert.equal(readBalanceNano(dir, user.id), 1_000_000_000 - 800_000_000 - 12_000_000);
+    } finally {
+      await tierApp.close();
+      await tierUpstream.close();
+      tierStore.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not reserve inflight for an invalid JSON body or an unknown route", async () => {
     const user = store.createUser({ email: "stuck@example.com", name: "Stuck", password: "password1" });
     store.grantUsd(user.id, "1.00");
