@@ -111,6 +111,26 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     session?: unknown;
   }>();
 
+  async function exchangePendingOAuth(
+    connectionId: string,
+    pending: { providerId: string; state: string; session?: unknown },
+    code: string | undefined,
+  ) {
+    const provider = providers.get(pending.providerId);
+    if (!provider?.exchangeOAuth) {
+      throw inputError("provider does not support OAuth callback");
+    }
+    const result = await provider.exchangeOAuth({
+      connectionId,
+      credentials: options.store.getCredentials(connectionId),
+      code,
+      state: pending.state,
+      session: pending.session,
+    });
+    pendingOAuth.delete(connectionId);
+    return options.store.putCredentials(connectionId, result.credentials, result.displayLabel);
+  }
+
   app.addHook("preHandler", async (request, reply) => {
     if (!request.url.startsWith("/api/admin")) {
       return;
@@ -441,25 +461,36 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       return reply.code(400).send({ error: { message: "invalid OAuth state", type: "viate_error" } });
     }
     const [connectionId, pending] = match;
-    const provider = providers.get(pending.providerId);
-    if (!provider?.exchangeOAuth) {
-      return reply.code(400).send({ error: { message: "provider does not support OAuth callback", type: "viate_error" } });
+    try {
+      await exchangePendingOAuth(connectionId, pending, query.code);
+      return reply.redirect("/admin/");
+    } catch (error) {
+      return sendInputError(reply, error);
+    }
+  });
+
+  app.post("/api/admin/connections/:id/oauth/exchange", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const pending = pendingOAuth.get(id);
+    const stored = options.store.getConnection(id);
+    if (!pending || !stored) {
+      return reply.code(400).send({ error: { message: "no pending OAuth flow", type: "viate_error" } });
+    }
+    const body = asRecord(request.body);
+    const callback = typeof body.callback === "string" ? body.callback : "";
+    const parsed = parseOAuthCallback(callback);
+    if (parsed?.error && !parsed.code) {
+      return reply.code(400).send({ error: { message: parsed.error, type: "viate_error" } });
+    }
+    if (!parsed?.code) {
+      return reply.code(400).send({ error: { message: "OAuth callback is missing code", type: "viate_error" } });
+    }
+    if (parsed.state !== pending.state) {
+      return reply.code(400).send({ error: { message: "invalid OAuth state", type: "viate_error" } });
     }
     try {
-      const result = await provider.exchangeOAuth({
-        connectionId,
-        credentials: options.store.getCredentials(connectionId),
-        code: query.code,
-        state: query.state,
-        session: pending.session,
-      });
-      pendingOAuth.delete(connectionId);
-      options.store.putCredentials(
-        connectionId,
-        result.credentials,
-        result.displayLabel,
-      );
-      return reply.redirect("/admin/");
+      const connection = await exchangePendingOAuth(id, pending, parsed.code);
+      return { connection };
     } catch (error) {
       return sendInputError(reply, error);
     }
@@ -922,6 +953,38 @@ function toPluginViews(
 function publicOAuthStart(started: OAuthStartResult): Omit<OAuthStartResult, "session"> {
   const { session: _, ...result } = started;
   return result;
+}
+
+function parseOAuthCallback(value: string): { code?: string; state?: string; error?: string } | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const params = callbackParams(trimmed);
+  if (!params) return undefined;
+  const code = params.get("code")?.trim() || undefined;
+  const state = params.get("state")?.trim() || undefined;
+  const error = params.get("error")?.trim() || undefined;
+  if (!code && !state && !error) return undefined;
+  return {
+    ...(code ? { code } : {}),
+    ...(state ? { state } : {}),
+    ...(error ? { error } : {}),
+  };
+}
+
+function callbackParams(value: string): URLSearchParams | undefined {
+  try {
+    return new URL(value).searchParams;
+  } catch {
+    const query = value.startsWith("?") ? value.slice(1) : value;
+    if (!query.includes("=")) return undefined;
+    return new URLSearchParams(query);
+  }
+}
+
+function inputError(message: string): Error {
+  const error = new Error(message) as Error & { statusCode?: number };
+  error.statusCode = 400;
+  return error;
 }
 
 function passwordMatches(expected: string, provided: string): boolean {

@@ -283,6 +283,8 @@
   "oauth_browser": "Opened authorization page in a new window. Complete sign-in there, or {#link href=$url}click here{/link} if it didn't open. Waiting for authorization…",
   "oauth_device": "Open {#link href=$url}{url}{/link} and enter {#code}{userCode}{/code}. Waiting for authorization…",
   "oauth_starting": "Starting OAuth…",
+  "oauth_callback_paste": "If the browser stops on 127.0.0.1, paste the full address bar here.",
+  "oauth_callback_finish": "Finish authorization",
 
   "models_add_failed_id": "Added {id}.",
   "models_caption": "Models for {name}",

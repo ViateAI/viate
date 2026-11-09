@@ -545,6 +545,46 @@ describe("admin API", () => {
     assert.equal(store.getConnection(id)?.displayLabel, "oauth.example");
   });
 
+  it("exchanges a pasted loopback callback for a remote browser", async () => {
+    const session = await login(app, "correct-horse");
+    const created = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible" },
+    });
+    const id = created.json().connection.id as string;
+    const started = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/oauth/start`,
+    });
+    const state = new URL(started.json().authorizationUrl as string).searchParams.get("state");
+    const denied = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/oauth/exchange`,
+      payload: { callback: `http://127.0.0.1:38723/callback?state=other&code=oauth-code` },
+    });
+    assert.equal(denied.statusCode, 400);
+    assert.equal(denied.json().error.message, "invalid OAuth state");
+    assert.equal(store.getConnection(id)?.hasCredentials, false);
+
+    const exchanged = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/oauth/exchange`,
+      payload: { callback: `http://127.0.0.1:38723/callback?state=${encodeURIComponent(state ?? "")}&code=oauth-code` },
+    });
+    assert.equal(exchanged.statusCode, 200);
+    assert.equal(exchanged.json().connection.displayLabel, "oauth.example");
+    assert.equal(store.getConnection(id)?.displayLabel, "oauth.example");
+
+    const again = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/oauth/exchange`,
+      payload: { callback: `http://127.0.0.1:38723/callback?state=${encodeURIComponent(state ?? "")}&code=oauth-code` },
+    });
+    assert.equal(again.statusCode, 400);
+    assert.equal(again.json().error.message, "no pending OAuth flow");
+  });
+
   it("lists client API key prefixes, revokes them, and does not issue keys", async () => {
     const session = await login(app, "correct-horse");
     const user = store.createUser({ email: "codex@example.com", name: "Codex", password: "password1" });

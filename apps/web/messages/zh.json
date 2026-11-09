@@ -283,6 +283,8 @@
   "oauth_browser": "已在新窗口打开授权页。请在那里完成登录。如果没有打开，请{#link href=$url}点击这里{/link}。正在等待授权…",
   "oauth_device": "打开 {#link href=$url}{url}{/link}，并输入 {#code}{userCode}{/code}。正在等待授权…",
   "oauth_starting": "正在启动 OAuth…",
+  "oauth_callback_paste": "如果浏览器停在 127.0.0.1，把地址栏整段贴到这里。",
+  "oauth_callback_finish": "完成授权",
 
   "models_add_failed_id": "已添加 {id}。",
   "models_caption": "{name} 的模型",

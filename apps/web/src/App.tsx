@@ -979,7 +979,7 @@ function ConnectionForm({
           <DeviceCodePanel connectionId={existing.id} flow={oauth} onComplete={onSaved} onError={setError} />
         ) : null}
         {mode === "oauth" && oauth?.type === "authorization_url" ? (
-          <AuthUrlPanel connectionId={existing.id} url={oauth.authorizationUrl} onComplete={onSaved} />
+          <AuthUrlPanel connectionId={existing.id} url={oauth.authorizationUrl} onComplete={onSaved} onError={setError} />
         ) : null}
         {error ? <p className="banner error" role="alert">{error}</p> : null}
         <div className="row-actions">
@@ -1082,11 +1082,15 @@ function AuthUrlPanel({
   connectionId,
   url,
   onComplete,
+  onError,
 }: {
   connectionId: string;
   url: string;
   onComplete: () => Promise<void>;
+  onError: (value: string | null) => void;
 }) {
+  const [callback, setCallback] = useState("");
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     let cancelled = false;
     let polling = false;
@@ -1113,17 +1117,51 @@ function AuthUrlPanel({
   }, [connectionId, onComplete]);
 
   return (
-    <div className="banner ok" role="status">
-      <ParaglideMessage
-        message={m.oauth_browser}
-        inputs={{ url }}
-        markup={{
-          link: ({ children, options }) => (
-            <a href={String(options.href)} target="_blank" rel="noreferrer">{children}</a>
-          ),
-        }}
-      />
-    </div>
+    <>
+      <div className="banner ok" role="status">
+        <ParaglideMessage
+          message={m.oauth_browser}
+          inputs={{ url }}
+          markup={{
+            link: ({ children, options }) => (
+              <a href={String(options.href)} target="_blank" rel="noreferrer">{children}</a>
+            ),
+          }}
+        />
+      </div>
+      <label>
+        {m.oauth_callback_paste()}
+        <textarea
+          value={callback}
+          placeholder="http://127.0.0.1:38723/callback?code=…&state=…"
+          onChange={(event) => setCallback(event.target.value)}
+        />
+      </label>
+      <div className="row-actions">
+        <button
+          className="primary"
+          type="button"
+          disabled={busy || callback.trim() === ""}
+          onClick={async () => {
+            setBusy(true);
+            onError(null);
+            try {
+              await api(`/api/admin/connections/${connectionId}/oauth/exchange`, {
+                method: "POST",
+                body: JSON.stringify({ callback }),
+              });
+              await onComplete();
+            } catch (err) {
+              onError(isApiError(err) ? err.message : m.error_oauth());
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? m.busy_saving() : m.oauth_callback_finish()}
+        </button>
+      </div>
+    </>
   );
 }
 
