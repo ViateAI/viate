@@ -924,6 +924,119 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
   });
 });
 
+describe("GET /v1/user/balance", () => {
+  it("returns the key owner's USD wallet and does not charge", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-user-balance-"));
+    const store = await AdminStore.open(dataDir);
+    const owner = store.createUser({ email: "owner@example.com", name: "Owner", password: "password1" });
+    store.grantUsd(owner.id, "10.50");
+    const bearerKey = store.createApiKey("bearer", owner.id).secret;
+    const headerKey = store.createApiKey("header", owner.id).secret;
+
+    const zero = store.createUser({ email: "zero@example.com", name: "Zero", password: "password1" });
+    const zeroKey = store.createApiKey("zero", zero.id).secret;
+
+    const negative = store.createUser({ email: "negative@example.com", name: "Negative", password: "password1" });
+    const negativeKey = store.createApiKey("negative", negative.id).secret;
+    const negativeNano = -2_004_500_001;
+    writeBalanceNano(dataDir, negative.id, negativeNano);
+
+    const disabled = store.createUser({ email: "disabled@example.com", name: "Disabled", password: "password1" });
+    const disabledKey = store.createApiKey("disabled", disabled.id).secret;
+    store.updateUser(disabled.id, { status: "disabled" });
+
+    const gone = store.createUser({ email: "gone@example.com", name: "Gone", password: "password1" });
+    const goneKey = store.createApiKey("gone", gone.id);
+    retargetApiKeyUser(dataDir, goneKey.apiKey.id, "missing-user");
+
+    const unboundUser = store.createUser({ email: "unbound@example.com", name: "Unbound", password: "password1" });
+    const unbound = store.createApiKey("unbound", unboundUser.id);
+    retargetApiKeyUser(dataDir, unbound.apiKey.id, null);
+
+    const app = await buildApp({ logger: false, store });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    try {
+      const address = app.server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected tcp address");
+      }
+      const url = `http://127.0.0.1:${address.port}/v1/user/balance`;
+
+      const byBearer = await fetch(url, { headers: { authorization: `Bearer ${bearerKey}` } });
+      assert.equal(byBearer.status, 200);
+      assert.deepEqual(await byBearer.json(), { balanceUsd: "10.50" });
+
+      const byHeader = await fetch(url, { headers: { "x-api-key": headerKey } });
+      assert.equal(byHeader.status, 200);
+      assert.deepEqual(await byHeader.json(), { balanceUsd: "10.50" });
+
+      const zeroNano = readBalanceNano(dataDir, zero.id);
+      const zeroInflight = readInflight(dataDir, zero.id);
+      const zeroResponse = await fetch(url, { headers: { authorization: `Bearer ${zeroKey}` } });
+      assert.equal(zeroResponse.status, 200);
+      assert.deepEqual(await zeroResponse.json(), { balanceUsd: "0.00" });
+      assert.equal(readBalanceNano(dataDir, zero.id), zeroNano);
+      assert.equal(readInflight(dataDir, zero.id), zeroInflight);
+      assert.equal(zeroNano, 0);
+      assert.equal(zeroInflight, 0);
+
+      const negativeBefore = readBalanceNano(dataDir, negative.id);
+      const negativeInflight = readInflight(dataDir, negative.id);
+      const negativeResponse = await fetch(url, { headers: { authorization: `Bearer ${negativeKey}` } });
+      assert.equal(negativeResponse.status, 200);
+      assert.deepEqual(await negativeResponse.json(), { balanceUsd: "-2.004500001" });
+      assert.equal(readBalanceNano(dataDir, negative.id), negativeBefore);
+      assert.equal(readInflight(dataDir, negative.id), negativeInflight);
+      assert.equal(negativeBefore, negativeNano);
+
+      const disabledResponse = await fetch(url, { headers: { authorization: `Bearer ${disabledKey}` } });
+      assert.equal(disabledResponse.status, 403);
+      assert.deepEqual(await disabledResponse.json(), {
+        error: { message: "user disabled", type: "viate_error" },
+      });
+
+      const missingUser = await fetch(url, { headers: { authorization: `Bearer ${goneKey.secret}` } });
+      assert.equal(missingUser.status, 404);
+      assert.deepEqual(await missingUser.json(), {
+        error: { message: "user not found", type: "viate_error" },
+      });
+
+      const unboundResponse = await fetch(url, { headers: { authorization: `Bearer ${unbound.secret}` } });
+      assert.equal(unboundResponse.status, 403);
+      assert.deepEqual(await unboundResponse.json(), {
+        error: { message: "api key is not bound to a user", type: "viate_error" },
+      });
+
+      const missing = await fetch(url);
+      assert.equal(missing.status, 401);
+      assert.deepEqual(await missing.json(), {
+        error: { message: "invalid api key", type: "viate_error" },
+      });
+
+      const unknown = await fetch(url, { headers: { authorization: "Bearer viate_wrong" } });
+      assert.equal(unknown.status, 401);
+      assert.deepEqual(await unknown.json(), {
+        error: { message: "invalid api key", type: "viate_error" },
+      });
+
+      const login = await loginPortal(app, "owner@example.com", "password1");
+      const cookie = await fetch(url, { headers: { cookie: login.cookie } });
+      assert.equal(cookie.status, 401);
+      assert.deepEqual(await cookie.json(), {
+        error: { message: "invalid api key", type: "viate_error" },
+      });
+
+      assert.equal(store.listRequestLogs().length, 0);
+      assert.equal(store.getUser(owner.id)?.balanceUsd, "10.50");
+      assert.equal(readInflight(dataDir, owner.id), 0);
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 function statusCode(error: unknown): number | undefined {
   if (typeof error === "object" && error !== null && "statusCode" in error) {
     return Number((error as { statusCode: unknown }).statusCode);
@@ -948,6 +1061,25 @@ function readBalanceNano(dataDir: string, userId: string): number {
       balance_nano: number | bigint;
     };
     return Number(row.balance_nano);
+  } finally {
+    db.close();
+  }
+}
+
+function writeBalanceNano(dataDir: string, userId: string, balanceNano: number): void {
+  const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
+  try {
+    db.prepare("UPDATE users SET balance_nano = ? WHERE id = ?").run(balanceNano, userId);
+  } finally {
+    db.close();
+  }
+}
+
+function retargetApiKeyUser(dataDir: string, apiKeyId: string, userId: string | null): void {
+  const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
+  try {
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.prepare("UPDATE api_keys SET user_id = ? WHERE id = ?").run(userId, apiKeyId);
   } finally {
     db.close();
   }

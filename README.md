@@ -90,6 +90,9 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 | `POST` | `/v1/videos/edits` |
 | `POST` | `/v1/videos/extensions` |
 | `GET` | `/v1/videos/:requestId` |
+| `GET` | `/v1/user/balance` |
+
+`GET /v1/user/balance` returns the key owner's spendable USD balance as `balanceUsd`, for example `{ "balanceUsd": "10.50" }`. It does not start a request or charge.
 
 A provider method that is not implemented returns 404 `capability not supported`.
 

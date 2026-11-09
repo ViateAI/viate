@@ -119,6 +119,7 @@ export async function registerChatRoute(app: FastifyInstance, options: ChatRoute
   app.get<{ Params: { requestId: string } }>("/v1/videos/:requestId", (request, reply) =>
     pollVideo(request, reply, options, providers),
   );
+  app.get("/v1/user/balance", (request, reply) => userBalance(request, reply, options));
 
   if (options.store) {
     const scheduler = createKeepaliveScheduler({
@@ -361,6 +362,18 @@ async function dispatch(
 
 function isVideoSubmit(capability: Capability): boolean {
   return capability === "videoGenerations" || capability === "videoEdits" || capability === "videoExtensions";
+}
+
+function userBalance(request: FastifyRequest, reply: FastifyReply, options: ChatRouteOptions): FastifyReply {
+  const userId = (request as AuthenticatedRequest).viateV1?.apiKey.userId;
+  const user = userId ? options.store?.getUser(userId) ?? null : null;
+  if (!user) {
+    return viateError(reply, 404, "user not found");
+  }
+  if (user.status !== "active") {
+    return viateError(reply, 403, "user disabled");
+  }
+  return reply.send({ balanceUsd: user.balanceUsd });
 }
 
 async function pollVideo(
