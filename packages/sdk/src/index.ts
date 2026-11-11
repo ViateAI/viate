@@ -40,12 +40,37 @@ export type ProviderConnection = {
   credentials: unknown;
 };
 
+export type CredentialFieldOption = {
+  label: string;
+  value: string;
+};
+
 export type CredentialField = {
   key: string;
   label: string;
-  kind: "string" | "secret" | "url";
+  description?: string;
+  placeholder?: string;
   required?: boolean;
-};
+  defaultValue?: string;
+} & (
+  | { kind: "string" | "secret" | "url" }
+  | { kind: "textarea"; rows?: number }
+  | { kind: "select"; options: CredentialFieldOption[] }
+);
+
+export type AuthMethod =
+  | {
+      id: string;
+      label: string;
+      type: "credentials";
+      fields: CredentialField[];
+    }
+  | {
+      id: string;
+      label: string;
+      type: "oauth";
+      fields?: CredentialField[];
+    };
 
 export type CredentialsWrite = {
   credentials: unknown;
@@ -71,6 +96,7 @@ export type KeepaliveResult = {
 export type OAuthStartContext = {
   connectionId: string;
   credentials: unknown;
+  input?: Record<string, string>;
   callbackUrl: string;
 };
 
@@ -205,8 +231,8 @@ export type Subscription = {
 
 export type ProviderHandler = {
   id: string;
+  authMethods?: AuthMethod[];
   credentialsForm?: CredentialField[];
-  parseCredentials?(text: string): unknown | Promise<unknown>;
   normalizeCredentials?(input: unknown): CredentialsWrite | Promise<CredentialsWrite>;
   startOAuth?(ctx: OAuthStartContext): Promise<OAuthStartResult>;
   exchangeOAuth?(input: OAuthExchangeInput): Promise<CredentialsWrite>;

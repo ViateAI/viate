@@ -648,11 +648,12 @@ export class AdminStore {
     return row ? this.toConnection(row) : null;
   }
 
-  createConnection(providerId: string): StoredConnection {
+  createConnection(providerId: string, displayLabel?: string): StoredConnection {
     const trimmed = providerId.trim();
     if (!trimmed) {
       throw Object.assign(new Error("providerId is required"), { statusCode: 400 });
     }
+    const label = displayLabel?.trim() || null;
     const latest = this.db
       .prepare("SELECT created_at FROM connections ORDER BY created_at DESC, id DESC LIMIT 1")
       .get() as { created_at: string } | undefined;
@@ -665,9 +666,9 @@ export class AdminStore {
     this.db
       .prepare(
         `INSERT INTO connections (id, provider_id, credentials_enc, display_label, active, keepalive_status, created_at, updated_at)
-         VALUES (?, ?, NULL, NULL, 0, 'idle', ?, ?)`,
+         VALUES (?, ?, NULL, ?, 0, 'idle', ?, ?)`,
       )
-      .run(id, trimmed, now, now);
+      .run(id, trimmed, label, now, now);
     const created = this.getConnection(id);
     if (!created) {
       throw new Error("failed to create connection");
@@ -679,7 +680,7 @@ export class AdminStore {
     const existing = this.requireRow(id);
     const now = new Date().toISOString();
     const enc = encryptSecret(this.key, JSON.stringify(credentials ?? null));
-    const label = displayLabel?.trim() || existing.display_label || id;
+    const label = displayLabel?.trim() ? displayLabel.trim() : existing.display_label;
     this.db
       .prepare(
         `UPDATE connections
@@ -690,6 +691,15 @@ export class AdminStore {
     const updated = this.requireConnection(id);
     this.notifyCredentialsChanged(id);
     return updated;
+  }
+
+  setDisplayLabel(id: string, displayLabel: string): StoredConnection {
+    this.requireRow(id);
+    const label = displayLabel.trim() || null;
+    this.db
+      .prepare("UPDATE connections SET display_label = ?, updated_at = ? WHERE id = ?")
+      .run(label, new Date().toISOString(), id);
+    return this.requireConnection(id);
   }
 
   clearCredentials(id: string): StoredConnection {
@@ -1011,6 +1021,42 @@ export class AdminStore {
       .run(enabled ? 1 : 0, id, modelId);
     if (result.changes === 0) {
       throw Object.assign(new Error("model not found"), { statusCode: 404 });
+    }
+    return this.getConnectionModels(id);
+  }
+
+  setConnectionModelsEnabled(id: string, modelIds: string[], enabled: boolean): ConnectionModelCatalog {
+    this.requireRow(id);
+    const unique: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of modelIds) {
+      const modelId = raw.trim();
+      if (!modelId || seen.has(modelId)) continue;
+      seen.add(modelId);
+      unique.push(modelId);
+    }
+    if (unique.length === 0) {
+      return this.getConnectionModels(id);
+    }
+    const placeholders = unique.map(() => "?").join(", ");
+    this.db.exec("BEGIN");
+    try {
+      const found = this.db
+        .prepare(`SELECT model_id FROM connection_models WHERE connection_id = ? AND model_id IN (${placeholders})`)
+        .all(id, ...unique) as Array<{ model_id: string }>;
+      if (found.length !== unique.length) {
+        throw Object.assign(new Error("model not found"), { statusCode: 404 });
+      }
+      const update = this.db.prepare(
+        "UPDATE connection_models SET enabled = ? WHERE connection_id = ? AND model_id = ?",
+      );
+      for (const modelId of unique) {
+        update.run(enabled ? 1 : 0, id, modelId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
     return this.getConnectionModels(id);
   }

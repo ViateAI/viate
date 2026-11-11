@@ -7,7 +7,7 @@ import {
   type PluginLoadFailure,
 } from "@viateai/plugin-manager";
 import type {
-  CredentialField,
+  AuthMethod,
   OAuthStartResult,
   ProviderHandler,
 } from "@viateai/sdk";
@@ -66,9 +66,7 @@ export type AdminPluginView = {
     | "videoExtensions"
     | "videoResult"
   >;
-  credentialsForm: CredentialField[];
-  hasParseCredentials: boolean;
-  hasOAuth: boolean;
+  authMethods: AuthMethod[];
   hasKeepalive: boolean;
   hasSubscription: boolean;
   advertisedEndpointTypes: ProxyEndpointType[];
@@ -128,7 +126,12 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       session: pending.session,
     });
     pendingOAuth.delete(connectionId);
-    return options.store.putCredentials(connectionId, result.credentials, result.displayLabel);
+    const stored = options.store.getConnection(connectionId);
+    return options.store.putCredentials(
+      connectionId,
+      result.credentials,
+      stored ? preservedOAuthLabel(stored, result.displayLabel) : result.displayLabel,
+    );
   }
 
   app.addHook("preHandler", async (request, reply) => {
@@ -321,11 +324,35 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     if (!providerId) {
       return reply.code(400).send({ error: { message: "providerId is required", type: "viate_error" } });
     }
-    if (!providers.has(providerId)) {
+    const provider = providers.get(providerId);
+    if (!provider) {
       return reply.code(400).send({ error: { message: `provider not loaded: ${providerId}`, type: "viate_error" } });
     }
-    const connection = options.store.createConnection(providerId);
-    return { connection };
+    if (body.credentials !== undefined) {
+      try {
+        const normalized = provider.normalizeCredentials
+          ? await provider.normalizeCredentials(body.credentials)
+          : { credentials: body.credentials };
+        const connection = options.store.createConnection(providerId);
+        const saved = options.store.putCredentials(
+          connection.id,
+          normalized.credentials,
+          chosenDisplayLabel(body.displayLabel, normalized.displayLabel),
+        );
+        return { connection: saved };
+      } catch (error) {
+        return sendInputError(reply, error);
+      }
+    }
+    try {
+      const connection = options.store.createConnection(
+        providerId,
+        typeof body.displayLabel === "string" ? body.displayLabel : undefined,
+      );
+      return { connection };
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
   });
 
   app.put("/api/admin/connections/:id", async (request, reply) => {
@@ -340,26 +367,21 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
         return reply.code(400).send({ error: { message: `provider not loaded: ${stored.providerId}`, type: "viate_error" } });
       }
       const body = asRecord(request.body);
-      let credentials: unknown;
-      if (typeof body.text === "string") {
-        if (!provider.parseCredentials) {
-          return reply.code(400).send({ error: { message: "provider does not accept pasted credentials", type: "viate_error" } });
-        }
-        credentials = await provider.parseCredentials(body.text);
-      } else if ("credentials" in body) {
-        credentials = body.credentials;
-      } else {
-        return reply.code(400).send({ error: { message: "credentials or text is required", type: "viate_error" } });
+      if ("credentials" in body && body.credentials !== undefined) {
+        const normalized = provider.normalizeCredentials
+          ? await provider.normalizeCredentials(body.credentials)
+          : { credentials: body.credentials };
+        const connection = options.store.putCredentials(
+          id,
+          normalized.credentials,
+          chosenDisplayLabel(body.displayLabel, normalized.displayLabel),
+        );
+        return { connection };
       }
-      const normalized = provider.normalizeCredentials
-        ? await provider.normalizeCredentials(credentials)
-        : { credentials };
-      const connection = options.store.putCredentials(
-        id,
-        normalized.credentials,
-        normalized.displayLabel,
-      );
-      return { connection };
+      if (typeof body.displayLabel === "string") {
+        return { connection: options.store.setDisplayLabel(id, body.displayLabel) };
+      }
+      return reply.code(400).send({ error: { message: "credentials or displayLabel is required", type: "viate_error" } });
     } catch (error) {
       return sendInputError(reply, error);
     }
@@ -400,6 +422,11 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     if (!provider?.startOAuth) {
       return reply.code(400).send({ error: { message: "provider does not support OAuth", type: "viate_error" } });
     }
+    const body = asRecord(request.body);
+    const input = readStringRecord(body.input);
+    if (input === null) {
+      return reply.code(400).send({ error: { message: "input must be an object of strings", type: "viate_error" } });
+    }
     const state = crypto.randomUUID();
     const host = headerValue(request.headers.host);
     if (!host) {
@@ -410,8 +437,12 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       const started = await provider.startOAuth({
         connectionId: id,
         credentials: options.store.getCredentials(id),
+        ...(input ? { input } : {}),
         callbackUrl,
       });
+      if (typeof body.displayLabel === "string" && body.displayLabel.trim()) {
+        options.store.setDisplayLabel(id, body.displayLabel);
+      }
       pendingOAuth.set(id, {
         providerId: stored.providerId,
         state,
@@ -442,7 +473,11 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       });
       if (result.type === "complete") {
         pendingOAuth.delete(id);
-        const connection = options.store.putCredentials(id, result.credentials, result.displayLabel);
+        const connection = options.store.putCredentials(
+          id,
+          result.credentials,
+          preservedOAuthLabel(stored, result.displayLabel),
+        );
         return { type: "complete", connection };
       }
       if (result.type === "failed") {
@@ -478,18 +513,24 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     }
     const body = asRecord(request.body);
     const callback = typeof body.callback === "string" ? body.callback : "";
-    const parsed = parseOAuthCallback(callback);
-    if (parsed?.error && !parsed.code) {
-      return reply.code(400).send({ error: { message: parsed.error, type: "viate_error" } });
-    }
-    if (!parsed?.code) {
-      return reply.code(400).send({ error: { message: "OAuth callback is missing code", type: "viate_error" } });
-    }
-    if (parsed.state !== pending.state) {
-      return reply.code(400).send({ error: { message: "invalid OAuth state", type: "viate_error" } });
+    let code = typeof body.code === "string" ? body.code.trim() : "";
+    if (callback.trim()) {
+      const parsed = parseOAuthCallback(callback);
+      if (parsed?.error && !parsed.code) {
+        return reply.code(400).send({ error: { message: parsed.error, type: "viate_error" } });
+      }
+      if (!parsed?.code) {
+        return reply.code(400).send({ error: { message: "OAuth callback is missing code", type: "viate_error" } });
+      }
+      if (parsed.state !== pending.state) {
+        return reply.code(400).send({ error: { message: "invalid OAuth state", type: "viate_error" } });
+      }
+      code = parsed.code;
+    } else if (!code) {
+      return reply.code(400).send({ error: { message: "code is required", type: "viate_error" } });
     }
     try {
-      const connection = await exchangePendingOAuth(id, pending, parsed.code);
+      const connection = await exchangePendingOAuth(id, pending, code);
       return { connection };
     } catch (error) {
       return sendInputError(reply, error);
@@ -499,6 +540,12 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
   app.delete("/api/admin/connections/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
+      if (unconfiguredOnly(request.query)) {
+        const stored = options.store.getConnection(id);
+        if (!stored || stored.hasCredentials) {
+          return { ok: true };
+        }
+      }
       options.store.deleteConnection(id);
       return { ok: true };
     } catch (error) {
@@ -561,6 +608,22 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
     }
     try {
       return options.store.setConnectionModelEnabled(id, decodeURIComponent(modelId), body.enabled);
+    } catch (error) {
+      return sendStoreError(reply, error);
+    }
+  });
+
+  app.patch("/api/admin/connections/:id/models", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = asRecord(request.body);
+    if (!Array.isArray(body.modelIds) || body.modelIds.some((modelId) => typeof modelId !== "string")) {
+      return reply.code(400).send({ error: { message: "modelIds is required", type: "viate_error" } });
+    }
+    if (typeof body.enabled !== "boolean") {
+      return reply.code(400).send({ error: { message: "enabled is required", type: "viate_error" } });
+    }
+    try {
+      return options.store.setConnectionModelsEnabled(id, body.modelIds, body.enabled);
     } catch (error) {
       return sendStoreError(reply, error);
     }
@@ -938,9 +1001,7 @@ function toPluginViews(
       restartRequired: plugin.status === "pending",
       error: errors.get(plugin.name) ?? null,
       capabilities,
-      credentialsForm: provider?.credentialsForm ?? [],
-      hasParseCredentials: Boolean(provider?.parseCredentials),
-      hasOAuth: Boolean(provider?.startOAuth),
+      authMethods: authMethodsFor(provider),
       hasKeepalive: Boolean(provider?.keepalive),
       hasSubscription: Boolean(provider?.subscription),
       advertisedEndpointTypes: plugin.id
@@ -948,6 +1009,47 @@ function toPluginViews(
         : [...VIATE_DEFAULT_ENDPOINT_TYPES],
     };
   });
+}
+
+function authMethodsFor(provider: ProviderHandler | undefined): AuthMethod[] {
+  if (provider?.authMethods && provider.authMethods.length > 0) {
+    return provider.authMethods;
+  }
+  const methods: AuthMethod[] = [];
+  if (provider?.credentialsForm?.length) {
+    methods.push({
+      id: "credentials",
+      label: "Credentials",
+      type: "credentials",
+      fields: provider.credentialsForm,
+    });
+  }
+  if (provider?.startOAuth) {
+    methods.push({ id: "oauth", label: "OAuth", type: "oauth" });
+  }
+  return methods;
+}
+
+function chosenDisplayLabel(explicit: unknown, normalized?: string): string | undefined {
+  const fromBody = typeof explicit === "string" ? explicit.trim() : "";
+  return fromBody || normalized?.trim() || undefined;
+}
+
+function preservedOAuthLabel(stored: { id: string; displayLabel: string }, suggested?: string): string | undefined {
+  if (stored.displayLabel !== stored.id) return stored.displayLabel;
+  const trimmed = suggested?.trim();
+  return trimmed || undefined;
+}
+
+function readStringRecord(value: unknown): Record<string, string> | undefined | null {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry !== "string") return null;
+    record[key] = entry;
+  }
+  return record;
 }
 
 function publicOAuthStart(started: OAuthStartResult): Omit<OAuthStartResult, "session"> {
@@ -1098,6 +1200,11 @@ function catalogPriceJson(
     })),
     overridden,
   };
+  }
+
+function unconfiguredOnly(query: unknown): boolean {
+  if (!query || typeof query !== "object" || !("unconfigured" in query)) return false;
+  return query.unconfigured === "1";
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

@@ -11,6 +11,7 @@ import {
   type PortalEndpointType,
   type UserUsageRequest,
 } from "./api";
+import { ConfirmDialog } from "./dialog";
 import { formatCount, formatDateTime } from "./format";
 import { LocaleSwitch } from "./locale-switch";
 import { m } from "./paraglide/messages.js";
@@ -523,6 +524,9 @@ function KeysPanel() {
   const [keys, setKeys] = useState<ClientApiKey[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState<{ name: string; secret: string } | null>(null);
+  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(null);
+  const [confirm, setConfirm] = useState<ClientApiKey | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const selected = channels?.find((channel) => channel.id === channelId) ?? null;
@@ -544,12 +548,18 @@ function KeysPanel() {
       .catch((err) => setError(isApiError(err) ? err.message : m.error_load_channels()));
   }, []);
 
+  useEffect(() => {
+    if (copyStatus !== "copied") return;
+    const timer = window.setTimeout(() => setCopyStatus(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copyStatus]);
+
   return (
-    <section className="panel stack portal-keys">
+    <section className="stack portal-keys">
       {notice ? <p className="banner ok" role="status">{notice}</p> : null}
       {error ? <p className="banner error" role="alert">{error}</p> : null}
       <form
-        className="form"
+        className="panel form"
         onSubmit={async (event) => {
           event.preventDefault();
           setBusy(true);
@@ -561,6 +571,7 @@ function KeysPanel() {
               body: JSON.stringify({ name, channelId }),
             });
             setName("");
+            setCopyStatus(null);
             setSecret({ name: result.apiKey.name, secret: result.secret });
             await refresh();
             setNotice(m.portal_copy_once());
@@ -609,14 +620,28 @@ function KeysPanel() {
         </button>
       </form>
       {secret ? (
-        <div className="banner ok secret-row" role="status">
+        <div className="banner ok secret-row">
           <div>
             <ParaglideMessage
               message={m.portal_copy_secret}
               inputs={{ name: secret.name, secret: secret.secret }}
               markup={{ code: ({ children }) => <code>{children}</code> }}
             />
+            {copyStatus ? (
+              <p className="meta" role="status">{copyStatus === "copied" ? m.portal_copied() : m.error_copy()}</p>
+            ) : null}
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard.writeText(secret.secret).then(
+                () => setCopyStatus("copied"),
+                () => setCopyStatus("failed"),
+              );
+            }}
+          >
+            {copyStatus === "copied" ? m.action_copied() : m.action_copy()}
+          </button>
         </div>
       ) : null}
       {keys === null ? <p className="meta">{m.portal_keys_loading()}</p> : null}
@@ -635,29 +660,42 @@ function KeysPanel() {
               </div>
             </div>
             <div className="row-actions">
-            <button
-              className="danger"
-              type="button"
-              onClick={() => {
-                void (async () => {
-                  setError(null);
-                  try {
-                    await api(`/api/portal/keys/${key.id}`, { method: "DELETE" });
-                    if (secret?.name === key.name) setSecret(null);
-                    await refresh();
-                    setNotice(m.portal_revoked());
-                  } catch (err) {
-                    setError(isApiError(err) ? err.message : m.error_revoke());
-                  }
-                })();
-              }}
-            >
-                {m.action_revoke()}
-              </button>
+            <button className="danger" type="button" onClick={() => setConfirm(key)}>
+              {m.action_revoke()}
+            </button>
             </div>
           </article>
         );
       })}
+      {confirm ? (
+        <ConfirmDialog
+          title={m.keys_revoke_title({ name: confirm.name })}
+          body={m.portal_revoke_body()}
+          confirmLabel={m.action_revoke()}
+          busy={confirmBusy}
+          onCancel={() => {
+            if (!confirmBusy) setConfirm(null);
+          }}
+          onConfirm={async () => {
+            setConfirmBusy(true);
+            setError(null);
+            try {
+              await api(`/api/portal/keys/${confirm.id}`, { method: "DELETE" });
+              if (secret?.name === confirm.name) {
+                setSecret(null);
+                setCopyStatus(null);
+              }
+              await refresh();
+              setNotice(m.portal_revoked());
+            } catch (err) {
+              setError(isApiError(err) ? err.message : m.error_revoke());
+            } finally {
+              setConfirmBusy(false);
+              setConfirm(null);
+            }
+          }}
+        />
+      ) : null}
     </section>
   );
 }

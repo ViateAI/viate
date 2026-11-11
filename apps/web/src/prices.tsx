@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, isApiError } from "./api";
+import { ConfirmDialog } from "./dialog";
 import { m } from "./paraglide/messages.js";
 
 type PriceOverride = {
@@ -46,10 +47,42 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const catalogRefresh = useRef<() => Promise<void>>(async () => {});
+  const [confirm, setConfirm] = useState<PriceOverride | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [editingModelId, setEditingModelId] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const priceRef = useRef<HTMLInputElement>(null);
+  const [focusTick, setFocusTick] = useState(0);
+
+  useEffect(() => {
+    if (focusTick === 0) return;
+    formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    priceRef.current?.focus();
+  }, [focusTick, mode]);
+
+  function beginEdit(row: PriceOverride) {
+    setEditingModelId(row.modelId);
+    setModelId(row.modelId);
+    setMode(row.mode);
+    setUsdPerRequest(row.mode === "request" ? row.usdPerRequest ?? "" : "");
+    setInputUsd(row.mode === "tokens" ? row.inputUsdPerMillion : "");
+    setOutputUsd(row.mode === "tokens" ? row.outputUsdPerMillion : "");
+    setFocusTick((tick) => tick + 1);
+  }
+
+  function cancelEdit() {
+    setEditingModelId(null);
+    setModelId("");
+    setMode("request");
+    setInputUsd("");
+    setOutputUsd("");
+    setUsdPerRequest("");
+  }
 
   return (
     <section className="stack">
       <form
+        ref={formRef}
         className="panel form"
         onSubmit={async (event) => {
           event.preventDefault();
@@ -66,6 +99,7 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
                 usdPerRequest: mode === "request" ? usdPerRequest.trim() : "",
               }),
             });
+            setEditingModelId(null);
             setModelId("");
             setInputUsd("");
             setOutputUsd("");
@@ -102,13 +136,13 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
         {mode === "request" ? (
           <label>
             {m.label_usd_per_request()}
-            <input inputMode="decimal" value={usdPerRequest} onChange={(event) => setUsdPerRequest(event.target.value)} required />
+            <input ref={priceRef} inputMode="decimal" value={usdPerRequest} onChange={(event) => setUsdPerRequest(event.target.value)} required />
           </label>
         ) : (
           <>
         <label>
           {m.label_input_usd()}
-          <input inputMode="decimal" value={inputUsd} onChange={(event) => setInputUsd(event.target.value)} required />
+          <input ref={priceRef} inputMode="decimal" value={inputUsd} onChange={(event) => setInputUsd(event.target.value)} required />
         </label>
         <label>
           {m.label_output_usd()}
@@ -116,9 +150,16 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
         </label>
           </>
         )}
-        <button className="primary" type="submit" disabled={busy}>
-          {busy ? m.busy_saving() : m.action_save_price()}
-        </button>
+        <div className="row-actions">
+          <button className="primary" type="submit" disabled={busy}>
+            {busy ? m.busy_saving() : m.action_save_price()}
+          </button>
+          {editingModelId !== null ? (
+            <button className="ghost" type="button" disabled={busy} onClick={cancelEdit}>
+              {m.action_cancel()}
+            </button>
+          ) : null}
+        </div>
       </form>
       {error ? (
         <p className="banner error" role="alert">
@@ -136,7 +177,7 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
         </div>
       ) : null}
       {view?.overrides.map((row) => (
-        <article className="resource" key={row.modelId}>
+        <article className={editingModelId === row.modelId ? "resource is-editing" : "resource"} key={row.modelId}>
           <div className="resource-main">
             <div className="resource-title-row">
               <h2>{row.modelId}</h2>
@@ -148,27 +189,43 @@ export function PricesPage({ onNotice }: { onNotice: (value: string | null) => v
             </div>
           </div>
           <div className="row-actions">
-            <button
-              className="danger"
-              type="button"
-              onClick={() => {
-                void (async () => {
-                  setError(null);
-                  try {
-                    await api(`/api/admin/model-prices/${encodeURIComponent(row.modelId)}`, { method: "DELETE" });
-                    await catalogRefresh.current();
-                    onNotice(m.prices_removed());
-                  } catch (err) {
-                    setError(isApiError(err) ? err.message : m.error_remove());
-                  }
-                })();
-              }}
-            >
+            <button type="button" onClick={() => beginEdit(row)}>
+              {m.action_edit()}
+            </button>
+            <button className="danger" type="button" onClick={() => setConfirm(row)}>
               {m.action_remove()}
             </button>
           </div>
         </article>
       ))}
+      {confirm ? (
+        <ConfirmDialog
+          title={m.prices_remove_title({ model: confirm.modelId })}
+          body={m.prices_remove_body()}
+          confirmLabel={m.action_remove()}
+          busy={confirmBusy}
+          onCancel={() => {
+            if (!confirmBusy) setConfirm(null);
+          }}
+          onConfirm={async () => {
+            setConfirmBusy(true);
+            setError(null);
+            try {
+              await api(`/api/admin/model-prices/${encodeURIComponent(confirm.modelId)}`, { method: "DELETE" });
+              if (editingModelId === confirm.modelId) {
+                cancelEdit();
+              }
+              await catalogRefresh.current();
+              onNotice(m.prices_removed());
+            } catch (err) {
+              setError(isApiError(err) ? err.message : m.error_remove());
+            } finally {
+              setConfirmBusy(false);
+              setConfirm(null);
+            }
+          }}
+        />
+      ) : null}
       <CatalogPrices
         refreshRef={catalogRefresh}
         onLoaded={(next) => {

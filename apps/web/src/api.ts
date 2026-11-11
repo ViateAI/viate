@@ -23,20 +23,43 @@ export type AdminPlugin = {
     | "videoExtensions"
     | "videoResult"
   >;
-  credentialsForm: CredentialField[];
-  hasParseCredentials: boolean;
-  hasOAuth: boolean;
+  authMethods: AuthMethod[];
   hasKeepalive: boolean;
   hasSubscription: boolean;
   advertisedEndpointTypes: PublicEndpointType[];
 };
 
+export type CredentialFieldOption = {
+  label: string;
+  value: string;
+};
+
 export type CredentialField = {
   key: string;
   label: string;
-  kind: "string" | "secret" | "url";
+  description?: string;
+  placeholder?: string;
   required?: boolean;
-};
+  defaultValue?: string;
+} & (
+  | { kind: "string" | "secret" | "url" }
+  | { kind: "textarea"; rows?: number }
+  | { kind: "select"; options: CredentialFieldOption[] }
+);
+
+export type AuthMethod =
+  | {
+      id: string;
+      label: string;
+      type: "credentials";
+      fields: CredentialField[];
+    }
+  | {
+      id: string;
+      label: string;
+      type: "oauth";
+      fields?: CredentialField[];
+    };
 
 export type OperationLog = {
   id: number;

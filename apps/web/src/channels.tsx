@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, isApiError, type AdminPlugin, type AdminPublishedModel, type ChannelRule, type ChannelView } from "./api";
+import { ConfirmDialog } from "./dialog";
 import { m } from "./paraglide/messages.js";
 
 type CatalogModel = {
@@ -20,6 +21,11 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
   const [modelIds, setModelIds] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<ChannelView | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const [focusTick, setFocusTick] = useState(0);
 
   async function refresh() {
     const [channelResult, publishedResult, pluginResult] = await Promise.all([
@@ -37,6 +43,12 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
     refresh().catch((err) => setError(isApiError(err) ? err.message : m.error_load_channels()));
   }, []);
 
+  useEffect(() => {
+    if (focusTick === 0) return;
+    formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    nameRef.current?.focus();
+  }, [focusTick]);
+
   function load(channel: ChannelView) {
     setEditing(channel.id);
     setName(channel.name);
@@ -51,6 +63,7 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
       setModelIds(channel.rule.modelIds);
     }
     setError(null);
+    setFocusTick((tick) => tick + 1);
   }
 
   function reset() {
@@ -77,6 +90,7 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
     <section className="stack">
       {error ? <p className="banner error" role="alert">{error}</p> : null}
       <form
+        ref={formRef}
         className="panel form"
         onSubmit={async (event) => {
           event.preventDefault();
@@ -107,7 +121,7 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
         </div>
         <label>
           {m.label_name()}
-          <input value={name} onChange={(event) => setName(event.target.value)} required />
+          <input ref={nameRef} value={name} onChange={(event) => setName(event.target.value)} required />
         </label>
         <label>
           {m.label_ratio()}
@@ -207,7 +221,7 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
       {channels === null ? <p className="meta">{m.channels_loading()}</p> : null}
       {channels && channels.length === 0 ? <p className="meta">{m.channels_empty()}</p> : null}
       {channels?.map((channel) => (
-        <article className="resource" key={channel.id}>
+        <article className={editing === channel.id ? "resource is-editing" : "resource"} key={channel.id}>
           <div className="resource-main">
             <div className="resource-title-row">
               <h2>{channel.name}</h2>
@@ -219,29 +233,39 @@ export function ChannelsPage({ onNotice }: { onNotice: (value: string | null) =>
             <button type="button" onClick={() => load(channel)}>
               {m.action_edit()}
             </button>
-            <button
-              className="danger"
-              type="button"
-              onClick={() => {
-                void (async () => {
-                  setError(null);
-                  onNotice(null);
-                  try {
-                    await api(`/api/admin/channels/${channel.id}`, { method: "DELETE" });
-                    if (editing === channel.id) reset();
-                    await refresh();
-                    onNotice(m.channels_deleted());
-                  } catch (err) {
-                    setError(isApiError(err) ? err.message : m.error_delete());
-                  }
-                })();
-              }}
-            >
+            <button className="danger" type="button" onClick={() => setConfirm(channel)}>
               {m.action_delete()}
             </button>
           </div>
         </article>
       ))}
+      {confirm ? (
+        <ConfirmDialog
+          title={m.channels_delete_title({ name: confirm.name })}
+          body={m.channels_delete_body()}
+          confirmLabel={m.action_delete()}
+          busy={confirmBusy}
+          onCancel={() => {
+            if (!confirmBusy) setConfirm(null);
+          }}
+          onConfirm={async () => {
+            setConfirmBusy(true);
+            setError(null);
+            onNotice(null);
+            try {
+              await api(`/api/admin/channels/${confirm.id}`, { method: "DELETE" });
+              if (editing === confirm.id) reset();
+              await refresh();
+              onNotice(m.channels_deleted());
+            } catch (err) {
+              setError(isApiError(err) ? err.message : m.error_delete());
+            } finally {
+              setConfirmBusy(false);
+              setConfirm(null);
+            }
+          }}
+        />
+      ) : null}
     </section>
   );
 }

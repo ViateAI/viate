@@ -501,9 +501,30 @@ describe("admin API", () => {
     const listed = await authed(app, session, { method: "GET", url: "/api/admin/plugins" });
     const plugin = listed.json().plugins[0];
     assert.deepEqual(plugin.capabilities, ["chatCompletions", "listModels", "embeddings", "responses"]);
-    assert.equal(plugin.credentialsForm.length, 2);
-    assert.equal(plugin.hasParseCredentials, true);
-    assert.equal(plugin.hasOAuth, true);
+    assert.equal(plugin.credentialsForm, undefined);
+    assert.equal(plugin.hasParseCredentials, undefined);
+    assert.equal(plugin.hasOAuth, undefined);
+    assert.equal(plugin.authMethods.length, 2);
+    const credentials = plugin.authMethods[0];
+    assert.equal(credentials.id, "credentials");
+    assert.equal(credentials.label, "Credentials");
+    assert.equal(credentials.type, "credentials");
+    const baseUrl = credentials.fields.find((field: { key: string }) => field.key === "baseUrl");
+    assert.equal(baseUrl.placeholder, "https://example.com/v1");
+    assert.equal(baseUrl.description, "Upstream base URL");
+    const notes = credentials.fields.find((field: { key: string }) => field.key === "notes");
+    assert.equal(notes.kind, "textarea");
+    assert.equal(notes.rows, 3);
+    assert.equal(notes.description, "Optional note");
+    assert.equal(notes.placeholder, "note");
+    const region = credentials.fields.find((field: { key: string }) => field.key === "region");
+    assert.equal(region.kind, "select");
+    assert.equal(region.defaultValue, "us");
+    assert.deepEqual(region.options, [
+      { label: "US", value: "us" },
+      { label: "EU", value: "eu" },
+    ]);
+    assert.deepEqual(plugin.authMethods[1], { id: "oauth", label: "OAuth", type: "oauth" });
     assert.equal(plugin.hasKeepalive, true);
     assert.equal(plugin.hasSubscription, false);
     assert.deepEqual(plugin.advertisedEndpointTypes, ["openai", "openai-response"]);
@@ -512,7 +533,7 @@ describe("admin API", () => {
     assert.equal(store.getConnection(orphan.id)?.providerId, "uninstalled");
   });
 
-  it("supports paste credentials and OAuth callback without an admin cookie", async () => {
+  it("completes the OAuth callback without an admin cookie", async () => {
     const session = await login(app, "correct-horse");
     const created = await authed(app, session, {
       method: "POST",
@@ -520,19 +541,12 @@ describe("admin API", () => {
       payload: { providerId: "openai-compatible" },
     });
     const id = created.json().connection.id as string;
-    const pasted = await authed(app, session, {
-      method: "PUT",
-      url: `/api/admin/connections/${id}`,
-      payload: { text: '{"baseUrl":"https://paste.example/v1","apiKey":"pasted"}' },
-    });
-    assert.equal(pasted.statusCode, 200);
-    assert.equal(pasted.json().connection.displayLabel, "paste.example");
-
     const started = await authed(app, session, {
       method: "POST",
       url: `/api/admin/connections/${id}/oauth/start`,
     });
     assert.equal(started.statusCode, 200);
+    assert.equal(started.json().type, "authorization_url");
     assert.equal(started.json().session, undefined);
     const callbackUrl = new URL(started.json().authorizationUrl as string);
     const state = callbackUrl.searchParams.get("state");
@@ -543,6 +557,183 @@ describe("admin API", () => {
     assert.equal(callback.statusCode, 302);
     assert.equal(callback.headers.location, "/admin/");
     assert.equal(store.getConnection(id)?.displayLabel, "oauth.example");
+    assert.deepEqual(store.getCredentials(id), { token: "oauth-code" });
+
+    const named = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible", displayLabel: "custom-oauth" },
+    });
+    const namedId = named.json().connection.id as string;
+    const namedStart = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${namedId}/oauth/start`,
+    });
+    const namedState = new URL(namedStart.json().authorizationUrl as string).searchParams.get("state");
+    const namedCallback = await app.inject({
+      method: "GET",
+      url: `/api/admin/oauth/callback?state=${encodeURIComponent(namedState ?? "")}&code=named-code`,
+    });
+    assert.equal(namedCallback.statusCode, 302);
+    assert.equal(store.getConnection(namedId)?.displayLabel, "custom-oauth");
+    assert.deepEqual(store.getCredentials(namedId), { token: "named-code" });
+  });
+
+  it("creates credentials atomically and renames without leaving an orphan", async () => {
+    const session = await login(app, "correct-horse");
+    const before = store.listConnections().map((connection) => connection.id);
+    const rejected = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: {
+        providerId: "openai-compatible",
+        displayLabel: "should-not-exist",
+        credentials: { baseUrl: "not-a-url", apiKey: "nope" },
+      },
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.deepEqual(
+      store.listConnections().map((connection) => connection.id),
+      before,
+    );
+
+    const created = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: {
+        providerId: "openai-compatible",
+        displayLabel: "  named  ",
+        credentials: { baseUrl: "http://127.0.0.1:9999/v1", apiKey: "super-secret-key" },
+      },
+    });
+    assert.equal(created.statusCode, 200);
+    const id = created.json().connection.id as string;
+    assert.equal(created.json().connection.displayLabel, "named");
+    assert.equal(created.json().connection.hasCredentials, true);
+    assert.equal(JSON.stringify(created.json()).includes("super-secret-key"), false);
+
+    const renamed = await authed(app, session, {
+      method: "PUT",
+      url: `/api/admin/connections/${id}`,
+      payload: { displayLabel: "renamed" },
+    });
+    assert.equal(renamed.statusCode, 200);
+    assert.equal(renamed.json().connection.displayLabel, "renamed");
+    assert.equal(renamed.json().connection.hasCredentials, true);
+    assert.deepEqual(store.getCredentials(id), {
+      baseUrl: "http://127.0.0.1:9999/v1",
+      apiKey: "super-secret-key",
+    });
+  });
+
+  it("starts OAuth with input and exchanges a pasted code", async () => {
+    const session = await login(app, "correct-horse");
+    const created = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible", displayLabel: "kept" },
+    });
+    const id = created.json().connection.id as string;
+    const missing = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/oauth/exchange`,
+      payload: { code: "too-soon" },
+    });
+    assert.equal(missing.statusCode, 400);
+
+    const started = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/oauth/start`,
+      payload: { input: { flow: "paste", clientId: "client-1" }, displayLabel: " kept-again " },
+    });
+    assert.equal(started.statusCode, 200);
+    assert.equal(started.json().type, "paste_code");
+    assert.equal(started.json().session, undefined);
+    assert.equal(store.getConnection(id)?.displayLabel, "kept-again");
+
+    const exchanged = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/oauth/exchange`,
+      payload: { code: "  pasted-code  " },
+    });
+    assert.equal(exchanged.statusCode, 200);
+    assert.equal(exchanged.json().connection.displayLabel, "kept-again");
+    assert.equal(exchanged.json().connection.hasCredentials, true);
+    assert.deepEqual(store.getCredentials(id), { token: "pasted-code" });
+
+    const unlabeled = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible" },
+    });
+    const unlabeledId = unlabeled.json().connection.id as string;
+    const unlabeledStart = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${unlabeledId}/oauth/start`,
+      payload: { input: { flow: "paste", clientId: "client-1" } },
+    });
+    assert.equal(unlabeledStart.statusCode, 200);
+    const fallback = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${unlabeledId}/oauth/exchange`,
+      payload: { code: "fresh-code" },
+    });
+    assert.equal(fallback.statusCode, 200);
+    assert.equal(fallback.json().connection.displayLabel, "oauth.example");
+
+    const failedStart = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/oauth/start`,
+      payload: { input: { flow: "paste", clientId: "wrong" }, displayLabel: "should-not-stick" },
+    });
+    assert.notEqual(failedStart.statusCode, 200);
+    assert.equal(store.getConnection(id)?.displayLabel, "kept-again");
+    assert.equal(store.getConnection(id)?.hasCredentials, true);
+  });
+
+  it("deletes an empty connection for unconfigured cleanup and keeps one with credentials", async () => {
+    const session = await login(app, "correct-horse");
+    const empty = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible", displayLabel: "placeholder" },
+    });
+    const emptyId = empty.json().connection.id as string;
+    const removed = await authed(app, session, {
+      method: "DELETE",
+      url: `/api/admin/connections/${emptyId}?unconfigured=1`,
+    });
+    assert.equal(removed.statusCode, 200);
+    assert.equal(store.getConnection(emptyId), null);
+
+    const missing = await authed(app, session, {
+      method: "DELETE",
+      url: `/api/admin/connections/${emptyId}?unconfigured=1`,
+    });
+    assert.equal(missing.statusCode, 200);
+
+    const saved = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: {
+        providerId: "openai-compatible",
+        credentials: { baseUrl: "http://127.0.0.1:9999/v1", apiKey: "k" },
+      },
+    });
+    const savedId = saved.json().connection.id as string;
+    const kept = await authed(app, session, {
+      method: "DELETE",
+      url: `/api/admin/connections/${savedId}?unconfigured=1`,
+    });
+    assert.equal(kept.statusCode, 200);
+    assert.equal(store.getConnection(savedId)?.hasCredentials, true);
+
+    const deleted = await authed(app, session, {
+      method: "DELETE",
+      url: `/api/admin/connections/${savedId}`,
+    });
+    assert.equal(deleted.statusCode, 200);
+    assert.equal(store.getConnection(savedId), null);
   });
 
   it("exchanges a pasted loopback callback for a remote browser", async () => {
@@ -1207,6 +1398,103 @@ describe("admin connection models", () => {
     });
     assert.equal(empty.statusCode, 400);
   });
+
+  it("bulk enables and disables connection models", async () => {
+    const session = await login(app, "correct-horse");
+    const created = await authed(app, session, {
+      method: "POST",
+      url: "/api/admin/connections",
+      payload: { providerId: "openai-compatible" },
+    });
+    const id = created.json().connection.id as string;
+    await authed(app, session, {
+      method: "PUT",
+      url: `/api/admin/connections/${id}`,
+      payload: { credentials: { baseUrl: "http://127.0.0.1:9999/v1", apiKey: "k" } },
+    });
+    const synced = await authed(app, session, {
+      method: "POST",
+      url: `/api/admin/connections/${id}/models/sync`,
+    });
+    assert.equal(synced.statusCode, 200);
+
+    const unauth = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/connections/${id}/models`,
+      headers: originHeaders(),
+      payload: { modelIds: ["gpt-4o"], enabled: false },
+    });
+    assert.equal(unauth.statusCode, 401);
+
+    const missingEnabled = await authed(app, session, {
+      method: "PATCH",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { modelIds: ["gpt-4o"] },
+    });
+    assert.equal(missingEnabled.statusCode, 400);
+    assert.equal(missingEnabled.json().error.message, "enabled is required");
+
+    const missingIds = await authed(app, session, {
+      method: "PATCH",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { enabled: false },
+    });
+    assert.equal(missingIds.statusCode, 400);
+    assert.equal(missingIds.json().error.message, "modelIds is required");
+
+    const badIds = await authed(app, session, {
+      method: "PATCH",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { modelIds: ["gpt-4o", 1], enabled: false },
+    });
+    assert.equal(badIds.statusCode, 400);
+    assert.equal(badIds.json().error.message, "modelIds is required");
+
+    const missingConnection = await authed(app, session, {
+      method: "PATCH",
+      url: "/api/admin/connections/missing/models",
+      payload: { modelIds: ["gpt-4o"], enabled: false },
+    });
+    assert.equal(missingConnection.statusCode, 404);
+
+    const disabled = await authed(app, session, {
+      method: "PATCH",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { modelIds: ["gpt-4o", " gpt-4o ", "gpt-4o-mini"], enabled: false },
+    });
+    assert.equal(disabled.statusCode, 200);
+    assert.equal(
+      disabled.json().models.every((model: { enabled: boolean }) => model.enabled === false),
+      true,
+    );
+
+    const enabledOne = await authed(app, session, {
+      method: "PATCH",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { modelIds: ["gpt-4o"], enabled: true },
+    });
+    assert.equal(enabledOne.statusCode, 200);
+    assert.equal(enabledOne.json().models.find((model: { id: string }) => model.id === "gpt-4o")?.enabled, true);
+    assert.equal(enabledOne.json().models.find((model: { id: string }) => model.id === "gpt-4o-mini")?.enabled, false);
+
+    const missingModel = await authed(app, session, {
+      method: "PATCH",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { modelIds: ["gpt-4o", "missing"], enabled: false },
+    });
+    assert.equal(missingModel.statusCode, 404);
+    const after = await authed(app, session, { method: "GET", url: `/api/admin/connections/${id}/models` });
+    assert.equal(after.json().models.find((model: { id: string }) => model.id === "gpt-4o")?.enabled, true);
+    assert.equal(after.json().models.find((model: { id: string }) => model.id === "gpt-4o-mini")?.enabled, false);
+
+    const emptyIds = await authed(app, session, {
+      method: "PATCH",
+      url: `/api/admin/connections/${id}/models`,
+      payload: { modelIds: ["  "], enabled: true },
+    });
+    assert.equal(emptyIds.statusCode, 200);
+    assert.equal(emptyIds.json().models.find((model: { id: string }) => model.id === "gpt-4o-mini")?.enabled, false);
+  });
 });
 
 class FakePlugins implements PluginOperator {
@@ -1262,17 +1550,41 @@ function testProvider(models?: Array<Record<string, unknown>>): ProviderHandler 
   return {
     id: "openai-compatible",
     credentialsForm: [
-      { key: "baseUrl", label: "Base URL", kind: "url", required: true },
+      {
+        key: "baseUrl",
+        label: "Base URL",
+        kind: "url",
+        required: true,
+        placeholder: "https://example.com/v1",
+        description: "Upstream base URL",
+      },
       { key: "apiKey", label: "API Key", kind: "secret" },
+      { key: "notes", label: "Notes", kind: "textarea", rows: 3, description: "Optional note", placeholder: "note" },
+      {
+        key: "region",
+        label: "Region",
+        kind: "select",
+        defaultValue: "us",
+        options: [
+          { label: "US", value: "us" },
+          { label: "EU", value: "eu" },
+        ],
+      },
     ],
-    parseCredentials(text) {
-      return JSON.parse(text) as unknown;
-    },
     normalizeCredentials(input) {
       const credentials = input as { baseUrl: string; apiKey?: string };
       return { credentials, displayLabel: new URL(credentials.baseUrl).host };
     },
     startOAuth(ctx) {
+      if (ctx.input?.flow === "paste") {
+        if (ctx.input.clientId !== "client-1") {
+          return Promise.reject(Object.assign(new Error("oauth start failed"), { statusCode: 400 }));
+        }
+        return Promise.resolve({
+          type: "paste_code" as const,
+          session: { verifier: "secret" },
+        });
+      }
       return Promise.resolve({
         type: "authorization_url",
         authorizationUrl: ctx.callbackUrl,
@@ -1333,7 +1645,7 @@ async function login(app: App, password: string): Promise<Session> {
 async function authed(
   app: App,
   session: Session,
-  options: { method: "GET" | "POST" | "PUT" | "DELETE"; url: string; payload?: Record<string, unknown> },
+  options: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; url: string; payload?: Record<string, unknown> },
 ) {
   return app.inject({
     method: options.method,

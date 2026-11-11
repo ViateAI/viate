@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
+import { useDialogDismiss } from "./dialog";
 import { formatCount, formatDateTime, formatRate } from "./format";
 import { m } from "./paraglide/messages.js";
 import { api, isApiError, type ClientApiKey, type Connection } from "./api";
@@ -287,10 +288,10 @@ export function RequestsPage() {
   return (
     <section className="stack">
       <div className="segmented" role="tablist" aria-label={m.requests_views()}>
-        <button type="button" role="tab" aria-selected={tab === "requests"} aria-pressed={tab === "requests"} onClick={() => setTab("requests")}>
+        <button type="button" role="tab" aria-selected={tab === "requests"} onClick={() => setTab("requests")}>
           {m.requests_tab_requests()}
         </button>
-        <button type="button" role="tab" aria-selected={tab === "statistics"} aria-pressed={tab === "statistics"} onClick={() => setTab("statistics")}>
+        <button type="button" role="tab" aria-selected={tab === "statistics"} onClick={() => setTab("statistics")}>
           {m.requests_tab_stats()}
         </button>
       </div>
@@ -432,9 +433,12 @@ function FilterChips({
     chips.push({ key: "model", label: m.requests_chip_model({ name: applied.model || m.requests_none() }), patch: { model: null } });
   }
   if (applied.connectionId !== null) {
+    const connection = connections.find((item) => item.id === applied.connectionId);
     chips.push({
       key: "connection",
-      label: m.requests_chip_connection({ name: applied.connectionId === "" ? m.requests_none() : connectionLabel(applied.connectionId, connections) }),
+      label: m.requests_chip_connection({
+        name: applied.connectionId === "" ? m.requests_none() : connection ? connectionOption(connection) : applied.connectionId,
+      }),
       patch: { connectionId: null },
     });
   }
@@ -518,9 +522,7 @@ function RequestList({
                 key={row.id}
                 data-request-id={row.id}
                 tabIndex={0}
-                role="button"
                 aria-label={m.requests_open({ id: row.id })}
-                aria-selected={selectedId === row.id}
                 className={selectedId === row.id ? "is-selected" : undefined}
                 onClick={(event) => {
                   event.currentTarget.focus();
@@ -772,50 +774,9 @@ function RequestDetail({
   onClose: () => void;
 }) {
   const titleId = useId();
-  const panelRef = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    const panel = panelRef.current;
-    const previously = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusable = () =>
-      panel
-        ? [...panel.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter(
-            (element) => !element.hasAttribute("disabled"),
-          )
-        : [];
-    focusable()[0]?.focus();
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab" || !panel) return;
-      const items = focusable();
-      if (items.length === 0) {
-        event.preventDefault();
-        return;
-      }
-      const first = items[0];
-      const last = items[items.length - 1];
-      const active = document.activeElement;
-      if (event.shiftKey && (active === first || !panel.contains(active))) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
-        event.preventDefault();
-        first?.focus();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      const active = document.activeElement;
-      const movedToRow = active instanceof HTMLElement && active.dataset.requestId;
-      if (!movedToRow) previously?.focus();
-    };
-  }, []);
+  const panelRef = useDialogDismiss<HTMLDivElement>(onClose, {
+    restoreFocus: (active) => !(active instanceof HTMLElement && Boolean(active.dataset.requestId)),
+  });
   const record = detail.status === "ready" ? detail.request : null;
   return (
     <div className="dialog-backdrop detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -966,7 +927,10 @@ function connectionLabel(id: string | null, connections: Connection[]): string {
 
 function connectionOption(connection: Connection): string {
   const label = connection.displayLabel?.trim() || connection.id;
-  return label === connection.id ? connection.id : `${label} (${connection.id})`;
+  const named = label !== connection.id && label !== connection.providerId
+    ? `${label} · ${connection.providerId}`
+    : label;
+  return named === connection.id ? connection.id : `${named} (${connection.id})`;
 }
 
 function rowTps(row: Pick<RequestRow, "outputTokens" | "durationMs">): number | null {

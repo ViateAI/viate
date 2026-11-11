@@ -57,6 +57,29 @@ describe("AdminStore connections", () => {
     assert.equal("apiKey" in listed[0]!, false);
   });
 
+  it("stores an explicit display label without replacing it when credentials omit one", () => {
+    const created = store.createConnection("openai-compatible", "  desk  ");
+    assert.equal(created.displayLabel, "desk");
+    assert.equal(created.hasCredentials, false);
+
+    const blank = store.createConnection("openai-compatible", "   ");
+    assert.equal(blank.displayLabel, blank.id);
+
+    const kept = store.putCredentials(created.id, { token: "a" });
+    assert.equal(kept.displayLabel, "desk");
+    assert.deepEqual(store.getCredentials(created.id), { token: "a" });
+
+    const renamed = store.setDisplayLabel(created.id, "  other  ");
+    assert.equal(renamed.displayLabel, "other");
+    assert.deepEqual(store.getCredentials(created.id), { token: "a" });
+
+    const cleared = store.setDisplayLabel(created.id, " ");
+    assert.equal(cleared.displayLabel, cleared.id);
+
+    const replaced = store.putCredentials(created.id, { token: "b" }, "next");
+    assert.equal(replaced.displayLabel, "next");
+  });
+
   it("rejects activating a connection without credentials", () => {
     const created = store.createConnection("openai-compatible");
     assert.throws(() => store.setActive(created.id, true), /no credentials/);
