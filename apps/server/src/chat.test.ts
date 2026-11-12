@@ -77,7 +77,9 @@ describe("POST /v1/chat/completions", () => {
     assert.equal(logged[0]?.endpoint, "chat.completions");
     assert.equal(logged[0]?.status, 200);
     assert.equal(logged[0]?.outcome, "success");
-    assert.equal(logged[0]?.usageSource, "missing");
+    assert.equal(logged[0]?.usageSource, "estimated");
+    assert.equal(logged[0]?.inputTokens, 1);
+    assert.equal(logged[0]?.outputTokens, 1);
     assert.equal(logged[0]?.payloadTruncated, false);
     assert.equal(logged[0]?.payloadPath, null);
   });
@@ -199,6 +201,164 @@ describe("POST /v1/chat/completions", () => {
       await hanging.close();
       isolatedStore.close();
       await rm(isolatedDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("chat billing without a plugin usage parser", () => {
+  it("charges the text estimate when the upstream JSON has no usage object", async () => {
+    const upstream = await listen(async (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "chatcmpl-est", choices: [{ message: { content: "ok" } }] }));
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-chat-estimate-"));
+    const store = await AdminStore.open(dataDir);
+    const user = store.createUser({ email: "estimate@example.com", name: "Estimate", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    const secret = store.createApiKey("estimate", user.id).secret;
+    const short = store.createUser({ email: "short@example.com", name: "Short", password: "password1" });
+    store.grantUsd(short.id, "0.000000001");
+    const shortSecret = store.createApiKey("short", short.id).secret;
+    enablePublished(store, { baseUrl: upstream.url, apiKey: "env-key" });
+    const app = await buildTestApp({
+      logger: false,
+      providers: [passthroughProvider()],
+      store,
+      modelPrices: dollarPerMillion,
+    });
+    try {
+      const denied = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: bearer(shortSecret),
+        payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
+      });
+      assert.equal(denied.statusCode, 402);
+      assert.equal(denied.json().error.message, "insufficient balance");
+      assert.equal(store.getUser(short.id)?.balanceUsd, "0.000000001");
+
+      const billed = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: bearer(secret),
+        payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
+      });
+      assert.equal(billed.statusCode, 200);
+      const logged = await waitForUserStatus(store, user.id, 200);
+      assert.equal(logged.usageSource, "estimated");
+      assert.equal(logged.inputTokens, 1);
+      assert.equal(logged.outputTokens, 1);
+      await waitForBalance(store, user.id, "0.999998");
+      const usage = store.listLedger(user.id).filter((entry) => entry.reason === "usage");
+      assert.equal(usage.length, 1);
+      assert.equal(usage[0]?.deltaUsd, "-0.000002");
+    } finally {
+      await app.close();
+      await upstream.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("charges parsed usage instead of the text estimate when the body includes usage", async () => {
+    const upstream = await listen(async (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "chatcmpl-parsed",
+          choices: [{ message: { content: "ok" } }],
+          usage: { prompt_tokens: 20, completion_tokens: 5 },
+        }),
+      );
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-chat-parsed-"));
+    const store = await AdminStore.open(dataDir);
+    const user = store.createUser({ email: "parsed@example.com", name: "Parsed", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    const secret = store.createApiKey("parsed", user.id).secret;
+    enablePublished(store, { baseUrl: upstream.url, apiKey: "env-key" });
+    const app = await buildTestApp({
+      logger: false,
+      providers: [passthroughProvider()],
+      store,
+      modelPrices: dollarPerMillion,
+    });
+    try {
+      const billed = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: bearer(secret),
+        payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
+      });
+      assert.equal(billed.statusCode, 200);
+      const logged = await waitForRequestLog(store, "demo");
+      assert.equal(logged[0]?.usageSource, "parser");
+      assert.equal(logged[0]?.inputTokens, 20);
+      assert.equal(logged[0]?.outputTokens, 5);
+      await waitForBalance(store, user.id, "0.999975");
+    } finally {
+      await app.close();
+      await upstream.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("charges a client abort once the stream has emitted a content delta", async () => {
+    const { promise: upstreamAborted, resolve: resolveAborted } = Promise.withResolvers<void>();
+    const hanging = await listen((req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
+      const markAborted = () => resolveAborted();
+      req.on("aborted", markAborted);
+      req.on("close", markAborted);
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-chat-abort-bill-"));
+    const store = await AdminStore.open(dataDir);
+    const user = store.createUser({ email: "abort-bill@example.com", name: "Abort", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    const secret = store.createApiKey("abort-bill", user.id).secret;
+    enablePublished(store, { baseUrl: hanging.url, apiKey: "env-key" });
+    const streaming = await buildTestApp({
+      logger: false,
+      providers: [passthroughProvider()],
+      store,
+      modelPrices: dollarPerMillion,
+    });
+    await streaming.listen({ host: "127.0.0.1", port: 0 });
+    try {
+      const address = streaming.server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected tcp address");
+      }
+      const { promise: firstChunk, resolve: gotChunk } = Promise.withResolvers<void>();
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port: address.port,
+          path: "/v1/chat/completions",
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+        },
+        (res) => {
+          res.on("data", () => {
+            gotChunk();
+          });
+        },
+      );
+      req.end(JSON.stringify({ model: "demo", stream: true, messages: [{ role: "user", content: "hi" }] }));
+      await firstChunk;
+      req.destroy();
+      await upstreamAborted;
+      const usage = await waitForUsage(store, user.id);
+      assert.equal(usage.length, 1);
+      assert.notEqual(usage[0]?.deltaUsd, "0.00");
+      assert.ok(usage[0]?.deltaUsd.startsWith("-"));
+    } finally {
+      await streaming.close();
+      await hanging.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 });
@@ -1245,6 +1405,49 @@ async function waitForRequestLog(store: AdminStore, model: string): Promise<Requ
   }
   return store.listRequestLogs({ model });
 }
+
+async function waitForUserStatus(store: AdminStore, userId: string, status: number): Promise<RequestLogRecord> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const row = store.listRequestLogs().find((entry) => entry.userId === userId && entry.status === status);
+    if (row) {
+      return row;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const row = store.listRequestLogs().find((entry) => entry.userId === userId && entry.status === status);
+  assert.ok(row);
+  return row;
+}
+
+async function waitForBalance(store: AdminStore, userId: string, balanceUsd: string): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (store.getUser(userId)?.balanceUsd === balanceUsd) {
+      return;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(store.getUser(userId)?.balanceUsd, balanceUsd);
+}
+
+async function waitForUsage(store: AdminStore, userId: string) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const usage = store.listLedger(userId).filter((entry) => entry.reason === "usage");
+    if (usage.length > 0) {
+      return usage;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  return store.listLedger(userId).filter((entry) => entry.reason === "usage");
+}
+
+const dollarPerMillion = {
+  ready: true,
+  lookup(modelId: string) {
+    return modelId === "demo"
+      ? { inputNanoPerMillion: 1_000_000_000, outputNanoPerMillion: 1_000_000_000 }
+      : null;
+  },
+};
 
 function enablePublished(
   store: AdminStore,

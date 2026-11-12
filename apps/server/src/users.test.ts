@@ -282,6 +282,84 @@ describe("AdminStore users", { concurrency: false }, () => {
     }
   });
 
+  it("reserves a hold, rejects a second hold the balance cannot cover, and settles the actual charge", () => {
+    const user = store.createUser({ email: "hold@example.com", name: "Hold", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    store.admitUser(user.id, 8, { requestId: "hold-1", holdNano: 600_000_000 });
+    assert.equal(readBalanceNano(dataDir, user.id), 400_000_000);
+    assert.equal(readInflight(dataDir, user.id), 1);
+    assert.throws(
+      () => store.admitUser(user.id, 8, { requestId: "hold-2", holdNano: 600_000_000 }),
+      (error: unknown) =>
+        statusCode(error) === 402 && error instanceof Error && error.message === "insufficient balance",
+    );
+    assert.equal(readBalanceNano(dataDir, user.id), 400_000_000);
+    assert.equal(readInflight(dataDir, user.id), 1);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "hold-1",
+      inputTokens: 100_000,
+      outputTokens: 0,
+      inputNanoPerMillion: 1_000_000_000,
+      outputNanoPerMillion: 0,
+    });
+    assert.equal(readBalanceNano(dataDir, user.id), 900_000_000);
+    assert.equal(readInflight(dataDir, user.id), 0);
+    const usage = store.listLedger(user.id).filter((entry) => entry.reason === "usage");
+    assert.equal(usage.length, 1);
+    assert.equal(usage[0]?.deltaUsd, "-0.10");
+    assert.equal(usage[0]?.balanceAfterUsd, "0.90");
+    assert.equal(usage[0]?.requestId, "hold-1");
+  });
+
+  it("lets a charge above the hold go negative and then blocks admission", () => {
+    const user = store.createUser({ email: "hold-over@example.com", name: "Over", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    store.admitUser(user.id, 8, { requestId: "hold-over", holdNano: 100_000_000 });
+    assert.equal(readBalanceNano(dataDir, user.id), 900_000_000);
+    assert.equal(readInflight(dataDir, user.id), 1);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "hold-over",
+      inputTokens: 2_000_000,
+      outputTokens: 0,
+      inputNanoPerMillion: 1_000_000_000,
+      outputNanoPerMillion: 0,
+    });
+    assert.equal(readBalanceNano(dataDir, user.id), -1_000_000_000);
+    assert.equal(readInflight(dataDir, user.id), 0);
+    assert.throws(
+      () => store.admitUser(user.id),
+      (error: unknown) =>
+        statusCode(error) === 402 && error instanceof Error && error.message === "insufficient balance",
+    );
+  });
+
+  it("returns an outstanding hold when the store opens again", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "viate-users-hold-reopen-"));
+    const opened = await AdminStore.open(dir);
+    try {
+      const user = opened.createUser({ email: "hold-crash@example.com", name: "HoldCrash", password: "password1" });
+      opened.grantUsd(user.id, "1.00");
+      const before = readBalanceNano(dir, user.id);
+      opened.admitUser(user.id, 8, { requestId: "hold-crash", holdNano: 600_000_000 });
+      assert.equal(readBalanceNano(dir, user.id), before - 600_000_000);
+      assert.equal(readInflight(dir, user.id), 1);
+      opened.close();
+      const reopened = await AdminStore.open(dir);
+      try {
+        assert.equal(readBalanceNano(dir, user.id), before);
+        assert.equal(readInflight(dir, user.id), 0);
+        reopened.admitUser(user.id, 8, { requestId: "hold-after", holdNano: 600_000_000 });
+        assert.equal(readBalanceNano(dir, user.id), before - 600_000_000);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("adds balance_nano without copying an old token balance", async () => {
     const fresh = new DatabaseSync(join(dataDir, "viate.sqlite"));
     try {

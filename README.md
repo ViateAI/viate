@@ -98,6 +98,8 @@ A provider method that is not implemented returns 404 `capability not supported`
 
 Streaming `POST /v1/chat/completions` is forwarded with `stream_options.include_usage` set, so a completed stream can be billed. Other fields already in `stream_options` are kept.
 
+Admission reserves estimated input (UTF-8 bytes of extractable request text, divided by 4 and rounded up), an output allowance (the first positive `max_completion_tokens`, `max_tokens`, or `max_output_tokens`, capped at 4096, otherwise 256), and the per-request price, multiplied by the channel ratio. That reserve is not spendable. Settlement uses usage from the plugin parser or, when the plugin set none, the host OpenAI chat, OpenAI responses, and Anthropic parsers, in that order. A completed response or a client abort with no parsed usage is charged from the text estimate. Unused reserve is returned. Cost above the reserve can make the balance negative. No parsed usage and no extractable text means no token charge. A restart returns unsettled reserves and clears in-flight counts.
+
 Video is an xAI-shaped async job, not OpenAI Sora. Submit on the three `POST` routes. A JSON success body with `request_id` is stored with the connection that served it. `GET /v1/videos/:requestId` polls that same connection with `{ "request_id": "<id>" }`.
 
 Advertised endpoint types label `GET /v1/models`. They do not close request routes. Known types are `openai`, `openai-response`, `openai-image`, `openai-audio`, and `openai-video`. The default advertisement is `openai` and `openai-response`.

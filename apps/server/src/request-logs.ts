@@ -34,6 +34,7 @@ export type RequestLogEvent = {
   userId?: string | null;
   attempts: RequestAttemptRecord[];
   usage: RequestUsage | null;
+  usageSource?: "parser" | "estimated" | "missing";
   error: string | null;
   ttfbMs: number | null;
   requestBody: unknown;
@@ -370,7 +371,7 @@ export class RequestLogRecorder {
       outputTokens: usage?.outputTokens ?? null,
       cacheReadTokens: usage?.cacheReadTokens ?? null,
       cacheWriteTokens: usage?.cacheWriteTokens ?? null,
-      usageSource: usage ? "parser" : "missing",
+      usageSource: event.usageSource ?? (usage ? "parser" : "missing"),
       error: redactLogError(event.error),
       payloadPath,
       payloadOffset,

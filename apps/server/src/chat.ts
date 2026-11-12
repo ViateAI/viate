@@ -8,10 +8,11 @@ import {
   pickAllowedHeaders,
   type HttpExchange,
   type ProviderHandler,
+  type RequestUsage,
 } from "@viateai/sdk";
 import { dispatchRouted, RouteError } from "./routing.js";
 import { parseRequestModel } from "./catalog.js";
-import { channelMatchesModel, type Channel } from "./channels.js";
+import { applyChannelRatio, channelMatchesModel, type Channel } from "./channels.js";
 import {
   classifyOutcome,
   clientErrorMessage,
@@ -21,8 +22,9 @@ import {
   type RequestLogRecorder,
 } from "./request-logs.js";
 import { createKeepaliveScheduler } from "./keepalive.js";
-import type { AdminStore, StoredApiKey, StoredVideoRequest } from "./store.js";
+import { usageBaseNano, type AdminStore, type StoredApiKey, type StoredVideoRequest } from "./store.js";
 import { tapExchange } from "./usage-frames.js";
+import { estimateInputTokens, estimateOutputHoldTokens, estimateOutputTokens } from "./usage-estimate.js";
 import { assertAudioRequest, loggedRequestBody, loggedResponseBody } from "./audio.js";
 import { captureVideoJob } from "./videos.js";
 import { selectContextPrice, type ModelPriceRate } from "./model-prices.js";
@@ -252,9 +254,32 @@ async function dispatch(
       }
     }
     if (billUserId && options.store) {
-      options.store.admitUser(billUserId, options.userMaxInflight ?? 8);
-      admitted = true;
       billRequestId = randomUUID();
+      let reservation: { requestId: string; holdNano: number } | undefined;
+      if (billedRates) {
+        const estimatedInput = estimateInputTokens(request.body);
+        const rates = selectContextPrice(billedRates, estimatedInput);
+        const hold = applyChannelRatio(
+          usageBaseNano({
+            inputTokens: estimatedInput,
+            outputTokens: estimateOutputHoldTokens(request.body),
+            inputNanoPerMillion: rates.inputNanoPerMillion,
+            outputNanoPerMillion: rates.outputNanoPerMillion,
+            perRequestNano: billedPerRequestNano,
+          }),
+          billedRatioNumerator,
+          billedRatioDenominator,
+        );
+        const maxHold = BigInt(Number.MAX_SAFE_INTEGER);
+        if (hold > 0n) {
+          reservation = {
+            requestId: billRequestId,
+            holdNano: hold > maxHold ? Number.MAX_SAFE_INTEGER : Number(hold),
+          };
+        }
+      }
+      options.store.admitUser(billUserId, options.userMaxInflight ?? 8, reservation);
+      admitted = true;
     }
     const routed = await dispatchRouted(
       options.store,
@@ -271,13 +296,15 @@ async function dispatch(
     const sent = sendUpstream(reply, exchange);
     void tap
       .then((result) => {
-        const succeeded = exchange.status >= 200 && exchange.status < 300;
-        settle(
-          result.usage?.inputTokens ?? 0,
-          result.usage?.outputTokens ?? 0,
-          result.usage?.cacheReadTokens ?? 0,
-          succeeded,
-        );
+        const billed = billableUsage({
+          usage: result.usage,
+          status: exchange.status,
+          clientAborted: clientAbort.signal.aborted,
+          requestBody: request.body,
+          responseText: result.text,
+          contentType: exchange.headers["content-type"],
+        });
+        settle(billed.inputTokens, billed.outputTokens, billed.cacheReadTokens, billed.includePerRequest);
         options.requestLogs?.record({
           id: billRequestId ?? undefined,
           startedAt,
@@ -298,7 +325,8 @@ async function dispatch(
           apiKeyPrefix: apiKey?.prefix ?? null,
           userId: billUserId,
           attempts: routed.attempts,
-          usage: result.usage,
+          usage: billed.usage,
+          usageSource: billed.usageSource,
           error: exchange.status >= 400 ? `upstream ${exchange.status}` : null,
           ttfbMs: result.ttfbMs,
           requestBody: loggedRequestBody(request.body),
@@ -312,8 +340,12 @@ async function dispatch(
     return sent;
   } catch (error) {
     cleanup();
-    settle(0, 0);
     const aborted = clientAbort.signal.aborted || isAbortError(error);
+    if (aborted) {
+      settle(estimateInputTokens(request.body), 0);
+    } else {
+      settle(0, 0);
+    }
     const timedOut = signal.aborted && !clientAbort.signal.aborted;
     const statusFromError =
       typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number"
@@ -543,4 +575,59 @@ function viateError(reply: FastifyReply, status: number, message: string): Fasti
 
 function isAbortError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+}
+
+function billableUsage(input: {
+  usage: RequestUsage | null;
+  status: number;
+  clientAborted: boolean;
+  requestBody: unknown;
+  responseText: string;
+  contentType: string | undefined;
+}): {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  usage: RequestUsage | null;
+  usageSource: "parser" | "estimated" | "missing";
+  includePerRequest: boolean;
+} {
+  const includePerRequest = input.status >= 200 && input.status < 300;
+  if (input.usage) {
+    return {
+      inputTokens: input.usage.inputTokens,
+      outputTokens: input.usage.outputTokens,
+      cacheReadTokens: input.usage.cacheReadTokens,
+      usage: input.usage,
+      usageSource: "parser",
+      includePerRequest,
+    };
+  }
+  if (includePerRequest || input.clientAborted) {
+    const inputTokens = estimateInputTokens(input.requestBody);
+    const outputTokens = estimateOutputTokens(input.responseText, input.contentType);
+    if (inputTokens + outputTokens > 0) {
+      return {
+        inputTokens,
+        outputTokens,
+        cacheReadTokens: 0,
+        usage: {
+          inputTokens,
+          outputTokens,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+        usageSource: "estimated",
+        includePerRequest,
+      };
+    }
+  }
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    usage: null,
+    usageSource: "missing",
+    includePerRequest,
+  };
 }

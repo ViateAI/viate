@@ -154,7 +154,7 @@ export type RequestLogRecord = {
   outputTokens: number | null;
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
-  usageSource: "parser" | "missing";
+  usageSource: "parser" | "estimated" | "missing";
   error: string | null;
   payloadPath: string | null;
   payloadOffset: number | null;
@@ -614,7 +614,15 @@ export class AdminStore {
     migrateConnectionModels(db);
     migrateSubscription(db);
     migrateUsers(db);
-    db.exec("UPDATE users SET inflight = 0");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_balance_holds (
+        request_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        hold_nano INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    releaseOutstandingHolds(db);
     const store = new AdminStore(db, key, dataDir);
     store.freezeLegacyChannelRules();
     return store;
@@ -1861,18 +1869,65 @@ export class AdminStore {
     }
   }
 
-  admitUser(userId: string, maxInflight = 8): void {
+  admitUser(
+    userId: string,
+    maxInflight = 8,
+    reservation?: { requestId: string; holdNano: number },
+  ): void {
     const limit = Number.isInteger(maxInflight) && maxInflight > 0 ? maxInflight : 8;
+    const holdNano =
+      reservation && Number.isSafeInteger(reservation.holdNano) && reservation.holdNano > 0
+        ? reservation.holdNano
+        : 0;
     const now = new Date().toISOString();
-    const result = this.db
-      .prepare(
-        `UPDATE users SET inflight = inflight + 1, updated_at = ?
-         WHERE id = ? AND status = 'active' AND balance_nano > 0 AND inflight < ?`,
-      )
-      .run(now, userId, limit);
-    if (Number(result.changes) !== 0) {
-      return;
+    if (!reservation || holdNano <= 0) {
+      const result = this.db
+        .prepare(
+          `UPDATE users SET inflight = inflight + 1, updated_at = ?
+           WHERE id = ? AND status = 'active' AND balance_nano > 0 AND inflight < ?`,
+        )
+        .run(now, userId, limit);
+      if (Number(result.changes) !== 0) {
+        return;
+      }
+      this.throwAdmitDenied(userId);
     }
+    this.db.exec("BEGIN IMMEDIATE");
+    let admitted = false;
+    try {
+      const result = this.db
+        .prepare(
+          `UPDATE users
+           SET inflight = inflight + 1, balance_nano = balance_nano - ?, updated_at = ?
+           WHERE id = ? AND status = 'active' AND balance_nano > 0 AND balance_nano >= ? AND inflight < ?`,
+        )
+        .run(holdNano, now, userId, holdNano, limit);
+      if (Number(result.changes) === 0) {
+        this.db.exec("ROLLBACK");
+      } else {
+        this.db
+          .prepare(
+            `INSERT INTO user_balance_holds (request_id, user_id, hold_nano, created_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(reservation.requestId, userId, holdNano, now);
+        this.db.exec("COMMIT");
+        admitted = true;
+      }
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // The denied path already rolled the transaction back.
+      }
+      throw error;
+    }
+    if (!admitted) {
+      this.throwAdmitDenied(userId);
+    }
+  }
+
+  private throwAdmitDenied(userId: string): never {
     const row = this.db.prepare("SELECT status FROM users WHERE id = ?").get(userId) as { status: string } | undefined;
     if (!row) {
       throw Object.assign(new Error("user not found"), { statusCode: 404 });
@@ -1908,6 +1963,13 @@ export class AdminStore {
         this.db.exec("COMMIT");
         return;
       }
+      const holdRow = this.db
+        .prepare("SELECT hold_nano FROM user_balance_holds WHERE request_id = ?")
+        .get(input.requestId) as { hold_nano: number | bigint } | undefined;
+      if (holdRow) {
+        this.db.prepare("DELETE FROM user_balance_holds WHERE request_id = ?").run(input.requestId);
+      }
+      const delta = charge - (holdRow ? asNano(holdRow.hold_nano) : 0n);
       this.db
         .prepare(
           `UPDATE users
@@ -1916,7 +1978,7 @@ export class AdminStore {
                updated_at = ?
            WHERE id = ?`,
         )
-        .run(sqlInteger(charge), now, input.userId);
+        .run(sqlInteger(delta), now, input.userId);
       if (charge > 0n) {
         const row = this.db.prepare("SELECT balance_nano FROM users WHERE id = ?").get(input.userId) as
           | { balance_nano: number | bigint }
@@ -2552,7 +2614,8 @@ export class AdminStore {
       outputTokens: row.output_tokens,
       cacheReadTokens: row.cache_read_tokens,
       cacheWriteTokens: row.cache_write_tokens,
-      usageSource: row.usage_source === "parser" ? "parser" : "missing",
+      usageSource:
+        row.usage_source === "parser" || row.usage_source === "estimated" ? row.usage_source : "missing",
       error: row.error,
       payloadPath: row.payload_path,
       payloadOffset: row.payload_offset,
@@ -2788,6 +2851,24 @@ function migrateSubscription(db: DatabaseSync): void {
   `);
 }
 
+function releaseOutstandingHolds(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      UPDATE users
+      SET balance_nano = balance_nano + (
+        SELECT COALESCE(SUM(hold_nano), 0) FROM user_balance_holds WHERE user_id = users.id
+      );
+      DELETE FROM user_balance_holds;
+      UPDATE users SET inflight = 0;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 function migrateUsers(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -3018,7 +3099,7 @@ function numberFrom(value: number | bigint | null | undefined): number {
   return value ?? 0;
 }
 
-function usageBaseNano(input: {
+export function usageBaseNano(input: {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens?: number;
