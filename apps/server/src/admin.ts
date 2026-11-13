@@ -22,6 +22,7 @@ import {
   csrfEqual,
   parseCookies,
 } from "./sessions.js";
+import { registerOAuthClientRoutes } from "./oauth.js";
 import { LoginRateLimiter } from "./rate-limit.js";
 import { readRequestPayload, type RequestLogRecorder } from "./request-logs.js";
 import type { ModelPriceLookup } from "./chat.js";
@@ -930,6 +931,8 @@ export async function registerAdminRoutes(app: FastifyInstance, options: AdminRo
       return sendStoreError(reply, error);
     }
   });
+
+  registerOAuthClientRoutes(app, options.store);
 }
 
 async function runPluginOp(

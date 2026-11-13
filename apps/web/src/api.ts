@@ -171,6 +171,9 @@ export type ClientApiKey = {
   createdAt: string;
   userId: string | null;
   channelId: string | null;
+  kind?: "client" | "bot";
+  externalRef?: string | null;
+  managed?: boolean;
 };
 
 export type ChannelRule =

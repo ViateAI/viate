@@ -25,6 +25,7 @@ const MUTATING: Record<string, true> = {
 export type PortalRouteOptions = {
   store: AdminStore;
   sessions?: SessionStore;
+  loginLimiter?: LoginRateLimiter;
 };
 
 type PortalRequest = FastifyRequest & {
@@ -34,7 +35,7 @@ type PortalRequest = FastifyRequest & {
 
 export async function registerPortalRoutes(app: FastifyInstance, options: PortalRouteOptions): Promise<void> {
   const sessions = options.sessions ?? new SessionStore();
-  const limiter = new LoginRateLimiter();
+  const limiter = options.loginLimiter ?? new LoginRateLimiter();
 
   app.addHook("preHandler", async (request, reply) => {
     const path = request.url.split("?")[0] ?? request.url;
@@ -127,7 +128,21 @@ export async function registerPortalRoutes(app: FastifyInstance, options: Portal
 
   app.get("/api/portal/keys", async (request) => {
     const user = (request as PortalRequest).portalUser;
-    return { apiKeys: user ? options.store.listApiKeys(user.id) : [] };
+    return {
+      apiKeys: user
+        ? options.store.listApiKeys(user.id).map((key) => ({
+            id: key.id,
+            name: key.name,
+            prefix: key.prefix,
+            createdAt: key.createdAt,
+            userId: key.userId,
+            channelId: key.channelId,
+            kind: key.kind,
+            externalRef: key.externalRef,
+            managed: key.ownerClientId !== null,
+          }))
+        : [],
+    };
   });
 
   app.post("/api/portal/keys", async (request, reply) => {
@@ -154,8 +169,12 @@ export async function registerPortalRoutes(app: FastifyInstance, options: Portal
       return reply.code(401).send({ error: { message: "unauthorized", type: "viate_error" } });
     }
     const { id } = request.params as { id: string };
-    if (!options.store.listApiKeys(user.id).some((key) => key.id === id)) {
+    const key = options.store.listApiKeys(user.id).find((item) => item.id === id);
+    if (!key) {
       return reply.code(404).send({ error: { message: "api key not found", type: "viate_error" } });
+    }
+    if (key.ownerClientId) {
+      return reply.code(403).send({ error: { message: "managed key", type: "viate_error" } });
     }
     try {
       options.store.deleteApiKey(id);

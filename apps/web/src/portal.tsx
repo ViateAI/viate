@@ -64,6 +64,14 @@ function pageLabel(page: PortalPage): string {
 }
 
 export function PortalApp() {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/portal/oauth-login") {
+    return <OAuthLoginPage />;
+  }
+  return <PortalSession />;
+}
+
+function PortalSession() {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState<GatewayUser | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
@@ -172,6 +180,84 @@ function PortalLogin({ onLoggedIn }: { onLoggedIn: (user: GatewayUser) => void }
               onChange={(event) => setPassword(event.target.value)}
               required
             />
+          </label>
+          {error ? <p className="banner error" role="alert">{error}</p> : null}
+          <button className="primary" type="submit" disabled={busy}>
+            {busy ? m.busy_signing_in() : m.action_sign_in()}
+          </button>
+        </form>
+      </main>
+    </div>
+  );
+}
+
+function OAuthLoginPage() {
+  const requested = new URLSearchParams(window.location.search).get("return") ?? "";
+  const clientId = requested.startsWith("/oauth/authorize?")
+    ? new URLSearchParams(requested.slice("/oauth/authorize?".length)).get("client_id") ?? ""
+    : "";
+  const [clientName, setClientName] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!clientId) return;
+    let cancelled = false;
+    api<{ name: string }>(`/oauth/client-info?client_id=${encodeURIComponent(clientId)}`)
+      .then((result) => {
+        if (!cancelled) setClientName(result.name);
+      })
+      .catch(() => {
+        if (!cancelled) setClientName(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId]);
+
+  return (
+    <div className="login-screen">
+      <main className="login">
+        <div className="login-locale"><LocaleSwitch /></div>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">V</span>
+          <div>
+            <div className="brand-name">Viate</div>
+            <div className="brand-sub">{m.portal_brand()}</div>
+          </div>
+        </div>
+        <h1>{clientName ? m.oauth_login_title({ name: clientName }) : m.oauth_login_unknown()}</h1>
+        <p className="meta">{m.oauth_login_subtitle()}</p>
+        <form
+          className="form"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            setBusy(true);
+            setError(null);
+            try {
+              const result = await api<{ ok: true; redirect: string }>(
+                `/oauth/login?return=${encodeURIComponent(requested)}`,
+                { method: "POST", body: JSON.stringify({ email, password }) },
+              );
+              const next = result.redirect === "/portal" || result.redirect.startsWith("/oauth/authorize?")
+                ? result.redirect
+                : "/portal";
+              window.location.assign(next);
+            } catch (err) {
+              setError(isApiError(err) ? err.message : m.error_login());
+              setBusy(false);
+            }
+          }}
+        >
+          <label>
+            {m.label_email()}
+            <input type="email" name="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required />
+          </label>
+          <label>
+            {m.label_password()}
+            <input type="password" name="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
           </label>
           {error ? <p className="banner error" role="alert">{error}</p> : null}
           <button className="primary" type="submit" disabled={busy}>
@@ -653,16 +739,20 @@ function KeysPanel() {
             <div className="resource-main">
               <div className="resource-title-row">
                 <h2>{key.name}</h2>
+                {key.kind === "bot" ? <span className="badge">{m.portal_key_bot()}</span> : null}
                 <span className="badge">{key.prefix}…</span>
               </div>
               <div className="meta">
                 {channel ? `${channel.name} · ${channel.ratio}x` : m.portal_no_channel()} · {m.portal_created({ time: formatDateTime(key.createdAt) })}
               </div>
+              {key.managed ? <div className="meta">{m.portal_key_managed()}</div> : null}
             </div>
             <div className="row-actions">
-            <button className="danger" type="button" onClick={() => setConfirm(key)}>
-              {m.action_revoke()}
-            </button>
+            {key.managed ? null : (
+              <button className="danger" type="button" onClick={() => setConfirm(key)}>
+                {m.action_revoke()}
+              </button>
+            )}
             </div>
           </article>
         );

@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   filterPublicEndpointTypes,
   parseAdvertisedEndpointTypes,
@@ -251,6 +251,37 @@ export type StoredApiKey = {
   createdAt: string;
   userId: string | null;
   channelId: string | null;
+  kind: "client" | "bot";
+  externalRef: string | null;
+  ownerClientId: string | null;
+};
+
+export type OAuthClient = {
+  id: string;
+  name: string;
+  redirectUris: string[];
+  scopes: string[];
+  firstParty: boolean;
+  allowHttpRedirects: boolean;
+  createdAt: string;
+};
+
+export type OAuthTokenGrant = {
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn: number;
+  scope: string;
+};
+
+export type OwnedKeyUsageBucket = {
+  keyId: string;
+  bucket: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: string;
 };
 
 export type { Channel, ChannelModelRule };
@@ -399,6 +430,43 @@ type ApiKeyRow = {
   created_at: string;
   user_id: string | null;
   channel_id: string | null;
+  kind: string | null;
+  external_ref: string | null;
+  owner_client_id: string | null;
+};
+
+type OAuthClientRow = {
+  id: string;
+  name: string;
+  secret_hash: string;
+  redirect_uris: string;
+  scopes: string;
+  first_party: number;
+  allow_http_redirects: number;
+  created_at: string;
+};
+
+type OAuthCodeRow = {
+  code_hash: string;
+  client_id: string;
+  user_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  scope: string;
+  expires_at: string;
+  used_at: string | null;
+};
+
+type OAuthTokenRow = {
+  token_hash: string;
+  kind: string;
+  client_id: string;
+  user_id: string | null;
+  scope: string;
+  family_id: string;
+  expires_at: string;
+  revoked_at: string | null;
+  created_at: string;
 };
 
 type ChannelRow = {
@@ -1644,13 +1712,23 @@ export class AdminStore {
         id,
         trimmed,
         prefix,
-        createHmac("sha256", this.key).update(secret).digest("hex"),
+        this.secretHash(secret),
         createdAt,
         ownerId,
         boundChannel,
       );
     return {
-      apiKey: { id, name: trimmed, prefix, createdAt, userId: ownerId, channelId: boundChannel },
+      apiKey: {
+        id,
+        name: trimmed,
+        prefix,
+        createdAt,
+        userId: ownerId,
+        channelId: boundChannel,
+        kind: "client",
+        externalRef: null,
+        ownerClientId: null,
+      },
       secret,
     };
   }
@@ -1659,7 +1737,7 @@ export class AdminStore {
     if (!secret) {
       return null;
     }
-    const row = this.db.prepare("SELECT * FROM api_keys WHERE key_hash = ?").get(createHmac("sha256", this.key).update(secret).digest("hex")) as
+    const row = this.db.prepare("SELECT * FROM api_keys WHERE key_hash = ?").get(this.secretHash(secret)) as
       | ApiKeyRow
       | undefined;
     return row ? this.toApiKey(row) : null;
@@ -1670,6 +1748,478 @@ export class AdminStore {
     if (result.changes === 0) {
       throw Object.assign(new Error("api key not found"), { statusCode: 404 });
     }
+  }
+
+  createBotApiKey(input: {
+    name: string;
+    userId: string;
+    channelId: string;
+    externalRef: string;
+    ownerClientId: string;
+  }): {
+    id: string;
+    prefix: string;
+    key: string;
+    name: string;
+    channelId: string;
+    kind: "bot";
+    externalRef: string;
+    createdAt: string;
+  } {
+    const trimmed = input.name.trim();
+    if (!trimmed) {
+      throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const ownerId = input.userId.trim();
+    const user = ownerId ? this.getUser(ownerId) : null;
+    if (!user) {
+      throw Object.assign(new Error("user not found"), { statusCode: 404 });
+    }
+    if (user.status !== "active") {
+      throw Object.assign(new Error("user disabled"), { statusCode: 403 });
+    }
+    const channelId = input.channelId.trim();
+    if (!channelId) {
+      throw Object.assign(new Error("channelId is required"), { statusCode: 400 });
+    }
+    if (!this.getChannel(channelId)) {
+      throw Object.assign(new Error("unknown channel"), { statusCode: 400 });
+    }
+    if (!this.userHasChannel(ownerId, channelId)) {
+      throw Object.assign(new Error("channel not available"), { statusCode: 400 });
+    }
+    const externalRef = input.externalRef.trim();
+    if (!externalRef) {
+      throw Object.assign(new Error("externalRef is required"), { statusCode: 400 });
+    }
+    const ownerClientId = input.ownerClientId.trim();
+    if (!this.getOAuthClient(ownerClientId)) {
+      throw Object.assign(new Error("oauth client not found"), { statusCode: 404 });
+    }
+    const secret = `viate_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const prefix = secret.slice(0, 12);
+    this.db
+      .prepare(
+        `INSERT INTO api_keys (
+          id, name, prefix, key_hash, created_at, user_id, channel_id, kind, external_ref, owner_client_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'bot', ?, ?)`,
+      )
+      .run(id, trimmed, prefix, this.secretHash(secret), createdAt, ownerId, channelId, externalRef, ownerClientId);
+    return { id, prefix, key: secret, name: trimmed, channelId, kind: "bot", externalRef, createdAt };
+  }
+
+  listOwnedApiKeys(ownerClientId: string, kind?: "client" | "bot"): StoredApiKey[] {
+    const rows = (
+      kind
+        ? this.db
+            .prepare(
+              "SELECT * FROM api_keys WHERE owner_client_id = ? AND kind = ? ORDER BY created_at DESC, id DESC",
+            )
+            .all(ownerClientId, kind)
+        : this.db
+            .prepare("SELECT * FROM api_keys WHERE owner_client_id = ? ORDER BY created_at DESC, id DESC")
+            .all(ownerClientId)
+    ) as ApiKeyRow[];
+    return rows.map((row) => this.toApiKey(row));
+  }
+
+  deleteOwnedApiKey(id: string, ownerClientId: string): void {
+    const result = this.db
+      .prepare("DELETE FROM api_keys WHERE id = ? AND owner_client_id = ?")
+      .run(id, ownerClientId);
+    if (result.changes === 0) {
+      throw Object.assign(new Error("api key not found"), { statusCode: 404 });
+    }
+  }
+
+  listUsersPage(limit: number, cursor?: { createdAt: string; id: string } | null): {
+    users: GatewayUser[];
+    nextCursor: { createdAt: string; id: string } | null;
+  } {
+    const rows = (
+      cursor
+        ? this.db
+            .prepare(
+              `SELECT * FROM users
+               WHERE created_at < ? OR (created_at = ? AND id < ?)
+               ORDER BY created_at DESC, id DESC
+               LIMIT ?`,
+            )
+            .all(cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
+        : this.db.prepare("SELECT * FROM users ORDER BY created_at DESC, id DESC LIMIT ?").all(limit + 1)
+    ) as UserRow[];
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      users: page.map((row) => this.toUser(row)),
+      nextCursor: rows.length > limit && last ? { createdAt: last.created_at, id: last.id } : null,
+    };
+  }
+
+  queryOwnedKeyUsage(input: {
+    ownerClientId: string;
+    keyIds: string[];
+    from: string;
+    to: string;
+    granularity: "hour" | "day";
+  }): OwnedKeyUsageBucket[] {
+    if (input.keyIds.length === 0) {
+      return [];
+    }
+    const requested = input.keyIds.map(() => "?").join(", ");
+    const owned = this.db
+      .prepare(`SELECT id FROM api_keys WHERE owner_client_id = ? AND id IN (${requested})`)
+      .all(input.ownerClientId, ...input.keyIds) as Array<{ id: string }>;
+    if (owned.length === 0) {
+      return [];
+    }
+    const ids = owned.map((row) => row.id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const bucketExpr =
+      input.granularity === "hour"
+        ? "substr(l.started_at, 1, 13) || ':00:00.000Z'"
+        : "substr(l.started_at, 1, 10) || 'T00:00:00.000Z'";
+    const rows = this.db
+      .prepare(
+        `SELECT l.api_key_id AS key_id,
+                ${bucketExpr} AS bucket,
+                COUNT(*) AS requests,
+                COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(l.cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(l.cache_write_tokens), 0) AS cache_write_tokens,
+                COALESCE(SUM(-t.delta), 0) AS cost_nano
+         FROM request_logs l
+         LEFT JOIN token_ledger t ON t.request_id = l.id
+         WHERE l.api_key_id IN (${placeholders})
+           AND l.started_at >= ?
+           AND l.started_at < ?
+         GROUP BY l.api_key_id, bucket
+         ORDER BY bucket ASC, l.api_key_id ASC`,
+      )
+      .all(...ids, input.from, input.to) as Array<{
+      key_id: string;
+      bucket: string;
+      requests: number | bigint;
+      input_tokens: number | bigint;
+      output_tokens: number | bigint;
+      cache_read_tokens: number | bigint;
+      cache_write_tokens: number | bigint;
+      cost_nano: number | bigint | null;
+    }>;
+    return rows.map((row) => ({
+      keyId: row.key_id,
+      bucket: row.bucket,
+      requests: numberFrom(row.requests),
+      inputTokens: numberFrom(row.input_tokens),
+      outputTokens: numberFrom(row.output_tokens),
+      cacheReadTokens: numberFrom(row.cache_read_tokens),
+      cacheWriteTokens: numberFrom(row.cache_write_tokens),
+      costUsd: formatUsd(asNano(row.cost_nano)),
+    }));
+  }
+
+  createOAuthClient(input: {
+    name: string;
+    redirectUris: string[];
+    scopes: string[];
+    allowHttpRedirects: boolean;
+    firstParty?: boolean;
+  }): { client: OAuthClient; secret: string } {
+    const name = input.name.trim();
+    if (!name) {
+      throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const secret = `vcs_${randomBytes(32).toString("base64url")}`;
+    const id = `vc_${randomBytes(24).toString("base64url")}`;
+    const createdAt = new Date().toISOString();
+    const firstParty = input.firstParty === false ? 0 : 1;
+    this.db
+      .prepare(
+        `INSERT INTO oauth_clients (
+          id, name, secret_hash, redirect_uris, scopes, first_party, allow_http_redirects, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        name,
+        this.secretHash(secret),
+        JSON.stringify(input.redirectUris),
+        JSON.stringify(input.scopes),
+        firstParty,
+        input.allowHttpRedirects ? 1 : 0,
+        createdAt,
+      );
+    const client = this.getOAuthClient(id);
+    if (!client) {
+      throw Object.assign(new Error("oauth client not found"), { statusCode: 404 });
+    }
+    return { client, secret };
+  }
+
+  listOAuthClients(): OAuthClient[] {
+    const rows = this.db
+      .prepare("SELECT * FROM oauth_clients ORDER BY created_at ASC, id ASC")
+      .all() as OAuthClientRow[];
+    return rows.map((row) => this.toOAuthClient(row));
+  }
+
+  getOAuthClient(id: string): OAuthClient | null {
+    const row = this.db.prepare("SELECT * FROM oauth_clients WHERE id = ?").get(id) as OAuthClientRow | undefined;
+    return row ? this.toOAuthClient(row) : null;
+  }
+
+  verifyOAuthClient(id: string, secret: string): OAuthClient | null {
+    const row = this.db.prepare("SELECT * FROM oauth_clients WHERE id = ?").get(id) as OAuthClientRow | undefined;
+    if (!row || !secretMatches(this.secretHash(secret), row.secret_hash)) {
+      return null;
+    }
+    return this.toOAuthClient(row);
+  }
+
+  updateOAuthClient(
+    id: string,
+    patch: { name?: string; redirectUris?: string[]; scopes?: string[]; allowHttpRedirects?: boolean },
+  ): OAuthClient {
+    const current = this.requireOAuthClientRow(id);
+    const name = patch.name === undefined ? current.name : patch.name.trim();
+    if (!name) {
+      throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const redirectUris = patch.redirectUris ?? parseJsonStringArray(current.redirect_uris);
+    const scopes = patch.scopes ?? parseJsonStringArray(current.scopes);
+    const allowHttp = patch.allowHttpRedirects === undefined ? current.allow_http_redirects === 1 : patch.allowHttpRedirects;
+    this.db
+      .prepare(
+        "UPDATE oauth_clients SET name = ?, redirect_uris = ?, scopes = ?, allow_http_redirects = ? WHERE id = ?",
+      )
+      .run(name, JSON.stringify(redirectUris), JSON.stringify(scopes), allowHttp ? 1 : 0, id);
+    return this.toOAuthClient(this.requireOAuthClientRow(id));
+  }
+
+  rotateOAuthClientSecret(id: string): { client: OAuthClient; secret: string } {
+    this.requireOAuthClientRow(id);
+    const secret = `vcs_${randomBytes(32).toString("base64url")}`;
+    this.db.prepare("UPDATE oauth_clients SET secret_hash = ? WHERE id = ?").run(this.secretHash(secret), id);
+    return { client: this.toOAuthClient(this.requireOAuthClientRow(id)), secret };
+  }
+
+  deleteOAuthClient(id: string): void {
+    this.requireOAuthClientRow(id);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("UPDATE api_keys SET owner_client_id = NULL WHERE owner_client_id = ?").run(id);
+      this.db.prepare("DELETE FROM oauth_clients WHERE id = ?").run(id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  createAuthorizationCode(input: {
+    clientId: string;
+    userId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    scope: string;
+  }): string {
+    const code = `vac_${randomBytes(32).toString("base64url")}`;
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO oauth_codes (
+          code_hash, client_id, user_id, redirect_uri, code_challenge, scope, expires_at, used_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(this.secretHash(code), input.clientId, input.userId, input.redirectUri, input.codeChallenge, input.scope, expiresAt);
+    return code;
+  }
+
+  exchangeAuthorizationCode(input: {
+    clientId: string;
+    code: string;
+    redirectUri: string;
+    codeVerifier: string;
+  }): { ok: true; grant: OAuthTokenGrant } | { ok: false; error: "invalid_grant"; description: string } {
+    const codeHash = this.secretHash(input.code);
+    const now = new Date();
+    const nowIso = now.toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM oauth_codes WHERE code_hash = ?").get(codeHash) as OAuthCodeRow | undefined;
+      if (!row || row.client_id !== input.clientId) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "authorization code is invalid" };
+      }
+      if (row.used_at) {
+        this.revokeTokenFamily(codeHash, nowIso);
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", description: "authorization code replayed" };
+      }
+      if (row.expires_at <= nowIso) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "authorization code expired" };
+      }
+      if (row.redirect_uri !== input.redirectUri) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "redirect_uri mismatch" };
+      }
+      const challenge = pkceS256(input.codeVerifier);
+      if (!challenge || !secretMatches(challenge, row.code_challenge)) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "code verifier mismatch" };
+      }
+      const user = this.db.prepare("SELECT status FROM users WHERE id = ?").get(row.user_id) as { status: string } | undefined;
+      if (!user || user.status !== "active") {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "user inactive" };
+      }
+      const marked = this.db
+        .prepare("UPDATE oauth_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL")
+        .run(nowIso, codeHash);
+      if (Number(marked.changes) !== 1) {
+        this.revokeTokenFamily(codeHash, nowIso);
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", description: "authorization code replayed" };
+      }
+      const grant = this.insertTokenPair({
+        clientId: row.client_id,
+        userId: row.user_id,
+        scope: row.scope,
+        familyId: codeHash,
+        now,
+        refresh: true,
+      });
+      this.db.exec("COMMIT");
+      return { ok: true, grant };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  rotateRefreshToken(input: {
+    clientId: string;
+    refreshToken: string;
+  }): { ok: true; grant: OAuthTokenGrant } | { ok: false; error: "invalid_grant"; description: string } {
+    const tokenHash = this.secretHash(input.refreshToken);
+    const now = new Date();
+    const nowIso = now.toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE token_hash = ?").get(tokenHash) as
+        | OAuthTokenRow
+        | undefined;
+      if (!row || row.kind !== "refresh" || row.client_id !== input.clientId) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "refresh token is invalid" };
+      }
+      const user = row.user_id
+        ? (this.db.prepare("SELECT status FROM users WHERE id = ?").get(row.user_id) as { status: string } | undefined)
+        : undefined;
+      if (!row.user_id || !user || user.status !== "active") {
+        if (row.family_id) {
+          this.revokeTokenFamily(row.family_id, nowIso);
+        }
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", description: "user inactive" };
+      }
+      if (row.revoked_at) {
+        this.revokeTokenFamily(row.family_id, nowIso);
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", description: "refresh token replayed" };
+      }
+      if (row.expires_at <= nowIso) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "refresh token expired" };
+      }
+      this.db
+        .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL")
+        .run(nowIso, tokenHash);
+      const grant = this.insertTokenPair({
+        clientId: row.client_id,
+        userId: row.user_id,
+        scope: row.scope,
+        familyId: row.family_id,
+        now,
+        refresh: true,
+      });
+      this.db.exec("COMMIT");
+      return { ok: true, grant };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  issueClientCredentials(clientId: string, scope: string): OAuthTokenGrant {
+    return this.insertTokenPair({
+      clientId,
+      userId: null,
+      scope,
+      familyId: crypto.randomUUID(),
+      now: new Date(),
+      refresh: false,
+    });
+  }
+
+  revokePresentedToken(clientId: string, token: string): void {
+    const tokenHash = this.secretHash(token);
+    const nowIso = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE token_hash = ?").get(tokenHash) as
+        | OAuthTokenRow
+        | undefined;
+      if (!row || row.client_id !== clientId) {
+        this.db.exec("ROLLBACK");
+        return;
+      }
+      if (row.kind === "refresh") {
+        this.revokeTokenFamily(row.family_id, nowIso);
+      } else if (!row.revoked_at) {
+        this.db.prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE token_hash = ?").run(nowIso, tokenHash);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  readUserAccessToken(secret: string):
+    | { status: "invalid" }
+    | { status: "inactive" }
+    | { status: "ok"; sub: string; email: string; name: string; userStatus: "active" } {
+    const row = secret ? this.findOAuthToken(secret) : null;
+    if (!row || row.kind !== "access" || !row.user_id || row.expires_at <= new Date().toISOString()) {
+      return { status: "invalid" };
+    }
+    const user = this.getUser(row.user_id);
+    if (!user) {
+      return { status: "invalid" };
+    }
+    if (user.status !== "active") {
+      return { status: "inactive" };
+    }
+    if (row.revoked_at) {
+      return { status: "invalid" };
+    }
+    return { status: "ok", sub: user.id, email: user.email, name: user.name, userStatus: user.status };
+  }
+
+  readServiceAccessToken(secret: string): { clientId: string; scope: string } | null {
+    const row = secret ? this.findOAuthToken(secret) : null;
+    if (!row || row.kind !== "access" || row.user_id || row.revoked_at) {
+      return null;
+    }
+    if (row.expires_at <= new Date().toISOString()) {
+      return null;
+    }
+    return { clientId: row.client_id, scope: row.scope };
   }
 
   saveVideoRequest(input: {
@@ -1775,6 +2325,11 @@ export class AdminStore {
         .run(name, status, hashPassword(normalizePassword(patch.password)), now, id);
     } else {
       this.db.prepare("UPDATE users SET name = ?, status = ?, updated_at = ? WHERE id = ?").run(name, status, now, id);
+    }
+    if (patch.status === "disabled") {
+      this.db
+        .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+        .run(now, id);
     }
     return this.requireUser(id);
   }
@@ -2554,6 +3109,9 @@ export class AdminStore {
     const minuteCutoff = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
     this.db.prepare("DELETE FROM request_logs WHERE started_at < ?").run(eventCutoff);
     this.db.prepare("DELETE FROM request_stats_minute WHERE bucket < ?").run(minuteCutoff);
+    const nowIso = new Date(now).toISOString();
+    this.db.prepare("DELETE FROM oauth_codes WHERE expires_at < ?").run(nowIso);
+    this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at < ?").run(nowIso);
   }
 
   private bumpRequestStats(record: RequestLogRecord): void {
@@ -2672,7 +3230,101 @@ export class AdminStore {
       createdAt: row.created_at,
       userId: row.user_id ?? null,
       channelId: row.channel_id ?? null,
+      kind: row.kind === "bot" ? "bot" : "client",
+      externalRef: row.external_ref ?? null,
+      ownerClientId: row.owner_client_id ?? null,
     };
+  }
+
+  private secretHash(secret: string): string {
+    return createHmac("sha256", this.key).update(secret).digest("hex");
+  }
+
+  private findOAuthToken(secret: string): OAuthTokenRow | null {
+    const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE token_hash = ?").get(this.secretHash(secret)) as
+      | OAuthTokenRow
+      | undefined;
+    return row ?? null;
+  }
+
+  private revokeTokenFamily(familyId: string, nowIso: string): void {
+    this.db
+      .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL")
+      .run(nowIso, familyId);
+  }
+
+  private insertTokenPair(input: {
+    clientId: string;
+    userId: string | null;
+    scope: string;
+    familyId: string;
+    now: Date;
+    refresh: boolean;
+  }): OAuthTokenGrant {
+    const accessToken = `vat_${randomBytes(32).toString("base64url")}`;
+    const createdAt = input.now.toISOString();
+    const accessExpires = new Date(input.now.getTime() + 60 * 60 * 1000).toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO oauth_tokens (
+          token_hash, kind, client_id, user_id, scope, family_id, expires_at, revoked_at, created_at
+        ) VALUES (?, 'access', ?, ?, ?, ?, ?, NULL, ?)`,
+      )
+      .run(
+        this.secretHash(accessToken),
+        input.clientId,
+        input.userId,
+        input.scope,
+        input.familyId,
+        accessExpires,
+        createdAt,
+      );
+    let refreshToken: string | undefined;
+    if (input.refresh) {
+      refreshToken = `vrt_${randomBytes(32).toString("base64url")}`;
+      const refreshExpires = new Date(input.now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO oauth_tokens (
+            token_hash, kind, client_id, user_id, scope, family_id, expires_at, revoked_at, created_at
+          ) VALUES (?, 'refresh', ?, ?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(
+          this.secretHash(refreshToken),
+          input.clientId,
+          input.userId,
+          input.scope,
+          input.familyId,
+          refreshExpires,
+          createdAt,
+        );
+    }
+    return {
+      accessToken,
+      ...(refreshToken ? { refreshToken } : {}),
+      expiresIn: 60 * 60,
+      scope: input.scope,
+    };
+  }
+
+  private toOAuthClient(row: OAuthClientRow): OAuthClient {
+    return {
+      id: row.id,
+      name: row.name,
+      redirectUris: parseJsonStringArray(row.redirect_uris),
+      scopes: parseJsonStringArray(row.scopes),
+      firstParty: row.first_party === 1,
+      allowHttpRedirects: row.allow_http_redirects === 1,
+      createdAt: row.created_at,
+    };
+  }
+
+  private requireOAuthClientRow(id: string): OAuthClientRow {
+    const row = this.db.prepare("SELECT * FROM oauth_clients WHERE id = ?").get(id) as OAuthClientRow | undefined;
+    if (!row) {
+      throw Object.assign(new Error("oauth client not found"), { statusCode: 404 });
+    }
+    return row;
   }
 
   private requireUser(id: string): GatewayUser {
@@ -2957,6 +3609,7 @@ function migrateUsers(db: DatabaseSync): void {
     );
   `);
   migrateChannels(db);
+  migrateOAuth(db);
 }
 
 function migrateChannels(db: DatabaseSync): void {
@@ -3011,6 +3664,84 @@ function migrateChannels(db: DatabaseSync): void {
   insert.run(standardId, "Standard", 7, 1, JSON.stringify({ kind: "all" }));
   db.prepare("INSERT INTO user_channels (user_id, channel_id) SELECT id, ? FROM users").run(grokId);
   db.prepare("UPDATE api_keys SET channel_id = ?").run(grokId);
+}
+
+function migrateOAuth(db: DatabaseSync): void {
+  const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+  const names = new Set(apiKeyColumns.map((column) => column.name));
+  if (!names.has("kind")) {
+    db.exec("ALTER TABLE api_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'client'");
+  }
+  if (!names.has("external_ref")) {
+    db.exec("ALTER TABLE api_keys ADD COLUMN external_ref TEXT");
+  }
+  if (!names.has("owner_client_id")) {
+    db.exec("ALTER TABLE api_keys ADD COLUMN owner_client_id TEXT");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      secret_hash TEXT NOT NULL,
+      redirect_uris TEXT NOT NULL,
+      scopes TEXT NOT NULL,
+      first_party INTEGER NOT NULL DEFAULT 1,
+      allow_http_redirects INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS oauth_codes (
+      code_hash TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      redirect_uri TEXT NOT NULL,
+      code_challenge TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      token_hash TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      client_id TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES users(id),
+      scope TEXT NOT NULL,
+      family_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS oauth_tokens_family ON oauth_tokens(family_id);
+  `);
+}
+
+function parseJsonStringArray(value: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
+}
+
+const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
+
+function pkceS256(verifier: string): string | null {
+  if (!PKCE_VERIFIER.test(verifier)) {
+    return null;
+  }
+  return createHash("sha256").update(verifier).digest("base64url");
+}
+
+function secretMatches(actual: string, expected: string): boolean {
+  const left = Buffer.from(actual);
+  const right = Buffer.from(expected);
+  if (left.length !== right.length) {
+    return false;
+  }
+  return timingSafeEqual(left, right);
 }
 
 function toChannel(row: ChannelRow): Channel {

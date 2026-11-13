@@ -4,7 +4,10 @@ import type { PluginLoadFailure } from "@viateai/plugin-manager";
 import { registerAdminRoutes, type PluginOperator } from "./admin.js";
 import { registerChatRoute, type ModelPriceLookup } from "./chat.js";
 import { registerAdminStatic } from "./static.js";
+import { registerOAuthRoutes } from "./oauth.js";
 import { registerPortalRoutes } from "./portal.js";
+import { LoginRateLimiter } from "./rate-limit.js";
+import { registerServiceRoutes } from "./service.js";
 import { createSubscriptionScheduler } from "./subscription.js";
 import type { AdminStore } from "./store.js";
 import type { SessionStore } from "./sessions.js";
@@ -32,6 +35,7 @@ export type BuildAppOptions = {
   userMaxInflight?: number;
   logPayloads?: boolean;
   requestLogRetentionMs?: number;
+  publicUrl?: string | null;
 };
 
 export type App = FastifyInstance;
@@ -141,7 +145,10 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
   }
 
   if (store) {
-    await registerPortalRoutes(app, { store });
+    const loginLimiter = new LoginRateLimiter();
+    await registerPortalRoutes(app, { store, loginLimiter });
+    await registerOAuthRoutes(app, { store, publicUrl: options.publicUrl ?? null, loginLimiter });
+    await registerServiceRoutes(app, { store });
   }
 
   await registerAdminStatic(app, options.adminUiDist ?? null);

@@ -79,8 +79,16 @@ export function parseCookies(header: string | string[] | undefined): Record<stri
   return cookies;
 }
 
-export function cookieHeader(name: string, value: string, maxAgeSeconds: number): string {
-  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}`;
+export function cookieHeader(
+  name: string,
+  value: string,
+  maxAgeSeconds: number,
+  attributes?: { path?: string; sameSite?: "Strict" | "Lax"; secure?: boolean },
+): string {
+  const path = attributes?.path ?? "/";
+  const sameSite = attributes?.sameSite ?? "Strict";
+  const secure = attributes?.secure ? "; Secure" : "";
+  return `${name}=${encodeURIComponent(value)}; Path=${path}; HttpOnly; SameSite=${sameSite}; Max-Age=${maxAgeSeconds}${secure}`;
 }
 
 export function clearCookieHeader(name: string): string {

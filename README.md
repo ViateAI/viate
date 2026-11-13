@@ -18,7 +18,7 @@ pnpm dev:web
 
 `pnpm dev` is the API. It listens on `0.0.0.0:4317`. There is no default admin password.
 
-`pnpm dev:web` is the Vite admin on port `5173`, base `/admin/`. It proxies `/api` and `/health` to `127.0.0.1:4317`. `/` redirects to `/portal`.
+`pnpm dev:web` is the Vite admin on port `5173`, base `/admin/`. It proxies `/api`, `/health`, `/oauth`, and `/.well-known` to `127.0.0.1:4317`. `/` redirects to `/portal`.
 
 The API serves the admin and portal UI only when a built `index.html` is available. `pnpm dev` does not build that UI. After `pnpm build`, the server finds `apps/web/dist` on its own. Set `VIATE_ADMIN_UI_DIST` to point elsewhere.
 
@@ -66,6 +66,7 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 | `VIATE_USER_MAX_INFLIGHT` | `8` | Per-user cap on requests in flight |
 | `VIATE_LOG_PAYLOADS` | off | Store prompt and response bodies with the request log |
 | `VIATE_REQUEST_LOG_RETENTION_DAYS` | `7` | How long request logs and stored bodies are kept |
+| `VIATE_PUBLIC_URL` | unset | Issuer for `GET /.well-known/oauth-authorization-server`. No path query or fragment. When unset, the issuer is `X-Forwarded-Proto` (or the request protocol) plus `Host` |
 
 ## HTTP
 
@@ -94,6 +95,59 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 
 `GET /v1/user/balance` returns the key owner's spendable USD balance as `balanceUsd`, for example `{ "balanceUsd": "10.50" }`. It does not start a request or charge.
 
+OAuth endpoints:
+
+| Method | Path |
+| --- | --- |
+| `GET` | `/.well-known/oauth-authorization-server` |
+| `GET` | `/oauth/authorize` |
+| `POST` | `/oauth/login` |
+| `POST` | `/oauth/token` |
+| `GET` | `/oauth/userinfo` |
+| `POST` | `/oauth/revoke` |
+| `GET` | `/oauth/client-info` |
+
+`GET /oauth/authorize` is an authorization-code request with PKCE S256. `scope` is optional and only `profile` is accepted; omitted means `profile`. An unknown `client_id` or a `redirect_uri` that is not an exact registered URI returns 400 and does not redirect. A client that is not first-party returns 400 `consent not supported`. Other parameter errors redirect to `redirect_uri` with `error` and `state`. Without an active `viate_oauth` session, the response redirects to `/portal/oauth-login?return=` set to the encoded authorize path and query. A successful login then redirects to `redirect_uri` with `code` and `state`. Codes expire after 60 seconds. Replaying a code revokes the token family issued from it.
+
+`POST /oauth/login` accepts `{ "email", "password" }` and the same origin check and per-address-and-email limit as portal login. The response is `{ "ok": true, "redirect" }`. `redirect` is the `return` query value when it is a path beginning with `/oauth/authorize?`; every other value becomes `/portal`. The login page posts that `return` value and navigates to `redirect`.
+
+`POST /oauth/token` accepts `application/x-www-form-urlencoded` and `client_secret_basic` or `client_secret_post`. Grants are `authorization_code`, `refresh_token`, and `client_credentials`. Access tokens last one hour (`vat_`). Refresh tokens last 30 days (`vrt_`) and rotate; replaying a rotated refresh token revokes its family. Client-credentials tokens have no user and no refresh token. `scope` must be a subset of the client's registered service scopes; omitted means all of them. Responses set `Cache-Control: no-store`. Token errors use `{ "error", "error_description" }`.
+
+`GET /oauth/userinfo` requires a user access token and returns `{ "sub", "email", "name", "status" }`. An invalid token is 401 `invalid_token`. A token for a user who is not `active` is 403 `user_inactive`. `POST /oauth/revoke` requires client authentication. Revoking a refresh token revokes its family. A missing token is 400; an unknown token is still 200.
+
+`GET /oauth/client-info?client_id=` returns `{ "name" }` for the OAuth login page. It does not return secrets, redirect URIs, or scopes.
+
+Service endpoints authenticate with `Authorization: Bearer` and a client-credentials access token. Portal and admin cookies are not accepted. A bad token is 401 `invalid token`. A token missing the route scope is 403 `insufficient scope`. Errors use `{ "error": { "message", "type": "viate_error" } }`.
+
+| Method | Path | Scope |
+| --- | --- | --- |
+| `GET` | `/api/service/users?cursor=&limit=` | `users:read` |
+| `GET` | `/api/service/users/:id` | `users:read` |
+| `GET` | `/api/service/channels` | `channels:read` |
+| `GET` | `/api/service/users/:id/channels` | `channels:read` |
+| `POST` | `/api/service/users/:id/keys` | `keys:write` |
+| `GET` | `/api/service/keys?kind=bot` | `keys:write` |
+| `DELETE` | `/api/service/keys/:id` | `keys:write` |
+| `GET` | `/api/service/usage?keyIds=&from=&to=&granularity=` | `usage:read` |
+
+`GET /api/service/users` returns `{ "users": [{ "id", "email", "name", "status", "createdAt" }], "nextCursor" }`. `limit` defaults to 50 and must be from 1 to 200. `cursor` and `nextCursor` are opaque. User order is `createdAt` descending, then id descending. `GET /api/service/channels` and the per-user channel route return `{ "channels": [{ "id", "name" }] }`. The per-user route uses the same channel grants as `/api/portal/channels`.
+
+`POST /api/service/users/:id/keys` body is `{ "name", "channelId", "kind": "bot", "externalRef" }`. The user must be active and the channel must be granted. The plaintext `key` is returned once. `GET /api/service/keys?kind=bot` lists keys issued by the current client and does not return the secret. Omit `kind` to list every key that client issued. `DELETE` returns 404 for a key issued by another client.
+
+`GET /api/service/usage` takes a comma-separated `keyIds` list of at most 200 ids, ISO `from` and `to` instants, and `granularity` of `hour` or `day`. `to` must be after `from`, and the span cannot exceed 7 days. The window is half-open: `started_at >= from` and `started_at < to`. Keys that this client did not issue are ignored. Each bucket is `{ "keyId", "bucket", "requests", "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "costUsd" }`. Counts come from `request_logs`. `costUsd` is the sum of ledger charges for those requests (`-delta`), formatted like other USD strings. Hours and days are UTC. Empty ranges, including anything older than request-log retention, return `{ "buckets": [] }`.
+
+Admin OAuth client routes use the admin session, same-origin check, and CSRF header:
+
+| Method | Path |
+| --- | --- |
+| `GET` | `/api/admin/oauth-clients` |
+| `POST` | `/api/admin/oauth-clients` |
+| `PATCH` | `/api/admin/oauth-clients/:id` |
+| `POST` | `/api/admin/oauth-clients/:id/rotate-secret` |
+| `DELETE` | `/api/admin/oauth-clients/:id` |
+
+Create and rotate return the plaintext secret once. Fields are `name`, `redirectUris` (also accepted as `redirect_uris`), `scopes`, and `allowHttpRedirects` (also `allow_http_redirects`). Registered scopes are `users:read`, `channels:read`, `keys:write`, and `usage:read`. Redirect URIs must be `https`, or `http` on `localhost`, `127.0.0.1`, or `[::1]` with any port, unless `allowHttpRedirects` is true. Fragments are rejected. Delete revokes that client's tokens and codes. It does not delete keys that client issued; their owner is cleared so the portal can revoke them. The admin page is `/admin/oauth-clients`.
+
 A provider method that is not implemented returns 404 `capability not supported`.
 
 Streaming `POST /v1/chat/completions` is forwarded with `stream_options.include_usage` set, so a completed stream can be billed. Other fields already in `stream_options` are kept.
@@ -110,7 +164,7 @@ A channel allows every published model (`all`) or an exact model-id list (`model
 
 `/v1` accepts `Authorization: Bearer <key>` or `x-api-key`. Admin and portal cookies do not authenticate `/v1`. A missing key, an unknown key, or a data directory with no client keys returns 401 `invalid api key`.
 
-Customers create client keys at `/portal` (`POST /api/portal/keys`). Admin can list and delete keys. It does not issue them.
+Customers create client keys at `/portal` (`POST /api/portal/keys`). A first-party OAuth client with `keys:write` can issue a `bot` key through `POST /api/service/users/:id/keys`. Admin can list and delete keys. It does not issue them.
 
 Without `VIATE_ADMIN_PASSWORD`, every `/api/admin` route returns 503:
 
@@ -120,13 +174,13 @@ Without `VIATE_ADMIN_PASSWORD`, every `/api/admin` route returns 503:
 
 Admin and portal mutations need a same-origin request and an `X-Viate-Csrf` header. Login needs a same-origin request. The check compares `Origin` to `X-Forwarded-Proto` (or the request protocol) plus `Host`. A public HTTPS proxy must forward `Host`, `X-Forwarded-Proto`, and `X-Forwarded-For`. `VIATE_TRUST_PROXY` defaults to `loopback,uniquelocal`, so a proxy on localhost or a private address can set the client IP and a public client cannot. A hop count is rejected: this Fastify version does not honor one. Set the value to the proxy's address when that proxy connects from a public IP, or `false` when nothing sits in front. Portal login is limited per client address and email. Admin login is limited per client address.
 
-Every client key belongs to a user. `POST /api/portal/keys` is the only way to issue one. A key whose `userId` is missing is rejected with 403 `api key is not bound to a user`. A key with no `channelId` is not denied. A denied channel, a model outside that channel's rule, or a missing price for a requested model rejects before admission. Price lookup and admission run for every accepted key. A user can have at most `VIATE_USER_MAX_INFLIGHT` requests in flight (default 8).
+Every client key belongs to a user. Portal keys are issued with `POST /api/portal/keys`. Bot keys are issued with `POST /api/service/users/:id/keys`. A key whose `userId` is missing is rejected with 403 `api key is not bound to a user`. `GET /api/portal/keys` adds `kind` (`client` or `bot`) and `managed` (`true` when an OAuth client owns the key). `DELETE /api/portal/keys/:id` returns 403 `managed key` for those keys. The portal shows a bot label and hides delete until the owning client is removed. Disabling a user revokes that user's OAuth tokens. A key with no `channelId` is not denied. A denied channel, a model outside that channel's rule, or a missing price for a requested model rejects before admission. Price lookup and admission run for every accepted key. A user can have at most `VIATE_USER_MAX_INFLIGHT` requests in flight (default 8).
 
 ## Cookies
 
-Session cookies are `HttpOnly`, `SameSite=Strict`, and not `Secure`. `Max-Age` is 12 hours. Names are `viate_admin`, `viate_csrf`, `viate_user`, and `viate_user_csrf`.
+Session cookies `viate_admin`, `viate_csrf`, `viate_user`, and `viate_user_csrf` are `HttpOnly`, `SameSite=Strict`, and not `Secure`. `Max-Age` is 12 hours. `Secure` is unset, so a browser will send these cookies on plain HTTP. Put a public deployment behind an HTTPS reverse proxy.
 
-`Secure` is unset, so a browser will send these cookies on plain HTTP. Put a public deployment behind an HTTPS reverse proxy.
+`viate_oauth` is a separate session used only to recognize a signed-in user at `GET /oauth/authorize`. It is `HttpOnly`, `SameSite=Lax`, `Path=/oauth`, and `Max-Age` is 12 hours. `Secure` is added only when the request is HTTPS, using the same `X-Forwarded-Proto` or protocol check as the same-origin comparison. The cookie is not sent to `/api/*` and does not authenticate those routes. It stays `Lax` so a cross-site visit to `/oauth/authorize` can include it; the Strict cookies above cannot.
 
 ## Plugins
 
@@ -174,7 +228,8 @@ Default data directory is `~/.viate`. Docker uses `/data`.
 - SQLite: `$VIATE_DATA_DIR/viate.sqlite`
 - Connection secrets: AES-256-GCM, key file `$VIATE_DATA_DIR/credential.key`, mode `0600`
 - Plugin install state: `$VIATE_DATA_DIR/plugins/` (`active/`, `pending/`, `state.json`, lock)
-- Request metadata: `request_logs` in SQLite, kept for `VIATE_REQUEST_LOG_RETENTION_DAYS` (default 7). Prompt and response bodies are written under `$VIATE_DATA_DIR/request-logs/` only when `VIATE_LOG_PAYLOADS` is on (default off), and removed with the same retention.
+- Request metadata: `request_logs` in SQLite, kept for `VIATE_REQUEST_LOG_RETENTION_DAYS` (default 7). Prompt and response bodies are written under `$VIATE_DATA_DIR/request-logs/` only when `VIATE_LOG_PAYLOADS` is on (default off), and removed with the same retention. `GET /api/service/usage` reads those rows, so a range outside the retention window is empty.
+- OAuth clients, authorization codes, and tokens are in the same SQLite database. Only hashes are stored. Expired codes and tokens are deleted by the same cleanup pass as request logs.
 
 The admin connection list returns `hasCredentials`, not the secret.
 

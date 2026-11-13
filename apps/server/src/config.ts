@@ -14,6 +14,7 @@ export type ServerConfig = {
   userMaxInflight: number;
   logPayloads: boolean;
   requestLogRetentionMs: number;
+  publicUrl: string | null;
 };
 
 const DEFAULT_HOST = "0.0.0.0";
@@ -33,7 +34,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     logPayloads: parseFlag(env.VIATE_LOG_PAYLOADS, false, "VIATE_LOG_PAYLOADS"),
     requestLogRetentionMs:
       parsePositiveInt(env.VIATE_REQUEST_LOG_RETENTION_DAYS, 7, "VIATE_REQUEST_LOG_RETENTION_DAYS") * 24 * 60 * 60 * 1000,
+    publicUrl: parsePublicUrl(env.VIATE_PUBLIC_URL),
   };
+}
+
+function parsePublicUrl(raw: string | undefined): string | null {
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed) {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error(`Invalid VIATE_PUBLIC_URL: ${raw}`);
+  }
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || url.search || url.hash) {
+    throw new Error(`Invalid VIATE_PUBLIC_URL: ${raw}`);
+  }
+  const path = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
+  return `${url.origin}${path}`;
 }
 
 function parsePort(raw: string | undefined): number {

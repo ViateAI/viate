@@ -30,6 +30,7 @@ await registerApp(app, {
   userMaxInflight: config.userMaxInflight,
   logPayloads: config.logPayloads,
   requestLogRetentionMs: config.requestLogRetentionMs,
+  publicUrl: config.publicUrl,
 });
 await modelPrices.start();
 

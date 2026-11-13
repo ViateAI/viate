@@ -26,12 +26,13 @@ import { ConfirmDialog, useDialogDismiss } from "./dialog";
 import { formatDateTime } from "./format";
 import { LocaleSwitch } from "./locale-switch";
 import { m } from "./paraglide/messages.js";
+import { OAuthClientsPage } from "./oauth-clients";
 import { PortalApp } from "./portal";
 import { PricesPage } from "./prices";
 import { RequestsPage } from "./requests";
 import { UsersPage } from "./users";
 
-type Page = "plugins" | "connections" | "balances" | "models" | "prices" | "channels" | "users" | "api-keys" | "requests" | "logs";
+type Page = "plugins" | "connections" | "balances" | "models" | "prices" | "channels" | "users" | "oauth-clients" | "api-keys" | "requests" | "logs";
 
 function keepaliveLabel(status: Connection["keepaliveStatus"]): string {
   if (status === "ok") return m.keepalive_ok();
@@ -199,8 +200,8 @@ function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
   );
 }
 
-const ADMIN_PAGES: Page[] = ["plugins", "connections", "balances", "models", "prices", "channels", "users", "api-keys", "requests", "logs"];
-const MORE_PAGES: Page[] = ["balances", "prices", "channels", "users", "api-keys", "logs"];
+const ADMIN_PAGES: Page[] = ["plugins", "connections", "balances", "models", "prices", "channels", "users", "oauth-clients", "api-keys", "requests", "logs"];
+const MORE_PAGES: Page[] = ["balances", "prices", "channels", "users", "oauth-clients", "api-keys", "logs"];
 
 function normalizePath(pathname: string): string {
   return pathname.replace(/\/+$/, "") || "/";
@@ -266,6 +267,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <NavButton page="prices" current={page} onClick={openPage}>{m.nav_prices()}</NavButton>
           <NavButton page="channels" current={page} onClick={openPage}>{m.nav_channels()}</NavButton>
           <NavButton page="users" current={page} onClick={openPage}>{m.nav_users()}</NavButton>
+          <NavButton page="oauth-clients" current={page} onClick={openPage}>{m.nav_oauth_clients()}</NavButton>
           <NavButton page="api-keys" current={page} onClick={openPage}>{m.nav_api_keys()}</NavButton>
           <NavButton page="requests" current={page} onClick={openPage}>{m.nav_requests()}</NavButton>
           <NavButton page="logs" current={page} onClick={openPage}>{m.nav_logs()}</NavButton>
@@ -339,6 +341,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         {page === "prices" ? <PricesPage onNotice={setNotice} /> : null}
         {page === "channels" ? <ChannelsPage onNotice={setNotice} /> : null}
         {page === "users" ? <UsersPage onNotice={setNotice} /> : null}
+        {page === "oauth-clients" ? <OAuthClientsPage onNotice={setNotice} /> : null}
         {page === "api-keys" ? <ApiKeysPage onNotice={setNotice} /> : null}
         {page === "requests" ? <RequestsPage /> : null}
         {page === "logs" ? <LogsPage /> : null}
@@ -437,6 +440,7 @@ function navLabel(page: Page): string {
   if (page === "prices") return m.nav_prices();
   if (page === "channels") return m.nav_channels();
   if (page === "users") return m.nav_users();
+  if (page === "oauth-clients") return m.nav_oauth_clients();
   if (page === "api-keys") return m.nav_api_keys();
   if (page === "requests") return m.nav_requests();
   return m.nav_logs();
@@ -450,6 +454,7 @@ function pageLabel(page: Page): string {
   if (page === "prices") return m.page_prices();
   if (page === "channels") return m.page_channels();
   if (page === "users") return m.page_users();
+  if (page === "oauth-clients") return m.page_oauth_clients();
   if (page === "api-keys") return m.page_api_keys();
   if (page === "requests") return m.page_requests();
   return m.page_logs();
@@ -463,6 +468,7 @@ function pageDescription(page: Page): string {
   if (page === "prices") return m.page_prices_desc();
   if (page === "channels") return m.page_channels_desc();
   if (page === "users") return m.page_users_desc();
+  if (page === "oauth-clients") return m.page_oauth_clients_desc();
   if (page === "api-keys") return m.page_api_keys_desc();
   if (page === "requests") return m.page_requests_desc();
   return m.page_logs_desc();

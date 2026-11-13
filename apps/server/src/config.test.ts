@@ -19,6 +19,7 @@ describe("loadConfig", () => {
     assert.equal(config.userMaxInflight, 8);
     assert.equal(config.logPayloads, false);
     assert.equal(config.requestLogRetentionMs, 7 * 24 * 60 * 60 * 1000);
+    assert.equal(config.publicUrl, null);
   });
 
   it("disables admin when no password is provided", () => {
@@ -44,5 +45,12 @@ describe("loadConfig", () => {
     assert.throws(() => loadConfig({ VIATE_TRUST_PROXY: "1" }), /VIATE_TRUST_PROXY/);
     assert.throws(() => loadConfig({ VIATE_TRUST_PROXY: "beside" }), /VIATE_TRUST_PROXY/);
     assert.throws(() => loadConfig({ VIATE_LOG_PAYLOADS: "sometimes" }), /VIATE_LOG_PAYLOADS/);
+  });
+
+  it("reads a public issuer and rejects a relative or credentialed URL", () => {
+    assert.equal(loadConfig({ VIATE_PUBLIC_URL: " https://viate.example/gateway/ " }).publicUrl, "https://viate.example/gateway");
+    assert.equal(loadConfig({ VIATE_PUBLIC_URL: "http://127.0.0.1:4417/" }).publicUrl, "http://127.0.0.1:4417");
+    assert.throws(() => loadConfig({ VIATE_PUBLIC_URL: "/viate" }), /VIATE_PUBLIC_URL/);
+    assert.throws(() => loadConfig({ VIATE_PUBLIC_URL: "https://user:pass@viate.example" }), /VIATE_PUBLIC_URL/);
   });
 });
