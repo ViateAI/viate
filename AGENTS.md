@@ -65,7 +65,7 @@ Web UI work is not done until the changed surface has been exercised (browser or
 - Advertised endpoint types filter `/v1/models` discovery only. Request routes stay open.
 - Admin UI is `GET /admin`. `/api/admin/*` is 503 without `VIATE_ADMIN_PASSWORD`. Mutations need a same-origin request plus `X-Viate-Csrf`. The admin console does not issue client keys; customers create them at `/portal`.
 - Connection secrets are AES-256-GCM in SQLite. The key file is `$VIATE_DATA_DIR/credential.key`, mode `0600`. The API never returns `apiKey`.
-- Never commit `.env`, `data/`, `viate.sqlite`, `credential.key`, or plugin workspaces under the data dir.
+- Never commit `.env`, `data/`, `viate.sqlite`, `credential.key`, `oidc-signing.key`, or plugin workspaces under the data dir.
 - Do not reintroduce `VIATE_UPSTREAM_*` / `VIATE_PROVIDER_ID`. Upstream credentials belong in stored connections.
 
 ## UI

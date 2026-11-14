@@ -66,7 +66,7 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 | `VIATE_USER_MAX_INFLIGHT` | `8` | Per-user cap on requests in flight |
 | `VIATE_LOG_PAYLOADS` | off | Store prompt and response bodies with the request log |
 | `VIATE_REQUEST_LOG_RETENTION_DAYS` | `7` | How long request logs and stored bodies are kept |
-| `VIATE_PUBLIC_URL` | unset | Issuer for `GET /.well-known/oauth-authorization-server`. No path query or fragment. When unset, the issuer is `X-Forwarded-Proto` (or the request protocol) plus `Host` |
+| `VIATE_PUBLIC_URL` | unset | Issuer for OAuth and OpenID discovery, and the `iss` claim of an `id_token`. No path, query, or fragment. When unset, the issuer is `X-Forwarded-Proto` (or the request protocol) plus `Host` |
 
 ## HTTP
 
@@ -95,11 +95,13 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 
 `GET /v1/user/balance` returns the key owner's spendable USD balance as `balanceUsd`, for example `{ "balanceUsd": "10.50" }`. It does not start a request or charge.
 
-OAuth endpoints:
+OAuth and OpenID Connect endpoints:
 
 | Method | Path |
 | --- | --- |
 | `GET` | `/.well-known/oauth-authorization-server` |
+| `GET` | `/.well-known/openid-configuration` |
+| `GET` | `/oauth/jwks` |
 | `GET` | `/oauth/authorize` |
 | `POST` | `/oauth/login` |
 | `POST` | `/oauth/token` |
@@ -107,13 +109,17 @@ OAuth endpoints:
 | `POST` | `/oauth/revoke` |
 | `GET` | `/oauth/client-info` |
 
-`GET /oauth/authorize` is an authorization-code request with PKCE S256. `scope` is optional and only `profile` is accepted; omitted means `profile`. An unknown `client_id` or a `redirect_uri` that is not an exact registered URI returns 400 and does not redirect. A client that is not first-party returns 400 `consent not supported`. Other parameter errors redirect to `redirect_uri` with `error` and `state`. Without an active `viate_oauth` session, the response redirects to `/portal/oauth-login?return=` set to the encoded authorize path and query. A successful login then redirects to `redirect_uri` with `code` and `state`. Codes expire after 60 seconds. Replaying a code revokes the token family issued from it.
+The first start writes an ES256 private key to `$VIATE_DATA_DIR/oidc-signing.key` as PKCS#8 PEM, mode `0600`. The `kid` is the RFC 7638 SHA-256 thumbprint of the public JWK. This version does not rotate keys. `GET /oauth/jwks` returns `{ "keys": [ ... ] }`. Additional PEM blocks in that file are published after the first key. Signing uses the first key only. The API does not return the private key.
+
+`GET /.well-known/openid-configuration` repeats the authorization-server metadata and adds `jwks_uri`, `subject_types_supported` (`public`), `id_token_signing_alg_values_supported` (`ES256`), and `claims_supported`. Its `scopes_supported` list is `openid`, `email`, `profile`, and the service scopes. `GET /.well-known/oauth-authorization-server` stays as it was: the only user scope it advertises is `profile`.
+
+`GET /oauth/authorize` is an authorization-code request with PKCE S256. `scope` is a space-separated list of `openid`, `email`, and `profile`. Omitted or empty means `profile`. Any other scope is `invalid_scope`. An optional `nonce` is stored with the code and later copied into `id_token`. It must be 1 to 512 characters and must not contain control characters. An unknown `client_id` or a `redirect_uri` that is not an exact registered URI returns 400 and does not redirect. A client that is not first-party returns 400 `consent not supported`. Other parameter errors redirect to `redirect_uri` with `error` and `state`. Without an active `viate_oauth` session, the response redirects to `/portal/oauth-login?return=` set to the encoded authorize path and query. A successful login then redirects to `redirect_uri` with `code` and `state`. Codes expire after 60 seconds. Replaying a code revokes the token family issued from it.
 
 `POST /oauth/login` accepts `{ "email", "password" }` and the same origin check and per-address-and-email limit as portal login. The response is `{ "ok": true, "redirect" }`. `redirect` is the `return` query value when it is a path beginning with `/oauth/authorize?`; every other value becomes `/portal`. The login page posts that `return` value and navigates to `redirect`.
 
-`POST /oauth/token` accepts `application/x-www-form-urlencoded` and `client_secret_basic` or `client_secret_post`. Grants are `authorization_code`, `refresh_token`, and `client_credentials`. Access tokens last one hour (`vat_`). Refresh tokens last 30 days (`vrt_`) and rotate; replaying a rotated refresh token revokes its family. Client-credentials tokens have no user and no refresh token. `scope` must be a subset of the client's registered service scopes; omitted means all of them. Responses set `Cache-Control: no-store`. Token errors use `{ "error", "error_description" }`.
+`POST /oauth/token` accepts `application/x-www-form-urlencoded` and `client_secret_basic` or `client_secret_post`. Grants are `authorization_code`, `refresh_token`, and `client_credentials`. Access tokens last one hour (`vat_`). Refresh tokens last 30 days (`vrt_`) and rotate; replaying a rotated refresh token revokes its family. Client-credentials tokens have no user and no refresh token. `scope` must be a subset of the client's registered service scopes; omitted means all of them. Responses set `Cache-Control: no-store`. Token errors use `{ "error", "error_description" }`. When the granted scope includes `openid`, an `authorization_code` response also includes `id_token`. Refresh and client-credentials responses do not. `id_token` is an ES256 JWT that expires 10 minutes after `iat`. Its claims are `iss`, `sub` (the viate user id), `aud` (the client id), `exp`, `iat`, `auth_time` (seconds since the OAuth login), and `nonce` when the authorize request sent one. Scope `email` adds `email` and `email_verified`. Scope `profile` adds `name`. Viate has no email verification flow, so `email_verified` is always `false`.
 
-`GET /oauth/userinfo` requires a user access token and returns `{ "sub", "email", "name", "status" }`. An invalid token is 401 `invalid_token`. A token for a user who is not `active` is 403 `user_inactive`. `POST /oauth/revoke` requires client authentication. Revoking a refresh token revokes its family. A missing token is 400; an unknown token is still 200.
+`GET /oauth/userinfo` requires a user access token. A token whose scope does not include `openid` returns `{ "sub", "email", "name", "status" }`, and also `email_verified: false` when that scope includes `email`. A token whose scope includes `openid` returns `sub`, `status`, and the claims for the granted scopes: `email` and `email_verified` (`false`) for `email`, and `name` for `profile`. An invalid token is 401 `invalid_token`. A token for a user who is not `active` is 403 `user_inactive`. `POST /oauth/revoke` requires client authentication. Revoking a refresh token revokes its family. A missing token is 400; an unknown token is still 200.
 
 `GET /oauth/client-info?client_id=` returns `{ "name" }` for the OAuth login page. It does not return secrets, redirect URIs, or scopes.
 

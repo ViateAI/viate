@@ -7,6 +7,7 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 export type SessionRecord = {
   id: string;
   csrf: string;
+  createdAt: number;
   expiresAt: number;
   subject?: string;
 };
@@ -16,10 +17,12 @@ export class SessionStore {
 
   create(subject?: string): SessionRecord {
     this.purge();
+    const now = Date.now();
     const record: SessionRecord = {
       id: randomBytes(32).toString("hex"),
       csrf: randomBytes(32).toString("hex"),
-      expiresAt: Date.now() + SESSION_TTL_MS,
+      createdAt: now,
+      expiresAt: now + SESSION_TTL_MS,
       ...(subject === undefined ? {} : { subject }),
     };
     this.sessions.set(record.id, record);

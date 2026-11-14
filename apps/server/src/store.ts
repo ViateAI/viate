@@ -273,6 +273,17 @@ export type OAuthTokenGrant = {
   scope: string;
 };
 
+export type ExchangedAuthorizationCode = {
+  grant: OAuthTokenGrant;
+  clientId: string;
+  userId: string;
+  email: string;
+  name: string;
+  scope: string;
+  nonce: string | null;
+  authTime: number;
+};
+
 export type OwnedKeyUsageBucket = {
   keyId: string;
   bucket: string;
@@ -455,6 +466,8 @@ type OAuthCodeRow = {
   scope: string;
   expires_at: string;
   used_at: string | null;
+  nonce: string | null;
+  auth_time: number | bigint | null;
 };
 
 type OAuthTokenRow = {
@@ -2025,16 +2038,28 @@ export class AdminStore {
     redirectUri: string;
     codeChallenge: string;
     scope: string;
+    nonce: string | null;
+    authTime: number;
   }): string {
     const code = `vac_${randomBytes(32).toString("base64url")}`;
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     this.db
       .prepare(
         `INSERT INTO oauth_codes (
-          code_hash, client_id, user_id, redirect_uri, code_challenge, scope, expires_at, used_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+          code_hash, client_id, user_id, redirect_uri, code_challenge, scope, expires_at, used_at, nonce, auth_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
       )
-      .run(this.secretHash(code), input.clientId, input.userId, input.redirectUri, input.codeChallenge, input.scope, expiresAt);
+      .run(
+        this.secretHash(code),
+        input.clientId,
+        input.userId,
+        input.redirectUri,
+        input.codeChallenge,
+        input.scope,
+        expiresAt,
+        input.nonce,
+        input.authTime,
+      );
     return code;
   }
 
@@ -2043,7 +2068,7 @@ export class AdminStore {
     code: string;
     redirectUri: string;
     codeVerifier: string;
-  }): { ok: true; grant: OAuthTokenGrant } | { ok: false; error: "invalid_grant"; description: string } {
+  }): ({ ok: true } & ExchangedAuthorizationCode) | { ok: false; error: "invalid_grant"; description: string } {
     const codeHash = this.secretHash(input.code);
     const now = new Date();
     const nowIso = now.toISOString();
@@ -2072,7 +2097,7 @@ export class AdminStore {
         this.db.exec("ROLLBACK");
         return { ok: false, error: "invalid_grant", description: "code verifier mismatch" };
       }
-      const user = this.db.prepare("SELECT status FROM users WHERE id = ?").get(row.user_id) as { status: string } | undefined;
+      const user = this.getUser(row.user_id);
       if (!user || user.status !== "active") {
         this.db.exec("ROLLBACK");
         return { ok: false, error: "invalid_grant", description: "user inactive" };
@@ -2094,7 +2119,17 @@ export class AdminStore {
         refresh: true,
       });
       this.db.exec("COMMIT");
-      return { ok: true, grant };
+      return {
+        ok: true,
+        grant,
+        clientId: row.client_id,
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        scope: row.scope,
+        nonce: typeof row.nonce === "string" && row.nonce.length > 0 ? row.nonce : null,
+        authTime: unixSeconds(row.auth_time, Math.floor(now.getTime() / 1000)),
+      };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -2193,7 +2228,7 @@ export class AdminStore {
   readUserAccessToken(secret: string):
     | { status: "invalid" }
     | { status: "inactive" }
-    | { status: "ok"; sub: string; email: string; name: string; userStatus: "active" } {
+    | { status: "ok"; sub: string; email: string; name: string; userStatus: "active"; scope: string } {
     const row = secret ? this.findOAuthToken(secret) : null;
     if (!row || row.kind !== "access" || !row.user_id || row.expires_at <= new Date().toISOString()) {
       return { status: "invalid" };
@@ -2208,7 +2243,7 @@ export class AdminStore {
     if (row.revoked_at) {
       return { status: "invalid" };
     }
-    return { status: "ok", sub: user.id, email: user.email, name: user.name, userStatus: user.status };
+    return { status: "ok", sub: user.id, email: user.email, name: user.name, userStatus: user.status, scope: row.scope };
   }
 
   readServiceAccessToken(secret: string): { clientId: string; scope: string } | null {
@@ -3697,7 +3732,9 @@ function migrateOAuth(db: DatabaseSync): void {
       code_challenge TEXT NOT NULL,
       scope TEXT NOT NULL,
       expires_at TEXT NOT NULL,
-      used_at TEXT
+      used_at TEXT,
+      nonce TEXT,
+      auth_time INTEGER
     );
     CREATE TABLE IF NOT EXISTS oauth_tokens (
       token_hash TEXT PRIMARY KEY,
@@ -3712,6 +3749,14 @@ function migrateOAuth(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS oauth_tokens_family ON oauth_tokens(family_id);
   `);
+  const codeColumns = db.prepare("PRAGMA table_info(oauth_codes)").all() as Array<{ name: string }>;
+  const codeNames = new Set(codeColumns.map((column) => column.name));
+  if (!codeNames.has("nonce")) {
+    db.exec("ALTER TABLE oauth_codes ADD COLUMN nonce TEXT");
+  }
+  if (!codeNames.has("auth_time")) {
+    db.exec("ALTER TABLE oauth_codes ADD COLUMN auth_time INTEGER");
+  }
 }
 
 function parseJsonStringArray(value: string): string[] {
@@ -3727,6 +3772,16 @@ function parseJsonStringArray(value: string): string[] {
 }
 
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
+
+function unixSeconds(value: number | bigint | null | undefined, fallback: number): number {
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  return fallback;
+}
 
 function pkceS256(verifier: string): string | null {
   if (!PKCE_VERIFIER.test(verifier)) {
