@@ -1396,14 +1396,14 @@ function bearer(secret: string): Record<string, string> {
 }
 
 async function waitForRequestLog(store: AdminStore, model: string): Promise<RequestLogRecord[]> {
-  for (let i = 0; i < 20; i += 1) {
+  const deadline = Date.now() + 1000;
+  for (;;) {
     const logged = store.listRequestLogs({ model });
-    if (logged.length > 0) {
+    if (logged.length > 0 || Date.now() >= deadline) {
       return logged;
     }
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  return store.listRequestLogs({ model });
 }
 
 async function waitForUserStatus(store: AdminStore, userId: string, status: number): Promise<RequestLogRecord> {
