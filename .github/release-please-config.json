@@ -1,18 +1,28 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": true,
+  "bootstrap-sha": "e1d5d66147b39fed49e9106cb6d4bb9e010d62b1",
   "packages": {
     ".": {
       "release-type": "node",
       "include-component-in-tag": false,
       "include-v-in-tag": true,
       "bump-minor-pre-major": true,
+      "exclude-paths": ["packages/sdk"],
       "extra-files": [
         { "type": "json", "path": "apps/server/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "apps/web/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/sdk/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/plugin-manager/package.json", "jsonpath": "$.version" }
       ]
+    },
+    "packages/sdk": {
+      "release-type": "node",
+      "component": "sdk",
+      "include-component-in-tag": true,
+      "include-v-in-tag": true,
+      "tag-separator": "-",
+      "bump-minor-pre-major": true
     }
   }
 }

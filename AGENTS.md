@@ -80,7 +80,7 @@ Extend the hand-written CSS in `apps/web/src/styles.css`. Do not add Tailwind, s
 
 Do not commit, push, or create a GitHub remote unless the user asks. Intended org is [ViateAI](https://github.com/ViateAI); no remote is authorized yet.
 
-Release Please is wired for `main` (`.github/release-please-config.json`). Do not invent tags, version fields, or changelog entries by hand.
+Release Please is wired for `main` (`.github/release-please-config.json`) with two components: the gateway (`.`, tags `v*`) and `@viateai/sdk` (`packages/sdk`, tags `sdk-v*`). A commit is attributed by the paths it touches. Do not invent tags, version fields, or changelog entries by hand.
 
 Keep `PROJECT_BRIEF.txt` and similar local contract notes out of git.
 

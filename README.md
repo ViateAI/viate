@@ -42,7 +42,7 @@ docker compose up -d --build
 
 `docker compose up -d --build` builds locally and tags `ghcr.io/viateai/viate:latest`. `VIATE_ADMIN_PASSWORD` comes from the environment or a gitignored `.env` beside `compose.yaml`. `.env.example` is the template. Compose reads `${VIATE_ADMIN_PASSWORD:-}`. Empty means admin stays disabled.
 
-A published GitHub Release builds `ghcr.io/viateai/viate:latest` and `ghcr.io/viateai/viate:<release tag>` from that tag. `workflow_dispatch` pushes only `ghcr.io/viateai/viate:sha-<full commit sha>` and does not move `:latest`.
+A published gateway release (`v*`) builds `ghcr.io/viateai/viate:latest` and `ghcr.io/viateai/viate:<release tag>` from that tag. An SDK release (`sdk-v*`) publishes `@viateai/sdk` and does not build the image. `workflow_dispatch` pushes only `ghcr.io/viateai/viate:sha-<full commit sha>` and does not move `:latest`.
 
 To run the published image without a local build:
 
@@ -176,7 +176,7 @@ The admin connection list returns `hasCredentials`, not the secret.
 | `packages/plugin-manager` | `@viateai/plugin-manager` |
 | `packages/cli` | `@viateai/cli` |
 
-`@viateai/sdk` is published to npm. `@viateai/server`, `@viateai/web`, `@viateai/plugin-manager`, and `@viateai/cli` are private.
+`@viateai/sdk` is published to npm on its own `sdk-v*` tags. `@viateai/server`, `@viateai/web`, `@viateai/plugin-manager`, and `@viateai/cli` are private and follow the gateway `v*` tag.
 
 ## License
 
