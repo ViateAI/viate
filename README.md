@@ -67,6 +67,20 @@ The image listens on `0.0.0.0:4317`, sets `VIATE_DATA_DIR=/data` and `VIATE_ADMI
 | `VIATE_LOG_PAYLOADS` | off | Store prompt and response bodies with the request log |
 | `VIATE_REQUEST_LOG_RETENTION_DAYS` | `7` | How long request logs and stored bodies are kept |
 | `VIATE_PUBLIC_URL` | unset | Issuer for OAuth and OpenID discovery, and the `iss` claim of an `id_token`. No path, query, or fragment. When unset, the issuer is `X-Forwarded-Proto` (or the request protocol) plus `Host` |
+| `VIATE_EPAY_ENDPOINT` | unset | EPay-compatible gateway base URL. Unset disables top-up |
+| `VIATE_EPAY_PID` | unset | Merchant id |
+| `VIATE_EPAY_KEY` | unset | Merchant key. Server only. Never returned by the API |
+| `VIATE_EPAY_PUBLIC_BASE` | unset | Public site origin used to build the notify and return URLs |
+| `VIATE_EPAY_TYPE` | unset | Gateway payment type, such as the value that gateway uses for USDT. Not assumed |
+| `VIATE_EPAY_CURRENCY` | unset | Quote currency echoed back in `param`, such as `USDT` |
+| `VIATE_EPAY_QUOTE_PER_USD` | unset | Quote-currency units charged per 1 USD |
+| `VIATE_EPAY_USD_AMOUNTS` | unset | Comma-separated USD amounts the customer may buy |
+| `VIATE_EPAY_PAY_HOSTS` | endpoint host | Extra checkout hosts allowed for the payment redirect |
+| `VIATE_EPAY_DEVICE` | `jump` | EPay `device` value |
+| `VIATE_EPAY_ORDER_TTL_SECONDS` | `1800` | When a pending order is shown as expired. A valid notify can still credit it |
+| `VIATE_EPAY_TIMEOUT_MS` | `10000` | Gateway request timeout |
+
+EPay top-up is documented in `docs/payments.md`. Leaving every `VIATE_EPAY_*` variable unset turns the feature off. A partial set stays off and names the missing variables. The customer return page is not proof of payment.
 
 ## HTTP
 

@@ -7,6 +7,9 @@ import {
   type ClientApiKey,
   type GatewayUser,
   type LedgerEntry,
+  type PaymentCatalog,
+  type PaymentNext,
+  type PaymentOrderView,
   type PortalChannel,
   type PortalEndpointType,
   type UserUsageRequest,
@@ -408,6 +411,7 @@ function AccountPage({ user, onUser }: { user: GatewayUser; onUser: (user: Gatew
         <span className="portal-balance-unit">USD</span>
       </p>
       <p className="meta">{user.email} · {user.name}</p>
+      <PaymentPanel onUser={onUser} />
       <PasswordPanel onError={setError} onNotice={setNotice} />
     </section>
   );
@@ -507,6 +511,138 @@ function LogBlock<T>({
   );
 }
 
+function reasonLabel(reason: LedgerEntry["reason"]): string {
+  if (reason === "topup") return m.portal_reason_topup();
+  return reason;
+}
+
+function paymentStatus(order: PaymentOrderView): string {
+  if (order.displayStatus === "paid") return m.portal_pay_paid({ usd: order.creditUsd });
+  if (order.displayStatus === "failed") return order.lastError || m.portal_pay_failed();
+  if (order.displayStatus === "expired") return m.portal_pay_expired();
+  return m.portal_pay_waiting();
+}
+
+function PaymentPanel({ onUser }: { onUser: (user: GatewayUser) => void }) {
+  const [catalog, setCatalog] = useState<PaymentCatalog | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [order, setOrder] = useState<PaymentOrderView | null>(null);
+  const [payload, setPayload] = useState<string | null>(null);
+  const [link, setLink] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const focus = new URLSearchParams(window.location.search).get("payment");
+
+  useEffect(() => {
+    let cancelled = false;
+    api<PaymentCatalog>("/api/portal/payments")
+      .then((result) => {
+        if (cancelled) return;
+        setCatalog(result);
+        const current = result.orders.find((item) => item.id === focus) ?? null;
+        setOrder(current);
+        setPayload(current?.status === "pending" ? current.payPayload : null);
+        setLink(current?.status === "pending" ? current.payUrl : null);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(isApiError(err) ? err.message : m.error_load_account());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [focus]);
+
+  useEffect(() => {
+    if (!order || (order.displayStatus !== "pending" && order.displayStatus !== "expired")) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void api<{ order: PaymentOrderView }>(`/api/portal/payments/${order.id}`)
+        .then(async (result) => {
+          if (cancelled) return;
+          setOrder(result.order);
+          if (result.order.displayStatus === "paid") {
+            const usage = await api<PortalUsage>("/api/portal/usage");
+            if (!cancelled) onUser(usage.user);
+          }
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [onUser, order]);
+
+  async function pay(): Promise<void> {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api<{ order: PaymentOrderView; next: PaymentNext }>("/api/portal/payments", {
+        method: "POST",
+        body: JSON.stringify({ usd: selected }),
+      });
+      setOrder(result.order);
+      if (result.next.kind === "payload") {
+        setPayload(result.next.value);
+        setLink(null);
+        return;
+      }
+      const url = new URL(result.next.url);
+      if (url.protocol !== "https:" && url.protocol !== "http:") {
+        setError(m.portal_pay_failed());
+        return;
+      }
+      setPayload(null);
+      setLink(url.href);
+      window.location.assign(url.href);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : m.portal_pay_failed());
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel portal-pay">
+      <h2>{m.portal_pay_title()}</h2>
+      <p className="meta">{m.portal_pay_desc()}</p>
+      {error ? <p className="banner error" role="alert">{error}</p> : null}
+      {catalog && !catalog.enabled ? (
+        <p className="banner warn" role="status">
+          {m.portal_pay_disabled()}
+          {catalog.problems.length > 0 ? ` ${catalog.problems.join(" ")}` : ""}
+        </p>
+      ) : null}
+      {catalog?.enabled ? (
+        <>
+          <div className="portal-pay-offers" role="group" aria-label={m.portal_pay_title()}>
+            {catalog.offers.map((offer) => (
+              <button key={offer.usd} type="button" aria-pressed={selected === offer.usd} onClick={() => setSelected(offer.usd)}>
+                <span>{offer.usd} USD</span>
+                <span className="meta">{m.portal_pay_money({ money: offer.money, currency: offer.currency })}</span>
+              </button>
+            ))}
+          </div>
+          <button className="primary" type="button" disabled={!selected || busy} onClick={() => void pay()}>
+            {selected ? m.portal_pay_action({ usd: selected }) : m.portal_pay_continue()}
+          </button>
+        </>
+      ) : null}
+      {order ? <p className={order.displayStatus === "paid" ? "banner ok" : "banner"} role="status">{paymentStatus(order)}</p> : null}
+      {payload ? (
+        <div>
+          <p className="meta">{m.portal_pay_payload()}</p>
+          <pre className="portal-pay-payload">{payload}</pre>
+        </div>
+      ) : null}
+      {link ? <a href={link} rel="noreferrer">{m.portal_pay_continue()}</a> : null}
+    </section>
+  );
+}
+
 function ChargeTable({ rows }: { rows: LedgerEntry[] }) {
   return (
     <table className="portal-log-table">
@@ -524,7 +660,7 @@ function ChargeTable({ rows }: { rows: LedgerEntry[] }) {
           <tr key={entry.id}>
             <td>{formatDateTime(entry.createdAt)}</td>
             <td>
-              {entry.reason}
+              {reasonLabel(entry.reason)}
               {entry.note ? <span className="meta"> {entry.note}</span> : null}
             </td>
             <td>{entry.deltaUsd} USD</td>
@@ -543,7 +679,7 @@ function ChargeCards({ rows }: { rows: LedgerEntry[] }) {
         <article className="portal-log-card" key={entry.id}>
           <div>{formatDateTime(entry.createdAt)}</div>
           <div>
-            {entry.reason}
+            {reasonLabel(entry.reason)}
             {entry.note ? <span className="meta"> {entry.note}</span> : null}
           </div>
           <div>

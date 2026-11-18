@@ -1463,6 +1463,35 @@ label {
   }
 }
 
+.portal-pay h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.portal-pay-offers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.portal-pay-offers button {
+  display: grid;
+  gap: 2px;
+  text-align: start;
+}
+
+.portal-pay-offers button[aria-pressed="true"] {
+  border-color: var(--foreground);
+}
+
+.portal-pay-payload {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+
 .portal-balance {
   display: flex;
   align-items: baseline;

@@ -7,6 +7,7 @@ import { registerAdminStatic } from "./static.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { registerPortalRoutes } from "./portal.js";
 import { LoginRateLimiter } from "./rate-limit.js";
+import { loadPaymentRuntime, registerPaymentRoutes, type PaymentRuntime } from "./payments.js";
 import { registerServiceRoutes } from "./service.js";
 import { createSubscriptionScheduler } from "./subscription.js";
 import type { AdminStore } from "./store.js";
@@ -36,6 +37,7 @@ export type BuildAppOptions = {
   logPayloads?: boolean;
   requestLogRetentionMs?: number;
   publicUrl?: string | null;
+  payments?: PaymentRuntime;
 };
 
 export type App = FastifyInstance;
@@ -149,6 +151,7 @@ export async function registerApp(app: App, options: Omit<BuildAppOptions, "logg
     await registerPortalRoutes(app, { store, loginLimiter });
     await registerOAuthRoutes(app, { store, publicUrl: options.publicUrl ?? null, loginLimiter });
     await registerServiceRoutes(app, { store });
+    await registerPaymentRoutes(app, store, options.payments ?? loadPaymentRuntime({}));
   }
 
   await registerAdminStatic(app, options.adminUiDist ?? null);

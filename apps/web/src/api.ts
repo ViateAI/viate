@@ -218,11 +218,45 @@ export type LedgerEntry = {
   userId: string;
   deltaUsd: string;
   balanceAfterUsd: string;
-  reason: "grant" | "adjust" | "usage";
+  reason: "grant" | "adjust" | "usage" | "topup";
   requestId: string | null;
   note: string | null;
   createdAt: string;
 };
+
+export type PaymentOffer = {
+  usd: string;
+  money: string;
+  currency: string;
+  payType: string;
+};
+
+export type PaymentOrderView = {
+  id: string;
+  status: "pending" | "paid" | "failed";
+  displayStatus: "pending" | "paid" | "failed" | "expired";
+  creditUsd: string;
+  money: string;
+  currency: string;
+  payType: string;
+  createdAt: string;
+  expiresAt: string;
+  paidAt: string | null;
+  lastError: string | null;
+  payUrl: string | null;
+  payPayload: string | null;
+};
+
+export type PaymentCatalog = {
+  enabled: boolean;
+  problems: string[];
+  currency: string | null;
+  payType: string | null;
+  offers: PaymentOffer[];
+  orders: PaymentOrderView[];
+};
+
+export type PaymentNext = { kind: "link"; url: string } | { kind: "payload"; value: string };
 
 export type UserUsageRequest = {
   id: string;

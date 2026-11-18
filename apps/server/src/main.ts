@@ -1,11 +1,13 @@
 import { loadActivePlugins, PluginManager } from "@viateai/plugin-manager";
 import { createApp, registerApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { loadPaymentRuntime } from "./payments.js";
 import { pluginLoggerFromFastify } from "./plugin-log.js";
 import { AdminStore } from "./store.js";
 import { createModelPriceCatalog } from "./model-prices.js";
 
 const config = loadConfig();
+const payments = loadPaymentRuntime();
 const manager = new PluginManager({ dataDir: config.dataDir });
 const app = createApp({ trustProxy: config.trustProxy });
 const loaded = await loadActivePlugins(manager, { log: pluginLoggerFromFastify(app.log) });
@@ -31,7 +33,11 @@ await registerApp(app, {
   logPayloads: config.logPayloads,
   requestLogRetentionMs: config.requestLogRetentionMs,
   publicUrl: config.publicUrl,
+  payments,
 });
+if (payments.setup.state === "invalid") {
+  app.log.error({ problems: payments.setup.problems }, "epay configuration is incomplete");
+}
 await modelPrices.start();
 
 let shuttingDown = false;

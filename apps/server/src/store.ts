@@ -23,6 +23,7 @@ import {
   type Channel,
   type ChannelModelRule,
 } from "./channels.js";
+import { formatCents } from "./epay.js";
 import { asNano, chargeNano, formatUsd, parseRateUsdToNano, parseUsdToNano, sqlInteger } from "./money.js";
 import type { ContextPriceTier } from "./model-prices.js";
 
@@ -327,11 +328,32 @@ export type LedgerEntry = {
   userId: string;
   deltaUsd: string;
   balanceAfterUsd: string;
-  reason: "grant" | "adjust" | "usage";
+  reason: "grant" | "adjust" | "usage" | "topup";
   requestId: string | null;
   note: string | null;
   createdAt: string;
 };
+
+export type PaymentOrder = {
+  id: string;
+  userId: string;
+  outTradeNo: string;
+  tradeNo: string | null;
+  status: "pending" | "paid" | "failed";
+  creditUsd: string;
+  money: string;
+  currency: string;
+  payType: string;
+  pid: string;
+  payUrl: string | null;
+  payPayload: string | null;
+  lastError: string | null;
+  createdAt: string;
+  expiresAt: string;
+  paidAt: string | null;
+};
+
+export type EpayApplyOutcome = "unknown" | "rejected" | "paid" | "duplicate" | "failed" | "ignored";
 
 export type UserUsageRequest = {
   id: string;
@@ -558,6 +580,7 @@ export class AdminStore {
     const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
     db.exec("PRAGMA journal_mode = WAL;");
     db.exec("PRAGMA foreign_keys = ON;");
+    db.exec("PRAGMA busy_timeout = 5000;");
     db.exec(`
       CREATE TABLE IF NOT EXISTS connections (
         id TEXT PRIMARY KEY,
@@ -2441,6 +2464,184 @@ export class AdminStore {
     }
   }
 
+  createPaymentOrder(input: {
+    userId: string;
+    outTradeNo: string;
+    creditNano: bigint;
+    moneyCents: bigint;
+    currency: string;
+    payType: string;
+    pid: string;
+    now: string;
+    expiresAt: string;
+  }): PaymentOrder {
+    this.requireUser(input.userId);
+    const id = crypto.randomUUID();
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO payment_orders (
+            id, user_id, out_trade_no, trade_no, status, credit_nano, money_cents, currency, pay_type, pid,
+            pay_url, pay_payload, last_error, created_at, expires_at, paid_at
+          ) VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL)`,
+        )
+        .run(
+          id,
+          input.userId,
+          input.outTradeNo,
+          sqlInteger(input.creditNano),
+          sqlInteger(input.moneyCents),
+          input.currency,
+          input.payType,
+          input.pid,
+          input.now,
+          input.expiresAt,
+        );
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+        throw error;
+      }
+      throw error;
+    }
+    return this.requirePaymentOrder(id);
+  }
+
+  setPaymentCheckout(
+    id: string,
+    input: { payUrl: string | null; payPayload: string | null; tradeNo: string | null },
+  ): PaymentOrder {
+    this.db
+      .prepare(
+        `UPDATE payment_orders
+         SET pay_url = ?, pay_payload = ?, trade_no = COALESCE(?, trade_no)
+         WHERE id = ? AND status = 'pending'`,
+      )
+      .run(input.payUrl, input.payPayload, input.tradeNo, id);
+    return this.requirePaymentOrder(id);
+  }
+
+  failPaymentOrder(id: string, message: string): void {
+    const clean = message.replace(/[\u0000\r\n]+/g, " ").trim().slice(0, 180);
+    this.db
+      .prepare("UPDATE payment_orders SET status = 'failed', last_error = ? WHERE id = ? AND status = 'pending'")
+      .run(clean || "payment failed", id);
+  }
+
+  getPaymentOrderForUser(id: string, userId: string): PaymentOrder | null {
+    const row = this.db.prepare("SELECT * FROM payment_orders WHERE id = ? AND user_id = ?").get(id, userId) as
+      | PaymentOrderRow
+      | undefined;
+    return row ? this.toPaymentOrder(row) : null;
+  }
+
+  listPaymentOrders(userId: string, limit = 20): PaymentOrder[] {
+    const rows = this.db
+      .prepare("SELECT * FROM payment_orders WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(userId, limit) as PaymentOrderRow[];
+    return rows.map((row) => this.toPaymentOrder(row));
+  }
+
+  applyEpayNotification(input: {
+    pid: string;
+    tradeNo: string;
+    outTradeNo: string;
+    payType: string;
+    moneyCents: bigint;
+    tradeStatus: string;
+    currency: string;
+  }): { outcome: EpayApplyOutcome; order: PaymentOrder | null } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM payment_orders WHERE out_trade_no = ?").get(input.outTradeNo) as
+        | PaymentOrderRow
+        | undefined;
+      if (!row) {
+        this.db.exec("COMMIT");
+        return { outcome: "unknown", order: null };
+      }
+      const matches =
+        row.pid === input.pid &&
+        row.pay_type === input.payType &&
+        asNano(row.money_cents) === input.moneyCents &&
+        row.currency === input.currency;
+      if (!matches) {
+        this.db.exec("COMMIT");
+        return { outcome: "rejected", order: this.toPaymentOrder(row) };
+      }
+      if (input.tradeStatus !== "TRADE_SUCCESS") {
+        // WAIT_* is not a terminal failure. Marking it failed stops the portal
+        // from polling, so a later TRADE_SUCCESS credits while the page stays failed.
+        if (row.status === "paid" || input.tradeStatus.startsWith("WAIT")) {
+          this.db.exec("COMMIT");
+          return { outcome: "ignored", order: this.toPaymentOrder(row) };
+        }
+        if (row.status !== "failed") {
+          this.db
+            .prepare("UPDATE payment_orders SET status = 'failed', last_error = ? WHERE id = ? AND status != 'paid'")
+            .run("gateway reported a non-success status", row.id);
+        }
+        const failed = this.requirePaymentRow(row.id);
+        this.db.exec("COMMIT");
+        return { outcome: "failed", order: this.toPaymentOrder(failed) };
+      }
+      if (row.status === "paid") {
+        if (row.trade_no && row.trade_no !== input.tradeNo) {
+          this.db.exec("COMMIT");
+          return { outcome: "rejected", order: this.toPaymentOrder(row) };
+        }
+        this.db.exec("COMMIT");
+        return { outcome: "duplicate", order: this.toPaymentOrder(row) };
+      }
+      const now = new Date().toISOString();
+      const credit = asNano(row.credit_nano);
+      const updated = this.db
+        .prepare(
+          `UPDATE payment_orders
+           SET status = 'paid', trade_no = ?, paid_at = ?, last_error = NULL
+           WHERE id = ? AND status != 'paid'`,
+        )
+        .run(input.tradeNo, now, row.id);
+      if (Number(updated.changes) !== 1) {
+        const current = this.requirePaymentRow(row.id);
+        this.db.exec("COMMIT");
+        return { outcome: current.status === "paid" ? "duplicate" : "rejected", order: this.toPaymentOrder(current) };
+      }
+      const user = this.db.prepare("SELECT balance_nano FROM users WHERE id = ?").get(row.user_id) as
+        | { balance_nano: number | bigint }
+        | undefined;
+      if (!user) {
+        throw Object.assign(new Error("user not found"), { statusCode: 404 });
+      }
+      const balanceAfter = asNano(user.balance_nano) + credit;
+      if (balanceAfter > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw Object.assign(new Error("balance overflow"), { statusCode: 500 });
+      }
+      this.db
+        .prepare("UPDATE users SET balance_nano = ?, updated_at = ? WHERE id = ?")
+        .run(sqlInteger(balanceAfter), now, row.user_id);
+      this.db
+        .prepare(
+          `INSERT INTO token_ledger (id, user_id, delta, balance_after, reason, request_id, note, created_at)
+           VALUES (?, ?, ?, ?, 'topup', ?, ?, ?)`,
+        )
+        .run(
+          crypto.randomUUID(),
+          row.user_id,
+          sqlInteger(credit),
+          sqlInteger(balanceAfter),
+          `pay:${row.id}`,
+          `epay ${row.out_trade_no}`.slice(0, 200),
+          now,
+        );
+      const paid = this.requirePaymentRow(row.id);
+      this.db.exec("COMMIT");
+      return { outcome: "paid", order: this.toPaymentOrder(paid) };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   listLedger(userId: string, limit = 50): LedgerEntry[] {
     this.requireUser(userId);
     const rows = this.db
@@ -3390,8 +3591,43 @@ export class AdminStore {
     };
   }
 
+  private requirePaymentOrder(id: string): PaymentOrder {
+    return this.toPaymentOrder(this.requirePaymentRow(id));
+  }
+
+  private requirePaymentRow(id: string): PaymentOrderRow {
+    const row = this.db.prepare("SELECT * FROM payment_orders WHERE id = ?").get(id) as PaymentOrderRow | undefined;
+    if (!row) {
+      throw Object.assign(new Error("payment not found"), { statusCode: 404 });
+    }
+    return row;
+  }
+
+  private toPaymentOrder(row: PaymentOrderRow): PaymentOrder {
+    const status = row.status === "paid" || row.status === "failed" ? row.status : "pending";
+    return {
+      id: row.id,
+      userId: row.user_id,
+      outTradeNo: row.out_trade_no,
+      tradeNo: row.trade_no,
+      status,
+      creditUsd: formatUsd(row.credit_nano),
+      money: formatCents(asNano(row.money_cents)),
+      currency: row.currency,
+      payType: row.pay_type,
+      pid: row.pid,
+      payUrl: row.pay_url,
+      payPayload: row.pay_payload,
+      lastError: row.last_error,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      paidAt: row.paid_at,
+    };
+  }
+
   private toLedger(row: LedgerRow): LedgerEntry {
-    const reason = row.reason === "grant" || row.reason === "adjust" || row.reason === "usage" ? row.reason : "adjust";
+    const reason =
+      row.reason === "grant" || row.reason === "adjust" || row.reason === "usage" || row.reason === "topup" ? row.reason : "adjust";
     return {
       id: row.id,
       userId: row.user_id,
@@ -3628,7 +3864,28 @@ function migrateUsers(db: DatabaseSync): void {
   if (!logColumns.some((column) => column.name === "user_id")) {
     db.exec("ALTER TABLE request_logs ADD COLUMN user_id TEXT");
   }
-  db.exec("CREATE INDEX IF NOT EXISTS request_logs_user_started ON request_logs(user_id, started_at DESC)");
+    db.exec("CREATE INDEX IF NOT EXISTS request_logs_user_started ON request_logs(user_id, started_at DESC)");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS payment_orders (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        out_trade_no TEXT NOT NULL UNIQUE,
+        trade_no TEXT,
+        status TEXT NOT NULL,
+        credit_nano INTEGER NOT NULL,
+        money_cents INTEGER NOT NULL,
+        currency TEXT NOT NULL,
+        pay_type TEXT NOT NULL,
+        pid TEXT NOT NULL,
+        pay_url TEXT,
+        pay_payload TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        paid_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS payment_orders_user_created ON payment_orders(user_id, created_at DESC);
+    `);
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_models (
       user_id TEXT NOT NULL REFERENCES users(id),
@@ -4017,6 +4274,25 @@ type UserRow = {
   inflight: number | bigint;
   created_at: string;
   updated_at: string;
+};
+
+type PaymentOrderRow = {
+  id: string;
+  user_id: string;
+  out_trade_no: string;
+  trade_no: string | null;
+  status: string;
+  credit_nano: number | bigint;
+  money_cents: number | bigint;
+  currency: string;
+  pay_type: string;
+  pid: string;
+  pay_url: string | null;
+  pay_payload: string | null;
+  last_error: string | null;
+  created_at: string;
+  expires_at: string;
+  paid_at: string | null;
 };
 
 type LedgerRow = {
