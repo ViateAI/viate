@@ -267,7 +267,7 @@ export type ViatePlugin = {
 
 export const INBOUND_HEADER_ALLOWLIST = ["anthropic-beta", "anthropic-version", "openai-beta"] as const;
 
-export const OUTBOUND_HEADER_ALLOWLIST = ["content-type", "cache-control"] as const;
+export const OUTBOUND_HEADER_ALLOWLIST = ["content-type", "cache-control", "retry-after"] as const;
 
 export function pickAllowedHeaders(
   headers: Headers | Record<string, string | string[] | undefined>,
