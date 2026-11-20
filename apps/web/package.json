@@ -9,6 +9,7 @@
     "dev": "pnpm run i18n:compile && vite",
     "build": "pnpm run i18n:compile && tsc -p tsconfig.json --noEmit && vite build",
     "typecheck": "pnpm run i18n:compile && tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test src/balance-refresh.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

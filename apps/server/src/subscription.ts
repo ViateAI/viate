@@ -363,12 +363,20 @@ export function createSubscriptionScheduler(options: {
         if (connection.subscriptionStatus === "needs_reauth") {
           continue;
         }
+        if (connection.subscriptionStatus === "ok" && connection.subscriptionDueAt) {
+          const due = Date.parse(connection.subscriptionDueAt);
+          if (!Number.isNaN(due) && due > Date.now()) {
+            // Landed data stays until due. Restart must not read the provider again.
+            schedule(connection.id, due - Date.now());
+            continue;
+          }
+        }
         const delay = offset;
         offset += spacingMs;
         const timer = setTimeout(() => {
           const current = store.getConnection(connection.id);
           if (current) {
-            consider(current, true);
+            consider(current, false);
           }
         }, delay);
         timer.unref();
