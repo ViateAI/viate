@@ -221,7 +221,7 @@
   "page_api_keys": "Client API keys",
   "page_api_keys_desc": "Customers create keys at /portal. This page lists prefixes and revokes leaked keys.",
   "page_balances": "Balances",
-  "page_balances_desc": "Cached upstream subscription remaining. Refresh reads the provider.",
+  "page_balances_desc": "Cached upstream subscription remaining. Entries older than 30 minutes refresh in the background. Refresh reads the provider.",
   "page_channels": "Channels",
   "page_channels_desc": "Create a price multiplier and pick the published models it covers. Assign channels to each customer.",
   "page_connections": "Connections",

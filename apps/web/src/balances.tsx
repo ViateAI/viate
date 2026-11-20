@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { formatMoney, formatNumber as formatLocaleNumber, formatRelativeTime } from "./format";
 import { m } from "./paraglide/messages.js";
 import { api, isApiError, type SubscriptionLevel, type SubscriptionUsageView, type SubscriptionView } from "./api";
+import { autoRefreshWaves, canAutoRefresh, refreshProviderSequence, sameProviderGapMs } from "./balance-refresh";
 
 const MODEL_PREVIEW = 6;
 
@@ -14,20 +15,81 @@ export function BalancesPage({
 }) {
   const [subscriptions, setSubscriptions] = useState<SubscriptionView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState<ReadonlySet<string>>(() => new Set());
   const [bulk, setBulk] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, true>>({});
   const alive = useRef(true);
+  const inflight = useRef(new Map<string, Promise<void>>());
 
-  async function load() {
-    const result = await api<{ subscriptions: SubscriptionView[] }>("/api/admin/subscriptions");
-    setSubscriptions(result.subscriptions);
+  function refreshOne(connectionId: string): Promise<void> {
+    const existing = inflight.current.get(connectionId);
+    if (existing) {
+      return existing;
+    }
+    const run = (async () => {
+      setRefreshing((current) => {
+        const next = new Set(current);
+        next.add(connectionId);
+        return next;
+      });
+      setError(null);
+      try {
+        const result = await api<{ subscription: SubscriptionView }>(
+          `/api/admin/connections/${connectionId}/subscription/refresh`,
+          { method: "POST" },
+        );
+        setSubscriptions((current) =>
+          current?.map((item) => (item.connectionId === connectionId ? result.subscription : item)) ?? [result.subscription],
+        );
+      } catch (err) {
+        setError(isApiError(err) ? err.message : m.error_refresh());
+      } finally {
+        inflight.current.delete(connectionId);
+        setRefreshing((current) => {
+          if (!current.has(connectionId)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(connectionId);
+          return next;
+        });
+      }
+    })();
+    inflight.current.set(connectionId, run);
+    return run;
   }
 
   useEffect(() => {
+    let active = true;
     alive.current = true;
-    load().catch((err) => setError(isApiError(err) ? err.message : m.error_load_balances()));
+    void (async () => {
+      try {
+        const result = await api<{ subscriptions: SubscriptionView[] }>("/api/admin/subscriptions");
+        if (!active) {
+          return;
+        }
+        setSubscriptions(result.subscriptions);
+        const now = Date.now();
+        const due = result.subscriptions
+          .filter((view) => canAutoRefresh(view, now))
+          .sort((left, right) => attention(left) - attention(right) || left.displayLabel.localeCompare(right.displayLabel));
+        for (const group of autoRefreshWaves(due)) {
+          void refreshProviderSequence(group, {
+            gapMs: sameProviderGapMs,
+            wait: delay,
+            refresh: (view) => refreshOne(view.connectionId),
+            cancelled: () => !active,
+          });
+        }
+      } catch (err) {
+        if (!active) {
+          return;
+        }
+        setError(isApiError(err) ? err.message : m.error_load_balances());
+      }
+    })();
     return () => {
+      active = false;
       alive.current = false;
     };
   }, []);
@@ -38,24 +100,6 @@ export function BalancesPage({
     }
     document.getElementById(`balance-${focusId}`)?.scrollIntoView({ block: "start" });
   }, [focusId, subscriptions]);
-
-  async function refreshOne(connectionId: string) {
-    setRefreshing(connectionId);
-    setError(null);
-    try {
-      const result = await api<{ subscription: SubscriptionView }>(
-        `/api/admin/connections/${connectionId}/subscription/refresh`,
-        { method: "POST" },
-      );
-      setSubscriptions((current) =>
-        current?.map((item) => (item.connectionId === connectionId ? result.subscription : item)) ?? [result.subscription],
-      );
-    } catch (err) {
-      setError(isApiError(err) ? err.message : m.error_refresh());
-    } finally {
-      setRefreshing((current) => (current === connectionId ? null : current));
-    }
-  }
 
   const sorted = [...(subscriptions ?? [])].sort(
     (left, right) => attention(left) - attention(right) || left.displayLabel.localeCompare(right.displayLabel),
@@ -170,8 +214,8 @@ export function BalancesPage({
               <button type="button" onClick={() => onConfigure(view.connectionId)}>{m.action_configure()}</button>
             ) : null}
             {canRefresh(view) ? (
-              <button type="button" disabled={refreshing === view.connectionId || bulk !== null} onClick={() => void refreshOne(view.connectionId)}>
-                {refreshing === view.connectionId ? m.busy_refreshing() : m.action_refresh()}
+              <button type="button" disabled={refreshing.has(view.connectionId) || bulk !== null} onClick={() => void refreshOne(view.connectionId)}>
+                {refreshing.has(view.connectionId) ? m.busy_refreshing() : m.action_refresh()}
               </button>
             ) : null}
           </div>
@@ -234,6 +278,12 @@ export function balanceSummary(view: SubscriptionView): string {
 
 function canRefresh(view: SubscriptionView): boolean {
   return view.support === "supported" && view.hasCredentials && !view.orphan;
+}
+
+function delay(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
 }
 
 function attention(view: SubscriptionView): number {

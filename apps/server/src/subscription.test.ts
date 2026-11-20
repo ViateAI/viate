@@ -248,6 +248,68 @@ describe("subscription scheduler", () => {
     store.close();
     await rm(dataDir, { recursive: true, force: true });
   });
+
+  it("leaves a connection with a future due time on disk at startup", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-subscription-due-"));
+    const store = await AdminStore.open(dataDir);
+    const seen: string[] = [];
+    const dueEntered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const provider: ProviderHandler = {
+      id: "cursor",
+      async subscription(input) {
+        seen.push(input.connectionId);
+        if (input.connectionId === due.id) {
+          dueEntered.resolve();
+          await release.promise;
+        }
+        return okUsage();
+      },
+    };
+    const fresh = store.createConnection("cursor");
+    const due = store.createConnection("cursor");
+    store.putCredentials(fresh.id, { token: "a" }, "Fresh");
+    store.putCredentials(due.id, { token: "b" }, "Due");
+    store.setActive(fresh.id, true);
+    store.setActive(due.id, true);
+    const usage = {
+      type: "api",
+      position: 0,
+      group: null,
+      label: "API",
+      unit: "percent" as const,
+      currency: null,
+      used: 10,
+      limit: 100,
+      remaining: 90,
+      resetsAt: null,
+      unlimited: false,
+      reported: true,
+    };
+    store.saveSubscriptionSuccess(fresh.id, {
+      plan: "Cursor Pro",
+      dueAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      usages: [usage],
+    });
+    store.saveSubscriptionSuccess(due.id, {
+      plan: "Cursor Pro",
+      dueAt: new Date(Date.now() - 1000).toISOString(),
+      usages: [usage],
+    });
+    const scheduler = createSubscriptionScheduler({
+      store,
+      providers: new Map([["cursor", provider]]),
+      log: silentLog(),
+      spacingMs: 0,
+    });
+    scheduler.start();
+    await dueEntered.promise;
+    assert.deepEqual(seen, [due.id]);
+    release.resolve();
+    scheduler.stop();
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
 });
 
 function okUsage(): SubscriptionResult {

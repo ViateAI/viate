@@ -221,7 +221,7 @@
   "page_api_keys": "客户 API 密钥",
   "page_api_keys_desc": "客户在 /portal 创建密钥。此页只显示前缀，并可吊销泄露的密钥。",
   "page_balances": "余额",
-  "page_balances_desc": "缓存的上游订阅余量。刷新会向供应商读取。",
+  "page_balances_desc": "缓存的上游订阅余量。超过 30 分钟的会在后台刷新。刷新会向供应商读取。",
   "page_channels": "渠道",
   "page_channels_desc": "设置价格倍率，并选择它覆盖的已发布模型。再把渠道分配给客户。",
   "page_connections": "连接",
