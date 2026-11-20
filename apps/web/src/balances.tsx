@@ -14,14 +14,14 @@ export function BalancesPage({
   onConfigure: (connectionId: string) => void;
 }) {
   const [subscriptions, setSubscriptions] = useState<SubscriptionView[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; connectionId: string | null } | null>(null);
   const [refreshing, setRefreshing] = useState<ReadonlySet<string>>(() => new Set());
   const [bulk, setBulk] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, true>>({});
   const alive = useRef(true);
   const inflight = useRef(new Map<string, Promise<void>>());
 
-  function refreshOne(connectionId: string): Promise<void> {
+  function refreshOne(connectionId: string, clearError = false): Promise<void> {
     const existing = inflight.current.get(connectionId);
     if (existing) {
       return existing;
@@ -32,7 +32,9 @@ export function BalancesPage({
         next.add(connectionId);
         return next;
       });
-      setError(null);
+      if (clearError) {
+        setError(null);
+      }
       try {
         const result = await api<{ subscription: SubscriptionView }>(
           `/api/admin/connections/${connectionId}/subscription/refresh`,
@@ -41,8 +43,9 @@ export function BalancesPage({
         setSubscriptions((current) =>
           current?.map((item) => (item.connectionId === connectionId ? result.subscription : item)) ?? [result.subscription],
         );
+        setError((current) => (current?.connectionId === connectionId ? null : current));
       } catch (err) {
-        setError(isApiError(err) ? err.message : m.error_refresh());
+        setError({ message: isApiError(err) ? err.message : m.error_refresh(), connectionId });
       } finally {
         inflight.current.delete(connectionId);
         setRefreshing((current) => {
@@ -85,7 +88,7 @@ export function BalancesPage({
         if (!active) {
           return;
         }
-        setError(isApiError(err) ? err.message : m.error_load_balances());
+        setError({ message: isApiError(err) ? err.message : m.error_load_balances(), connectionId: null });
       }
     })();
     return () => {
@@ -134,7 +137,7 @@ export function BalancesPage({
                   continue;
                 }
                 setBulk(`${index + 1}/${targets.length}`);
-                await refreshOne(target.connectionId);
+                await refreshOne(target.connectionId, true);
               }
               if (alive.current) {
                 setBulk(null);
@@ -145,7 +148,7 @@ export function BalancesPage({
           {bulk ? bulk : m.action_refresh_all()}
         </button>
       </div>
-      {error ? <p className="banner error" role="alert">{error}</p> : null}
+      {error ? <p className="banner error" role="alert">{error.message}</p> : null}
       {summary.length > 0 ? <p className="meta">{summary.join(" · ")}</p> : null}
       {subscriptions === null && !error ? <p className="empty">{m.balances_loading()}</p> : null}
       {subscriptions && subscriptions.length === 0 ? (
@@ -214,7 +217,7 @@ export function BalancesPage({
               <button type="button" onClick={() => onConfigure(view.connectionId)}>{m.action_configure()}</button>
             ) : null}
             {canRefresh(view) ? (
-              <button type="button" disabled={refreshing.has(view.connectionId) || bulk !== null} onClick={() => void refreshOne(view.connectionId)}>
+              <button type="button" disabled={refreshing.has(view.connectionId) || bulk !== null} onClick={() => void refreshOne(view.connectionId, true)}>
                 {refreshing.has(view.connectionId) ? m.busy_refreshing() : m.action_refresh()}
               </button>
             ) : null}
