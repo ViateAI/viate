@@ -474,7 +474,8 @@ async function waitForPayload(
   dataDir: string,
   model: string,
 ): Promise<{ row: RequestLogRecord; payload: { request: unknown; response: unknown } }> {
-  for (let i = 0; i < 40; i += 1) {
+  const deadline = Date.now() + 1000;
+  for (;;) {
     const row = store.listRequestLogs({ model }).find((item) => item.payloadPath);
     if (row?.payloadPath) {
       const payload = await readRequestPayload(dataDir, row.payloadPath, row.payloadOffset);
@@ -482,9 +483,9 @@ async function waitForPayload(
         return { row, payload };
       }
     }
-    const { promise, resolve } = Promise.withResolvers<void>();
-    setImmediate(resolve);
-    await promise;
+    if (Date.now() >= deadline) {
+      throw new Error(`missing request log for ${model}`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error(`missing request log for ${model}`);
 }
