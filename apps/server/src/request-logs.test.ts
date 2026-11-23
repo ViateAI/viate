@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { RequestLogRecorder, readRequestPayload } from "./request-logs.js";
+import { RequestLogRecorder, clientErrorMessage, readRequestPayload, redactLogError } from "./request-logs.js";
 import { AdminStore } from "./store.js";
 
 describe("RequestLogRecorder", () => {
@@ -14,7 +14,7 @@ describe("RequestLogRecorder", () => {
   before(async () => {
     dataDir = await mkdtemp(join(tmpdir(), "viate-recorder-"));
     store = await AdminStore.open(dataDir);
-    recorder = new RequestLogRecorder(store);
+    recorder = new RequestLogRecorder(store, { logPayloads: true });
   });
 
   after(async () => {
@@ -129,5 +129,67 @@ describe("RequestLogRecorder", () => {
     const listed = store.listRequestLogs({ model: "fail-model" });
     assert.equal(listed.length, 1);
     assert.equal(listed[0]?.id, "req-fail-1");
+  });
+});
+
+describe("request log privacy", () => {
+  it("keeps gateway messages and hides plugin failures", () => {
+    assert.equal(clientErrorMessage("model is required"), "model is required");
+    assert.equal(clientErrorMessage("unknown model: demo"), "unknown model: demo");
+    assert.equal(
+      clientErrorMessage("no healthy connection served the model: connect ECONNREFUSED"),
+      "no healthy connection served the model",
+    );
+    assert.equal(clientErrorMessage("provider exploded at https://upstream.internal"), "upstream request failed");
+  });
+
+  it("strips addresses, secrets, and mailbox text from logged errors", () => {
+    const redacted = redactLogError(
+      "provider exploded at https://user:pw@upstream.internal/v1 bearer sk-supersecretvalue ops@example.com 10.1.2.3",
+    );
+    assert.match(redacted ?? "", /provider exploded/);
+    assert.equal(redacted?.includes("upstream.internal"), false);
+    assert.equal(redacted?.includes("sk-supersecretvalue"), false);
+    assert.equal(redacted?.includes("ops@example.com"), false);
+    assert.equal(redacted?.includes("10.1.2.3"), false);
+    assert.equal(redacted?.includes("user:pw"), false);
+  });
+
+  it("does not write a payload file unless asked", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-recorder-quiet-"));
+    const store = await AdminStore.open(dataDir);
+    const recorder = new RequestLogRecorder(store);
+    try {
+      recorder.record({
+        id: "req-quiet",
+        startedAt: Date.now() - 5,
+        endedAt: Date.now(),
+        endpoint: "chat.completions",
+        stream: false,
+        status: 200,
+        outcome: "success",
+        requestModel: "quiet",
+        upstreamModel: "quiet",
+        providerId: null,
+        connectionId: null,
+        apiKeyId: null,
+        apiKeyPrefix: null,
+        attempts: [],
+        usage: null,
+        error: null,
+        ttfbMs: null,
+        requestBody: { messages: [{ role: "user", content: "secret prompt" }] },
+        responseBody: { text: "secret answer" },
+        payloadTruncated: false,
+      });
+      await recorder.idle();
+      const listed = store.listRequestLogs({ model: "quiet" });
+      assert.equal(listed[0]?.payloadPath, null);
+      assert.equal(listed[0]?.id, "req-quiet");
+    } finally {
+      await recorder.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 });

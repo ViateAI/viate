@@ -8,6 +8,8 @@ import {
   indexModelPrices,
   lookupModelPrice,
   modelPriceRowsFromDocument,
+  resolveModelPrice,
+  selectContextPrice,
 } from "./model-prices.js";
 import { AdminStore } from "./store.js";
 
@@ -130,6 +132,255 @@ describe("model price catalog", () => {
     assert.deepEqual(lookupModelPrice(index, "plain-4"), {
       inputNanoPerMillion: 2_000_000_000,
       outputNanoPerMillion: 6_000_000_000,
+    });
+  });
+
+  it("parses a context tier and drops invalid tier entries", () => {
+    const rows = modelPriceRowsFromDocument({
+      xai: {
+        models: {
+          "grok-4.7": {
+            cost: {
+              input: 2,
+              output: 6,
+              cache_read: 0.5,
+              tiers: [
+                { input: 8, output: 16, cache_read: 2, tier: { type: "context", size: 256000 } },
+                { input: 4, output: 12, cache_read: 1, tier: { type: "context", size: 200000 } },
+                { input: 1, output: 1, cache_read: 1, tier: { type: "context", size: 200000 } },
+                { input: 9, output: 9, cache_read: 9, tier: { type: "context_over_200k" } },
+                { input: -1, output: 1, tier: { type: "context", size: 1000 } },
+                { input: 1, output: 1, tier: { type: "context", size: 0 } },
+                { input: 1, output: 1, tier: { type: "context", size: 1.5 } },
+              ],
+            },
+          },
+          "plain-4": {
+            cost: {
+              input: 1,
+              output: 2,
+              tiers: [{ input: "nope", output: 1, tier: { type: "context", size: 10 } }],
+            },
+          },
+        },
+      },
+    });
+
+    const grok = rows.find((row) => row.modelId === "grok-4.7");
+    assert.equal(grok?.inputNanoPerMillion, 2_000_000_000);
+    assert.equal(grok?.cacheReadNanoPerMillion, 500_000_000);
+    assert.deepEqual(grok?.contextTiers, [
+      {
+        atTokens: 200000,
+        inputNanoPerMillion: 1_000_000_000,
+        outputNanoPerMillion: 1_000_000_000,
+        cacheReadNanoPerMillion: 1_000_000_000,
+      },
+      {
+        atTokens: 256000,
+        inputNanoPerMillion: 8_000_000_000,
+        outputNanoPerMillion: 16_000_000_000,
+        cacheReadNanoPerMillion: 2_000_000_000,
+      },
+    ]);
+    const plain = rows.find((row) => row.modelId === "plain-4");
+    assert.equal(plain?.inputNanoPerMillion, 1_000_000_000);
+    assert.equal(plain?.outputNanoPerMillion, 2_000_000_000);
+    assert.equal("contextTiers" in (plain ?? {}), false);
+  });
+
+  it("selects the highest context tier the prompt reaches", () => {
+    const at200k = {
+      inputNanoPerMillion: 2_000_000_000,
+      outputNanoPerMillion: 6_000_000_000,
+      cacheReadNanoPerMillion: 500_000_000,
+      perRequestNano: 40_000_000,
+      contextTiers: [
+        {
+          atTokens: 200000,
+          inputNanoPerMillion: 4_000_000_000,
+          outputNanoPerMillion: 12_000_000_000,
+          cacheReadNanoPerMillion: 1_000_000_000,
+        },
+      ],
+    };
+    assert.equal(selectContextPrice(at200k, 199999), at200k);
+    assert.deepEqual(selectContextPrice(at200k, 200000), {
+      inputNanoPerMillion: 4_000_000_000,
+      outputNanoPerMillion: 12_000_000_000,
+      cacheReadNanoPerMillion: 1_000_000_000,
+      perRequestNano: 40_000_000,
+    });
+
+    const multi = {
+      inputNanoPerMillion: 2_000_000_000,
+      outputNanoPerMillion: 6_000_000_000,
+      cacheReadNanoPerMillion: 500_000_000,
+      contextTiers: [
+        {
+          atTokens: 256000,
+          inputNanoPerMillion: 4_000_000_000,
+          outputNanoPerMillion: 12_000_000_000,
+        },
+        {
+          atTokens: 32000,
+          inputNanoPerMillion: 1_000_000_000,
+          outputNanoPerMillion: 3_000_000_000,
+          cacheReadNanoPerMillion: 100_000_000,
+        },
+      ],
+    };
+    assert.deepEqual(selectContextPrice(multi, 250000), {
+      inputNanoPerMillion: 1_000_000_000,
+      outputNanoPerMillion: 3_000_000_000,
+      cacheReadNanoPerMillion: 100_000_000,
+    });
+    assert.deepEqual(selectContextPrice(multi, 256000), {
+      inputNanoPerMillion: 4_000_000_000,
+      outputNanoPerMillion: 12_000_000_000,
+    });
+    assert.equal(selectContextPrice(multi, 31999), multi);
+    assert.equal(selectContextPrice(multi, 200000.5), multi);
+    assert.equal(selectContextPrice(multi, 0), multi);
+    assert.equal(selectContextPrice(multi, -1), multi);
+    const flat = {
+      inputNanoPerMillion: 2_000_000_000,
+      outputNanoPerMillion: 6_000_000_000,
+      cacheReadNanoPerMillion: 500_000_000,
+    };
+    assert.equal(selectContextPrice(flat, 500000), flat);
+  });
+
+  it("does not keep the base cache rate when the chosen tier omits cache_read", () => {
+    const rate = {
+      inputNanoPerMillion: 2_000_000_000,
+      outputNanoPerMillion: 6_000_000_000,
+      cacheReadNanoPerMillion: 500_000_000,
+      perRequestNano: 40_000_000,
+      contextTiers: [
+        { atTokens: 200000, inputNanoPerMillion: 4_000_000_000, outputNanoPerMillion: 12_000_000_000 },
+      ],
+    };
+    const chosen = selectContextPrice(rate, 200000);
+    assert.deepEqual(chosen, {
+      inputNanoPerMillion: 4_000_000_000,
+      outputNanoPerMillion: 12_000_000_000,
+      perRequestNano: 40_000_000,
+    });
+    assert.equal("cacheReadNanoPerMillion" in chosen, false);
+    assert.equal(rate.inputNanoPerMillion, 2_000_000_000);
+    assert.equal(rate.cacheReadNanoPerMillion, 500_000_000);
+  });
+
+  it("doubles a fast suffix across the base rate and every context tier", () => {
+    const rows = modelPriceRowsFromDocument({
+      xai: {
+        models: {
+          "grok-4.7": {
+            cost: {
+              input: 2,
+              output: 6,
+              cache_read: 0.1,
+              tiers: [
+                { input: 4, output: 12, cache_read: 0.1, tier: { type: "context", size: 200000 } },
+                { input: 8, output: 24, tier: { type: "context", size: 1000000 } },
+              ],
+            },
+          },
+        },
+      },
+    });
+    const index = indexModelPrices(rows);
+    const fast = lookupModelPrice(index, "grok-4.7-fast");
+    assert.deepEqual(fast, {
+      inputNanoPerMillion: 4_000_000_000,
+      outputNanoPerMillion: 12_000_000_000,
+      cacheReadNanoPerMillion: 200_000_000,
+      contextTiers: [
+        {
+          atTokens: 200000,
+          inputNanoPerMillion: 8_000_000_000,
+          outputNanoPerMillion: 24_000_000_000,
+          cacheReadNanoPerMillion: 200_000_000,
+        },
+        {
+          atTokens: 1000000,
+          inputNanoPerMillion: 16_000_000_000,
+          outputNanoPerMillion: 48_000_000_000,
+        },
+      ],
+    });
+    assert.equal("cacheReadNanoPerMillion" in (fast?.contextTiers?.[1] ?? {}), false);
+    const tier = fast?.contextTiers?.[0];
+    assert.ok(tier);
+    tier.inputNanoPerMillion = 1;
+    tier.cacheReadNanoPerMillion = 1;
+    assert.equal(lookupModelPrice(index, "grok-4.7")?.contextTiers?.[0]?.inputNanoPerMillion, 4_000_000_000);
+    assert.equal(lookupModelPrice(index, "grok-4.7")?.contextTiers?.[0]?.cacheReadNanoPerMillion, 100_000_000);
+  });
+
+  it("skips only a context tier whose doubled rate is not a safe integer", () => {
+    const index = indexModelPrices([
+      {
+        modelId: "wide",
+        inputNanoPerMillion: 10,
+        outputNanoPerMillion: 20,
+        cacheReadNanoPerMillion: 5,
+        contextTiers: [
+          {
+            atTokens: 32000,
+            inputNanoPerMillion: Number.MAX_SAFE_INTEGER,
+            outputNanoPerMillion: 1,
+            cacheReadNanoPerMillion: 1,
+          },
+          {
+            atTokens: 256000,
+            inputNanoPerMillion: 4,
+            outputNanoPerMillion: 8,
+            cacheReadNanoPerMillion: 2,
+          },
+        ],
+      },
+    ]);
+    assert.deepEqual(lookupModelPrice(index, "wide-fast"), {
+      inputNanoPerMillion: 20,
+      outputNanoPerMillion: 40,
+      cacheReadNanoPerMillion: 10,
+      contextTiers: [
+        {
+          atTokens: 256000,
+          inputNanoPerMillion: 8,
+          outputNanoPerMillion: 16,
+          cacheReadNanoPerMillion: 4,
+        },
+      ],
+    });
+  });
+
+  it("doubles an override's flat rates and does not attach context tiers", () => {
+    const index = indexModelPrices(
+      modelPriceRowsFromDocument({
+        xai: {
+          models: {
+            "grok-4.7": {
+              cost: {
+                input: 2,
+                output: 6,
+                cache_read: 0.5,
+                tiers: [{ input: 4, output: 12, cache_read: 1, tier: { type: "context", size: 200000 } }],
+              },
+            },
+          },
+        },
+      }),
+    );
+    const override = { inputNanoPerMillion: 3_000_000_000, outputNanoPerMillion: 9_000_000_000 };
+    const resolve = (modelId: string) =>
+      resolveModelPrice(index, modelId, (id) => (id === "grok-4.7" ? override : null));
+    assert.deepEqual(resolve("grok-4.7"), override);
+    assert.deepEqual(resolve("grok-4.7-fast"), {
+      inputNanoPerMillion: 6_000_000_000,
+      outputNanoPerMillion: 18_000_000_000,
     });
   });
 

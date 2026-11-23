@@ -34,6 +34,7 @@ export type RequestLogEvent = {
   userId?: string | null;
   attempts: RequestAttemptRecord[];
   usage: RequestUsage | null;
+  usageSource?: "parser" | "estimated" | "missing";
   error: string | null;
   ttfbMs: number | null;
   requestBody: unknown;
@@ -130,24 +131,88 @@ export function isStreamRequest(body: unknown): boolean {
   return Boolean(body && typeof body === "object" && "stream" in body && body.stream === true);
 }
 
+const PUBLIC_CLIENT_MESSAGES: Record<string, true> = {
+  "invalid api key": true,
+  "api key is not bound to a user": true,
+  "channel not available": true,
+  "model not available": true,
+  "model prices unavailable": true,
+  "model price unavailable": true,
+  "insufficient balance": true,
+  "user disabled": true,
+  "user not found": true,
+  "user is required": true,
+  "capability not supported": true,
+  "unknown video request": true,
+  "forbidden": true,
+  "provider not available": true,
+  "model is required": true,
+  "input is required": true,
+  "voice is required": true,
+  "file is required": true,
+  "multipart boundary is required": true,
+  "no healthy connection served the model": true,
+};
+
+export function clientErrorMessage(message: string): string {
+  if (message in PUBLIC_CLIENT_MESSAGES) {
+    return message;
+  }
+  if (
+    message.startsWith("unknown model:") &&
+    message.length <= 300 &&
+    !message.includes("://") &&
+    !/[\r\n]/.test(message)
+  ) {
+    return message;
+  }
+  if (message.startsWith("no healthy connection served the model")) {
+    return "no healthy connection served the model";
+  }
+  return "upstream request failed";
+}
+
 export function redactLogError(error: string | null | undefined): string | null {
   if (!error) {
     return null;
   }
-  const redacted = redactInstallerOutput(error).slice(0, 500);
+  const redacted = redactSensitive(error).replace(/\s+/g, " ").trim().slice(0, 500);
   return redacted || null;
+}
+
+function redactSensitive(text: string): string {
+  return redactInstallerOutput(text)
+    .replace(/bearer\s+\S+/gi, "bearer [redacted]")
+    .replace(/\b(?:sk|key|tok|api[_-]?key)[-_][A-Za-z0-9_-]{6,}\b/gi, "[redacted]")
+    .replace(/\b(?:token|password|secret)\s*[:=]\s*\S+/gi, "[redacted]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]")
+    .replace(/\bhttps?:\/\/\S+/gi, "[redacted-url]")
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[redacted-ip]")
+    .replace(/\b(?:[a-f0-9]{0,4}:){2,7}[a-f0-9]{0,4}\b/gi, "[redacted-ip]")
+    .replace(/(?:[a-z0-9-]+\.){2,}[a-z]{2,}/gi, "[redacted-host]")
+    .replace(/(?:^|[\s"'`(])((?:\/[\w.@+-]+){2,})/g, (match, path: string) => {
+      return `${match.slice(0, match.length - path.length)}[redacted-path]`;
+    })
+    .replace(/[A-Za-z]:\\(?:[\w.-]+\\)+[\w.-]*/g, "[redacted-path]");
 }
 
 export class RequestLogRecorder {
   private readonly queue: RequestLogEvent[] = [];
   private readonly ring = new SecondRing();
+  private readonly logPayloads: boolean;
+  private readonly retentionMs: number;
   private scheduled = false;
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
   private writing = false;
   private closed = false;
   private pendingWrite: Promise<void> = Promise.resolve();
 
-  constructor(private readonly store: AdminStore) {
+  constructor(
+    private readonly store: AdminStore,
+    options: { logPayloads?: boolean; retentionMs?: number } = {},
+  ) {
+    this.logPayloads = options.logPayloads ?? false;
+    this.retentionMs = options.retentionMs ?? REQUEST_LOG_EVENT_TTL_MS;
     this.pruneTimer = setInterval(() => {
       void this.prune().catch(() => {});
     }, 60 * 60 * 1000);
@@ -159,8 +224,11 @@ export class RequestLogRecorder {
     if (this.closed) {
       return;
     }
-    this.ring.add(event);
-    this.queue.push(event);
+    const stored = this.logPayloads
+      ? event
+      : { ...event, requestBody: null, responseBody: null, payloadTruncated: false };
+    this.ring.add(stored);
+    this.queue.push(stored);
     if (this.queue.length >= REQUEST_LOG_FLUSH_SIZE) {
       void this.flush().catch(() => {});
       return;
@@ -224,7 +292,7 @@ export class RequestLogRecorder {
   }
 
   async prune(now = Date.now()): Promise<void> {
-    this.store.pruneRequestLogs(now);
+    this.store.pruneRequestLogs(now, this.retentionMs);
     const dir = join(this.store.dataDir, "request-logs");
     let names: string[] = [];
     try {
@@ -232,7 +300,7 @@ export class RequestLogRecorder {
     } catch {
       return;
     }
-    const cutoff = new Date(now - REQUEST_LOG_EVENT_TTL_MS).toISOString().slice(0, 10);
+    const cutoff = new Date(now - this.retentionMs).toISOString().slice(0, 10);
     await Promise.all(
       names
         .filter((name) => name.endsWith(".jsonl") && name.slice(0, 10) < cutoff)
@@ -265,19 +333,21 @@ export class RequestLogRecorder {
     let payloadPath: string | null = null;
     let payloadOffset: number | null = null;
     let payloadTruncated = event.payloadTruncated;
-    try {
-      const payload = await appendPayload(this.store.dataDir, {
-        id,
-        request: event.requestBody ?? null,
-        response: { status: event.status, body: event.responseBody ?? null },
-        usage,
-      });
-      payloadPath = payload.path;
-      payloadOffset = payload.offset;
-      payloadTruncated = payloadTruncated || payload.truncated;
-    } catch {
-      payloadPath = null;
-      payloadOffset = null;
+    if (this.logPayloads) {
+      try {
+        const payload = await appendPayload(this.store.dataDir, {
+          id,
+          request: event.requestBody ?? null,
+          response: { status: event.status, body: event.responseBody ?? null },
+          usage,
+        });
+        payloadPath = payload.path;
+        payloadOffset = payload.offset;
+        payloadTruncated = payloadTruncated || payload.truncated;
+      } catch {
+        payloadPath = null;
+        payloadOffset = null;
+      }
     }
     return {
       id,
@@ -301,7 +371,7 @@ export class RequestLogRecorder {
       outputTokens: usage?.outputTokens ?? null,
       cacheReadTokens: usage?.cacheReadTokens ?? null,
       cacheWriteTokens: usage?.cacheWriteTokens ?? null,
-      usageSource: usage ? "parser" : "missing",
+      usageSource: event.usageSource ?? (usage ? "parser" : "missing"),
       error: redactLogError(event.error),
       payloadPath,
       payloadOffset,

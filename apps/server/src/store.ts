@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   filterPublicEndpointTypes,
   parseAdvertisedEndpointTypes,
@@ -23,7 +23,9 @@ import {
   type Channel,
   type ChannelModelRule,
 } from "./channels.js";
+import { formatCents } from "./epay.js";
 import { asNano, chargeNano, formatUsd, parseRateUsdToNano, parseUsdToNano, sqlInteger } from "./money.js";
+import type { ContextPriceTier } from "./model-prices.js";
 
 const VIDEO_REQUEST_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -153,7 +155,7 @@ export type RequestLogRecord = {
   outputTokens: number | null;
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
-  usageSource: "parser" | "missing";
+  usageSource: "parser" | "estimated" | "missing";
   error: string | null;
   payloadPath: string | null;
   payloadOffset: number | null;
@@ -250,6 +252,48 @@ export type StoredApiKey = {
   createdAt: string;
   userId: string | null;
   channelId: string | null;
+  kind: "client" | "bot";
+  externalRef: string | null;
+  ownerClientId: string | null;
+};
+
+export type OAuthClient = {
+  id: string;
+  name: string;
+  redirectUris: string[];
+  scopes: string[];
+  firstParty: boolean;
+  allowHttpRedirects: boolean;
+  createdAt: string;
+};
+
+export type OAuthTokenGrant = {
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn: number;
+  scope: string;
+};
+
+export type ExchangedAuthorizationCode = {
+  grant: OAuthTokenGrant;
+  clientId: string;
+  userId: string;
+  email: string;
+  name: string;
+  scope: string;
+  nonce: string | null;
+  authTime: number;
+};
+
+export type OwnedKeyUsageBucket = {
+  keyId: string;
+  bucket: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: string;
 };
 
 export type { Channel, ChannelModelRule };
@@ -284,11 +328,32 @@ export type LedgerEntry = {
   userId: string;
   deltaUsd: string;
   balanceAfterUsd: string;
-  reason: "grant" | "adjust" | "usage";
+  reason: "grant" | "adjust" | "usage" | "topup";
   requestId: string | null;
   note: string | null;
   createdAt: string;
 };
+
+export type PaymentOrder = {
+  id: string;
+  userId: string;
+  outTradeNo: string;
+  tradeNo: string | null;
+  status: "pending" | "paid" | "failed";
+  creditUsd: string;
+  money: string;
+  currency: string;
+  payType: string;
+  pid: string;
+  payUrl: string | null;
+  payPayload: string | null;
+  lastError: string | null;
+  createdAt: string;
+  expiresAt: string;
+  paidAt: string | null;
+};
+
+export type EpayApplyOutcome = "unknown" | "rejected" | "paid" | "duplicate" | "failed" | "ignored";
 
 export type UserUsageRequest = {
   id: string;
@@ -398,6 +463,45 @@ type ApiKeyRow = {
   created_at: string;
   user_id: string | null;
   channel_id: string | null;
+  kind: string | null;
+  external_ref: string | null;
+  owner_client_id: string | null;
+};
+
+type OAuthClientRow = {
+  id: string;
+  name: string;
+  secret_hash: string;
+  redirect_uris: string;
+  scopes: string;
+  first_party: number;
+  allow_http_redirects: number;
+  created_at: string;
+};
+
+type OAuthCodeRow = {
+  code_hash: string;
+  client_id: string;
+  user_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  scope: string;
+  expires_at: string;
+  used_at: string | null;
+  nonce: string | null;
+  auth_time: number | bigint | null;
+};
+
+type OAuthTokenRow = {
+  token_hash: string;
+  kind: string;
+  client_id: string;
+  user_id: string | null;
+  scope: string;
+  family_id: string;
+  expires_at: string;
+  revoked_at: string | null;
+  created_at: string;
 };
 
 type ChannelRow = {
@@ -476,6 +580,7 @@ export class AdminStore {
     const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
     db.exec("PRAGMA journal_mode = WAL;");
     db.exec("PRAGMA foreign_keys = ON;");
+    db.exec("PRAGMA busy_timeout = 5000;");
     db.exec(`
       CREATE TABLE IF NOT EXISTS connections (
         id TEXT PRIMARY KEY,
@@ -613,7 +718,15 @@ export class AdminStore {
     migrateConnectionModels(db);
     migrateSubscription(db);
     migrateUsers(db);
-    db.exec("UPDATE users SET inflight = 0");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_balance_holds (
+        request_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        hold_nano INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    releaseOutstandingHolds(db);
     const store = new AdminStore(db, key, dataDir);
     store.freezeLegacyChannelRules();
     return store;
@@ -647,11 +760,12 @@ export class AdminStore {
     return row ? this.toConnection(row) : null;
   }
 
-  createConnection(providerId: string): StoredConnection {
+  createConnection(providerId: string, displayLabel?: string): StoredConnection {
     const trimmed = providerId.trim();
     if (!trimmed) {
       throw Object.assign(new Error("providerId is required"), { statusCode: 400 });
     }
+    const label = displayLabel?.trim() || null;
     const latest = this.db
       .prepare("SELECT created_at FROM connections ORDER BY created_at DESC, id DESC LIMIT 1")
       .get() as { created_at: string } | undefined;
@@ -664,9 +778,9 @@ export class AdminStore {
     this.db
       .prepare(
         `INSERT INTO connections (id, provider_id, credentials_enc, display_label, active, keepalive_status, created_at, updated_at)
-         VALUES (?, ?, NULL, NULL, 0, 'idle', ?, ?)`,
+         VALUES (?, ?, NULL, ?, 0, 'idle', ?, ?)`,
       )
-      .run(id, trimmed, now, now);
+      .run(id, trimmed, label, now, now);
     const created = this.getConnection(id);
     if (!created) {
       throw new Error("failed to create connection");
@@ -678,7 +792,7 @@ export class AdminStore {
     const existing = this.requireRow(id);
     const now = new Date().toISOString();
     const enc = encryptSecret(this.key, JSON.stringify(credentials ?? null));
-    const label = displayLabel?.trim() || existing.display_label || id;
+    const label = displayLabel?.trim() ? displayLabel.trim() : existing.display_label;
     this.db
       .prepare(
         `UPDATE connections
@@ -689,6 +803,15 @@ export class AdminStore {
     const updated = this.requireConnection(id);
     this.notifyCredentialsChanged(id);
     return updated;
+  }
+
+  setDisplayLabel(id: string, displayLabel: string): StoredConnection {
+    this.requireRow(id);
+    const label = displayLabel.trim() || null;
+    this.db
+      .prepare("UPDATE connections SET display_label = ?, updated_at = ? WHERE id = ?")
+      .run(label, new Date().toISOString(), id);
+    return this.requireConnection(id);
   }
 
   clearCredentials(id: string): StoredConnection {
@@ -1010,6 +1133,42 @@ export class AdminStore {
       .run(enabled ? 1 : 0, id, modelId);
     if (result.changes === 0) {
       throw Object.assign(new Error("model not found"), { statusCode: 404 });
+    }
+    return this.getConnectionModels(id);
+  }
+
+  setConnectionModelsEnabled(id: string, modelIds: string[], enabled: boolean): ConnectionModelCatalog {
+    this.requireRow(id);
+    const unique: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of modelIds) {
+      const modelId = raw.trim();
+      if (!modelId || seen.has(modelId)) continue;
+      seen.add(modelId);
+      unique.push(modelId);
+    }
+    if (unique.length === 0) {
+      return this.getConnectionModels(id);
+    }
+    const placeholders = unique.map(() => "?").join(", ");
+    this.db.exec("BEGIN");
+    try {
+      const found = this.db
+        .prepare(`SELECT model_id FROM connection_models WHERE connection_id = ? AND model_id IN (${placeholders})`)
+        .all(id, ...unique) as Array<{ model_id: string }>;
+      if (found.length !== unique.length) {
+        throw Object.assign(new Error("model not found"), { statusCode: 404 });
+      }
+      const update = this.db.prepare(
+        "UPDATE connection_models SET enabled = ? WHERE connection_id = ? AND model_id = ?",
+      );
+      for (const modelId of unique) {
+        update.run(enabled ? 1 : 0, id, modelId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
     return this.getConnectionModels(id);
   }
@@ -1557,13 +1716,16 @@ export class AdminStore {
     return rows.map((row) => this.toApiKey(row));
   }
 
-  createApiKey(name: string, userId?: string | null, channelId?: string | null): CreatedApiKey {
+  createApiKey(name: string, userId: string, channelId?: string | null): CreatedApiKey {
     const trimmed = name.trim();
     if (!trimmed) {
       throw Object.assign(new Error("name is required"), { statusCode: 400 });
     }
-    const ownerId = userId ?? null;
-    if (ownerId && !this.db.prepare("SELECT id FROM users WHERE id = ?").get(ownerId)) {
+    const ownerId = userId.trim();
+    if (!ownerId) {
+      throw Object.assign(new Error("user is required"), { statusCode: 400 });
+    }
+    if (!this.db.prepare("SELECT id FROM users WHERE id = ?").get(ownerId)) {
       throw Object.assign(new Error("user not found"), { statusCode: 404 });
     }
     const requested = typeof channelId === "string" ? channelId.trim() : "";
@@ -1571,7 +1733,7 @@ export class AdminStore {
     if (boundChannel && !this.getChannel(boundChannel)) {
       throw Object.assign(new Error("unknown channel"), { statusCode: 400 });
     }
-    if (boundChannel && ownerId && !this.userHasChannel(ownerId, boundChannel)) {
+    if (boundChannel && !this.userHasChannel(ownerId, boundChannel)) {
       throw Object.assign(new Error("channel not available"), { statusCode: 400 });
     }
     const secret = `viate_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
@@ -1586,13 +1748,23 @@ export class AdminStore {
         id,
         trimmed,
         prefix,
-        createHmac("sha256", this.key).update(secret).digest("hex"),
+        this.secretHash(secret),
         createdAt,
         ownerId,
         boundChannel,
       );
     return {
-      apiKey: { id, name: trimmed, prefix, createdAt, userId: ownerId, channelId: boundChannel },
+      apiKey: {
+        id,
+        name: trimmed,
+        prefix,
+        createdAt,
+        userId: ownerId,
+        channelId: boundChannel,
+        kind: "client",
+        externalRef: null,
+        ownerClientId: null,
+      },
       secret,
     };
   }
@@ -1601,7 +1773,7 @@ export class AdminStore {
     if (!secret) {
       return null;
     }
-    const row = this.db.prepare("SELECT * FROM api_keys WHERE key_hash = ?").get(createHmac("sha256", this.key).update(secret).digest("hex")) as
+    const row = this.db.prepare("SELECT * FROM api_keys WHERE key_hash = ?").get(this.secretHash(secret)) as
       | ApiKeyRow
       | undefined;
     return row ? this.toApiKey(row) : null;
@@ -1612,6 +1784,500 @@ export class AdminStore {
     if (result.changes === 0) {
       throw Object.assign(new Error("api key not found"), { statusCode: 404 });
     }
+  }
+
+  createBotApiKey(input: {
+    name: string;
+    userId: string;
+    channelId: string;
+    externalRef: string;
+    ownerClientId: string;
+  }): {
+    id: string;
+    prefix: string;
+    key: string;
+    name: string;
+    channelId: string;
+    kind: "bot";
+    externalRef: string;
+    createdAt: string;
+  } {
+    const trimmed = input.name.trim();
+    if (!trimmed) {
+      throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const ownerId = input.userId.trim();
+    const user = ownerId ? this.getUser(ownerId) : null;
+    if (!user) {
+      throw Object.assign(new Error("user not found"), { statusCode: 404 });
+    }
+    if (user.status !== "active") {
+      throw Object.assign(new Error("user disabled"), { statusCode: 403 });
+    }
+    const channelId = input.channelId.trim();
+    if (!channelId) {
+      throw Object.assign(new Error("channelId is required"), { statusCode: 400 });
+    }
+    if (!this.getChannel(channelId)) {
+      throw Object.assign(new Error("unknown channel"), { statusCode: 400 });
+    }
+    if (!this.userHasChannel(ownerId, channelId)) {
+      throw Object.assign(new Error("channel not available"), { statusCode: 400 });
+    }
+    const externalRef = input.externalRef.trim();
+    if (!externalRef) {
+      throw Object.assign(new Error("externalRef is required"), { statusCode: 400 });
+    }
+    const ownerClientId = input.ownerClientId.trim();
+    if (!this.getOAuthClient(ownerClientId)) {
+      throw Object.assign(new Error("oauth client not found"), { statusCode: 404 });
+    }
+    const secret = `viate_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const prefix = secret.slice(0, 12);
+    this.db
+      .prepare(
+        `INSERT INTO api_keys (
+          id, name, prefix, key_hash, created_at, user_id, channel_id, kind, external_ref, owner_client_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'bot', ?, ?)`,
+      )
+      .run(id, trimmed, prefix, this.secretHash(secret), createdAt, ownerId, channelId, externalRef, ownerClientId);
+    return { id, prefix, key: secret, name: trimmed, channelId, kind: "bot", externalRef, createdAt };
+  }
+
+  listOwnedApiKeys(ownerClientId: string, kind?: "client" | "bot"): StoredApiKey[] {
+    const rows = (
+      kind
+        ? this.db
+            .prepare(
+              "SELECT * FROM api_keys WHERE owner_client_id = ? AND kind = ? ORDER BY created_at DESC, id DESC",
+            )
+            .all(ownerClientId, kind)
+        : this.db
+            .prepare("SELECT * FROM api_keys WHERE owner_client_id = ? ORDER BY created_at DESC, id DESC")
+            .all(ownerClientId)
+    ) as ApiKeyRow[];
+    return rows.map((row) => this.toApiKey(row));
+  }
+
+  deleteOwnedApiKey(id: string, ownerClientId: string): void {
+    const result = this.db
+      .prepare("DELETE FROM api_keys WHERE id = ? AND owner_client_id = ?")
+      .run(id, ownerClientId);
+    if (result.changes === 0) {
+      throw Object.assign(new Error("api key not found"), { statusCode: 404 });
+    }
+  }
+
+  listUsersPage(limit: number, cursor?: { createdAt: string; id: string } | null): {
+    users: GatewayUser[];
+    nextCursor: { createdAt: string; id: string } | null;
+  } {
+    const rows = (
+      cursor
+        ? this.db
+            .prepare(
+              `SELECT * FROM users
+               WHERE created_at < ? OR (created_at = ? AND id < ?)
+               ORDER BY created_at DESC, id DESC
+               LIMIT ?`,
+            )
+            .all(cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
+        : this.db.prepare("SELECT * FROM users ORDER BY created_at DESC, id DESC LIMIT ?").all(limit + 1)
+    ) as UserRow[];
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      users: page.map((row) => this.toUser(row)),
+      nextCursor: rows.length > limit && last ? { createdAt: last.created_at, id: last.id } : null,
+    };
+  }
+
+  queryOwnedKeyUsage(input: {
+    ownerClientId: string;
+    keyIds: string[];
+    from: string;
+    to: string;
+    granularity: "hour" | "day";
+  }): OwnedKeyUsageBucket[] {
+    if (input.keyIds.length === 0) {
+      return [];
+    }
+    const requested = input.keyIds.map(() => "?").join(", ");
+    const owned = this.db
+      .prepare(`SELECT id FROM api_keys WHERE owner_client_id = ? AND id IN (${requested})`)
+      .all(input.ownerClientId, ...input.keyIds) as Array<{ id: string }>;
+    if (owned.length === 0) {
+      return [];
+    }
+    const ids = owned.map((row) => row.id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const bucketExpr =
+      input.granularity === "hour"
+        ? "substr(l.started_at, 1, 13) || ':00:00.000Z'"
+        : "substr(l.started_at, 1, 10) || 'T00:00:00.000Z'";
+    const rows = this.db
+      .prepare(
+        `SELECT l.api_key_id AS key_id,
+                ${bucketExpr} AS bucket,
+                COUNT(*) AS requests,
+                COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(l.cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(l.cache_write_tokens), 0) AS cache_write_tokens,
+                COALESCE(SUM(-t.delta), 0) AS cost_nano
+         FROM request_logs l
+         LEFT JOIN token_ledger t ON t.request_id = l.id
+         WHERE l.api_key_id IN (${placeholders})
+           AND l.started_at >= ?
+           AND l.started_at < ?
+         GROUP BY l.api_key_id, bucket
+         ORDER BY bucket ASC, l.api_key_id ASC`,
+      )
+      .all(...ids, input.from, input.to) as Array<{
+      key_id: string;
+      bucket: string;
+      requests: number | bigint;
+      input_tokens: number | bigint;
+      output_tokens: number | bigint;
+      cache_read_tokens: number | bigint;
+      cache_write_tokens: number | bigint;
+      cost_nano: number | bigint | null;
+    }>;
+    return rows.map((row) => ({
+      keyId: row.key_id,
+      bucket: row.bucket,
+      requests: numberFrom(row.requests),
+      inputTokens: numberFrom(row.input_tokens),
+      outputTokens: numberFrom(row.output_tokens),
+      cacheReadTokens: numberFrom(row.cache_read_tokens),
+      cacheWriteTokens: numberFrom(row.cache_write_tokens),
+      costUsd: formatUsd(asNano(row.cost_nano)),
+    }));
+  }
+
+  createOAuthClient(input: {
+    name: string;
+    redirectUris: string[];
+    scopes: string[];
+    allowHttpRedirects: boolean;
+    firstParty?: boolean;
+  }): { client: OAuthClient; secret: string } {
+    const name = input.name.trim();
+    if (!name) {
+      throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const secret = `vcs_${randomBytes(32).toString("base64url")}`;
+    const id = `vc_${randomBytes(24).toString("base64url")}`;
+    const createdAt = new Date().toISOString();
+    const firstParty = input.firstParty === false ? 0 : 1;
+    this.db
+      .prepare(
+        `INSERT INTO oauth_clients (
+          id, name, secret_hash, redirect_uris, scopes, first_party, allow_http_redirects, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        name,
+        this.secretHash(secret),
+        JSON.stringify(input.redirectUris),
+        JSON.stringify(input.scopes),
+        firstParty,
+        input.allowHttpRedirects ? 1 : 0,
+        createdAt,
+      );
+    const client = this.getOAuthClient(id);
+    if (!client) {
+      throw Object.assign(new Error("oauth client not found"), { statusCode: 404 });
+    }
+    return { client, secret };
+  }
+
+  listOAuthClients(): OAuthClient[] {
+    const rows = this.db
+      .prepare("SELECT * FROM oauth_clients ORDER BY created_at ASC, id ASC")
+      .all() as OAuthClientRow[];
+    return rows.map((row) => this.toOAuthClient(row));
+  }
+
+  getOAuthClient(id: string): OAuthClient | null {
+    const row = this.db.prepare("SELECT * FROM oauth_clients WHERE id = ?").get(id) as OAuthClientRow | undefined;
+    return row ? this.toOAuthClient(row) : null;
+  }
+
+  verifyOAuthClient(id: string, secret: string): OAuthClient | null {
+    const row = this.db.prepare("SELECT * FROM oauth_clients WHERE id = ?").get(id) as OAuthClientRow | undefined;
+    if (!row || !secretMatches(this.secretHash(secret), row.secret_hash)) {
+      return null;
+    }
+    return this.toOAuthClient(row);
+  }
+
+  updateOAuthClient(
+    id: string,
+    patch: { name?: string; redirectUris?: string[]; scopes?: string[]; allowHttpRedirects?: boolean },
+  ): OAuthClient {
+    const current = this.requireOAuthClientRow(id);
+    const name = patch.name === undefined ? current.name : patch.name.trim();
+    if (!name) {
+      throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    }
+    const redirectUris = patch.redirectUris ?? parseJsonStringArray(current.redirect_uris);
+    const scopes = patch.scopes ?? parseJsonStringArray(current.scopes);
+    const allowHttp = patch.allowHttpRedirects === undefined ? current.allow_http_redirects === 1 : patch.allowHttpRedirects;
+    this.db
+      .prepare(
+        "UPDATE oauth_clients SET name = ?, redirect_uris = ?, scopes = ?, allow_http_redirects = ? WHERE id = ?",
+      )
+      .run(name, JSON.stringify(redirectUris), JSON.stringify(scopes), allowHttp ? 1 : 0, id);
+    return this.toOAuthClient(this.requireOAuthClientRow(id));
+  }
+
+  rotateOAuthClientSecret(id: string): { client: OAuthClient; secret: string } {
+    this.requireOAuthClientRow(id);
+    const secret = `vcs_${randomBytes(32).toString("base64url")}`;
+    this.db.prepare("UPDATE oauth_clients SET secret_hash = ? WHERE id = ?").run(this.secretHash(secret), id);
+    return { client: this.toOAuthClient(this.requireOAuthClientRow(id)), secret };
+  }
+
+  deleteOAuthClient(id: string): void {
+    this.requireOAuthClientRow(id);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("UPDATE api_keys SET owner_client_id = NULL WHERE owner_client_id = ?").run(id);
+      this.db.prepare("DELETE FROM oauth_clients WHERE id = ?").run(id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  createAuthorizationCode(input: {
+    clientId: string;
+    userId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    scope: string;
+    nonce: string | null;
+    authTime: number;
+  }): string {
+    const code = `vac_${randomBytes(32).toString("base64url")}`;
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO oauth_codes (
+          code_hash, client_id, user_id, redirect_uri, code_challenge, scope, expires_at, used_at, nonce, auth_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+      )
+      .run(
+        this.secretHash(code),
+        input.clientId,
+        input.userId,
+        input.redirectUri,
+        input.codeChallenge,
+        input.scope,
+        expiresAt,
+        input.nonce,
+        input.authTime,
+      );
+    return code;
+  }
+
+  exchangeAuthorizationCode(input: {
+    clientId: string;
+    code: string;
+    redirectUri: string;
+    codeVerifier: string;
+  }): ({ ok: true } & ExchangedAuthorizationCode) | { ok: false; error: "invalid_grant"; description: string } {
+    const codeHash = this.secretHash(input.code);
+    const now = new Date();
+    const nowIso = now.toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM oauth_codes WHERE code_hash = ?").get(codeHash) as OAuthCodeRow | undefined;
+      if (!row || row.client_id !== input.clientId) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "authorization code is invalid" };
+      }
+      if (row.used_at) {
+        this.revokeTokenFamily(codeHash, nowIso);
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", description: "authorization code replayed" };
+      }
+      if (row.expires_at <= nowIso) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "authorization code expired" };
+      }
+      if (row.redirect_uri !== input.redirectUri) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "redirect_uri mismatch" };
+      }
+      const challenge = pkceS256(input.codeVerifier);
+      if (!challenge || !secretMatches(challenge, row.code_challenge)) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "code verifier mismatch" };
+      }
+      const user = this.getUser(row.user_id);
+      if (!user || user.status !== "active") {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "user inactive" };
+      }
+      const marked = this.db
+        .prepare("UPDATE oauth_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL")
+        .run(nowIso, codeHash);
+      if (Number(marked.changes) !== 1) {
+        this.revokeTokenFamily(codeHash, nowIso);
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", description: "authorization code replayed" };
+      }
+      const grant = this.insertTokenPair({
+        clientId: row.client_id,
+        userId: row.user_id,
+        scope: row.scope,
+        familyId: codeHash,
+        now,
+        refresh: true,
+      });
+      this.db.exec("COMMIT");
+      return {
+        ok: true,
+        grant,
+        clientId: row.client_id,
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        scope: row.scope,
+        nonce: typeof row.nonce === "string" && row.nonce.length > 0 ? row.nonce : null,
+        authTime: unixSeconds(row.auth_time, Math.floor(now.getTime() / 1000)),
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  rotateRefreshToken(input: {
+    clientId: string;
+    refreshToken: string;
+  }): { ok: true; grant: OAuthTokenGrant } | { ok: false; error: "invalid_grant"; description: string } {
+    const tokenHash = this.secretHash(input.refreshToken);
+    const now = new Date();
+    const nowIso = now.toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE token_hash = ?").get(tokenHash) as
+        | OAuthTokenRow
+        | undefined;
+      if (!row || row.kind !== "refresh" || row.client_id !== input.clientId) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "refresh token is invalid" };
+      }
+      const user = row.user_id
+        ? (this.db.prepare("SELECT status FROM users WHERE id = ?").get(row.user_id) as { status: string } | undefined)
+        : undefined;
+      if (!row.user_id || !user || user.status !== "active") {
+        if (row.family_id) {
+          this.revokeTokenFamily(row.family_id, nowIso);
+        }
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", description: "user inactive" };
+      }
+      if (row.revoked_at) {
+        this.revokeTokenFamily(row.family_id, nowIso);
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", description: "refresh token replayed" };
+      }
+      if (row.expires_at <= nowIso) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "invalid_grant", description: "refresh token expired" };
+      }
+      this.db
+        .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL")
+        .run(nowIso, tokenHash);
+      const grant = this.insertTokenPair({
+        clientId: row.client_id,
+        userId: row.user_id,
+        scope: row.scope,
+        familyId: row.family_id,
+        now,
+        refresh: true,
+      });
+      this.db.exec("COMMIT");
+      return { ok: true, grant };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  issueClientCredentials(clientId: string, scope: string): OAuthTokenGrant {
+    return this.insertTokenPair({
+      clientId,
+      userId: null,
+      scope,
+      familyId: crypto.randomUUID(),
+      now: new Date(),
+      refresh: false,
+    });
+  }
+
+  revokePresentedToken(clientId: string, token: string): void {
+    const tokenHash = this.secretHash(token);
+    const nowIso = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE token_hash = ?").get(tokenHash) as
+        | OAuthTokenRow
+        | undefined;
+      if (!row || row.client_id !== clientId) {
+        this.db.exec("ROLLBACK");
+        return;
+      }
+      if (row.kind === "refresh") {
+        this.revokeTokenFamily(row.family_id, nowIso);
+      } else if (!row.revoked_at) {
+        this.db.prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE token_hash = ?").run(nowIso, tokenHash);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  readUserAccessToken(secret: string):
+    | { status: "invalid" }
+    | { status: "inactive" }
+    | { status: "ok"; sub: string; email: string; name: string; userStatus: "active"; scope: string } {
+    const row = secret ? this.findOAuthToken(secret) : null;
+    if (!row || row.kind !== "access" || !row.user_id || row.expires_at <= new Date().toISOString()) {
+      return { status: "invalid" };
+    }
+    const user = this.getUser(row.user_id);
+    if (!user) {
+      return { status: "invalid" };
+    }
+    if (user.status !== "active") {
+      return { status: "inactive" };
+    }
+    if (row.revoked_at) {
+      return { status: "invalid" };
+    }
+    return { status: "ok", sub: user.id, email: user.email, name: user.name, userStatus: user.status, scope: row.scope };
+  }
+
+  readServiceAccessToken(secret: string): { clientId: string; scope: string } | null {
+    const row = secret ? this.findOAuthToken(secret) : null;
+    if (!row || row.kind !== "access" || row.user_id || row.revoked_at) {
+      return null;
+    }
+    if (row.expires_at <= new Date().toISOString()) {
+      return null;
+    }
+    return { clientId: row.client_id, scope: row.scope };
   }
 
   saveVideoRequest(input: {
@@ -1718,6 +2384,11 @@ export class AdminStore {
     } else {
       this.db.prepare("UPDATE users SET name = ?, status = ?, updated_at = ? WHERE id = ?").run(name, status, now, id);
     }
+    if (patch.status === "disabled") {
+      this.db
+        .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+        .run(now, id);
+    }
     return this.requireUser(id);
   }
 
@@ -1793,6 +2464,184 @@ export class AdminStore {
     }
   }
 
+  createPaymentOrder(input: {
+    userId: string;
+    outTradeNo: string;
+    creditNano: bigint;
+    moneyCents: bigint;
+    currency: string;
+    payType: string;
+    pid: string;
+    now: string;
+    expiresAt: string;
+  }): PaymentOrder {
+    this.requireUser(input.userId);
+    const id = crypto.randomUUID();
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO payment_orders (
+            id, user_id, out_trade_no, trade_no, status, credit_nano, money_cents, currency, pay_type, pid,
+            pay_url, pay_payload, last_error, created_at, expires_at, paid_at
+          ) VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL)`,
+        )
+        .run(
+          id,
+          input.userId,
+          input.outTradeNo,
+          sqlInteger(input.creditNano),
+          sqlInteger(input.moneyCents),
+          input.currency,
+          input.payType,
+          input.pid,
+          input.now,
+          input.expiresAt,
+        );
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+        throw error;
+      }
+      throw error;
+    }
+    return this.requirePaymentOrder(id);
+  }
+
+  setPaymentCheckout(
+    id: string,
+    input: { payUrl: string | null; payPayload: string | null; tradeNo: string | null },
+  ): PaymentOrder {
+    this.db
+      .prepare(
+        `UPDATE payment_orders
+         SET pay_url = ?, pay_payload = ?, trade_no = COALESCE(?, trade_no)
+         WHERE id = ? AND status = 'pending'`,
+      )
+      .run(input.payUrl, input.payPayload, input.tradeNo, id);
+    return this.requirePaymentOrder(id);
+  }
+
+  failPaymentOrder(id: string, message: string): void {
+    const clean = message.replace(/[\u0000\r\n]+/g, " ").trim().slice(0, 180);
+    this.db
+      .prepare("UPDATE payment_orders SET status = 'failed', last_error = ? WHERE id = ? AND status = 'pending'")
+      .run(clean || "payment failed", id);
+  }
+
+  getPaymentOrderForUser(id: string, userId: string): PaymentOrder | null {
+    const row = this.db.prepare("SELECT * FROM payment_orders WHERE id = ? AND user_id = ?").get(id, userId) as
+      | PaymentOrderRow
+      | undefined;
+    return row ? this.toPaymentOrder(row) : null;
+  }
+
+  listPaymentOrders(userId: string, limit = 20): PaymentOrder[] {
+    const rows = this.db
+      .prepare("SELECT * FROM payment_orders WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(userId, limit) as PaymentOrderRow[];
+    return rows.map((row) => this.toPaymentOrder(row));
+  }
+
+  applyEpayNotification(input: {
+    pid: string;
+    tradeNo: string;
+    outTradeNo: string;
+    payType: string;
+    moneyCents: bigint;
+    tradeStatus: string;
+    currency: string;
+  }): { outcome: EpayApplyOutcome; order: PaymentOrder | null } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM payment_orders WHERE out_trade_no = ?").get(input.outTradeNo) as
+        | PaymentOrderRow
+        | undefined;
+      if (!row) {
+        this.db.exec("COMMIT");
+        return { outcome: "unknown", order: null };
+      }
+      const matches =
+        row.pid === input.pid &&
+        row.pay_type === input.payType &&
+        asNano(row.money_cents) === input.moneyCents &&
+        row.currency === input.currency;
+      if (!matches) {
+        this.db.exec("COMMIT");
+        return { outcome: "rejected", order: this.toPaymentOrder(row) };
+      }
+      if (input.tradeStatus !== "TRADE_SUCCESS") {
+        // WAIT_* is not a terminal failure. Marking it failed stops the portal
+        // from polling, so a later TRADE_SUCCESS credits while the page stays failed.
+        if (row.status === "paid" || input.tradeStatus.startsWith("WAIT")) {
+          this.db.exec("COMMIT");
+          return { outcome: "ignored", order: this.toPaymentOrder(row) };
+        }
+        if (row.status !== "failed") {
+          this.db
+            .prepare("UPDATE payment_orders SET status = 'failed', last_error = ? WHERE id = ? AND status != 'paid'")
+            .run("gateway reported a non-success status", row.id);
+        }
+        const failed = this.requirePaymentRow(row.id);
+        this.db.exec("COMMIT");
+        return { outcome: "failed", order: this.toPaymentOrder(failed) };
+      }
+      if (row.status === "paid") {
+        if (row.trade_no && row.trade_no !== input.tradeNo) {
+          this.db.exec("COMMIT");
+          return { outcome: "rejected", order: this.toPaymentOrder(row) };
+        }
+        this.db.exec("COMMIT");
+        return { outcome: "duplicate", order: this.toPaymentOrder(row) };
+      }
+      const now = new Date().toISOString();
+      const credit = asNano(row.credit_nano);
+      const updated = this.db
+        .prepare(
+          `UPDATE payment_orders
+           SET status = 'paid', trade_no = ?, paid_at = ?, last_error = NULL
+           WHERE id = ? AND status != 'paid'`,
+        )
+        .run(input.tradeNo, now, row.id);
+      if (Number(updated.changes) !== 1) {
+        const current = this.requirePaymentRow(row.id);
+        this.db.exec("COMMIT");
+        return { outcome: current.status === "paid" ? "duplicate" : "rejected", order: this.toPaymentOrder(current) };
+      }
+      const user = this.db.prepare("SELECT balance_nano FROM users WHERE id = ?").get(row.user_id) as
+        | { balance_nano: number | bigint }
+        | undefined;
+      if (!user) {
+        throw Object.assign(new Error("user not found"), { statusCode: 404 });
+      }
+      const balanceAfter = asNano(user.balance_nano) + credit;
+      if (balanceAfter > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw Object.assign(new Error("balance overflow"), { statusCode: 500 });
+      }
+      this.db
+        .prepare("UPDATE users SET balance_nano = ?, updated_at = ? WHERE id = ?")
+        .run(sqlInteger(balanceAfter), now, row.user_id);
+      this.db
+        .prepare(
+          `INSERT INTO token_ledger (id, user_id, delta, balance_after, reason, request_id, note, created_at)
+           VALUES (?, ?, ?, ?, 'topup', ?, ?, ?)`,
+        )
+        .run(
+          crypto.randomUUID(),
+          row.user_id,
+          sqlInteger(credit),
+          sqlInteger(balanceAfter),
+          `pay:${row.id}`,
+          `epay ${row.out_trade_no}`.slice(0, 200),
+          now,
+        );
+      const paid = this.requirePaymentRow(row.id);
+      this.db.exec("COMMIT");
+      return { outcome: "paid", order: this.toPaymentOrder(paid) };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   listLedger(userId: string, limit = 50): LedgerEntry[] {
     this.requireUser(userId);
     const rows = this.db
@@ -1811,17 +2660,65 @@ export class AdminStore {
     }
   }
 
-  admitUser(userId: string): void {
+  admitUser(
+    userId: string,
+    maxInflight = 8,
+    reservation?: { requestId: string; holdNano: number },
+  ): void {
+    const limit = Number.isInteger(maxInflight) && maxInflight > 0 ? maxInflight : 8;
+    const holdNano =
+      reservation && Number.isSafeInteger(reservation.holdNano) && reservation.holdNano > 0
+        ? reservation.holdNano
+        : 0;
     const now = new Date().toISOString();
-    const result = this.db
-      .prepare(
-        `UPDATE users SET inflight = inflight + 1, updated_at = ?
-         WHERE id = ? AND status = 'active' AND balance_nano > 0 AND inflight < 8`,
-      )
-      .run(now, userId);
-    if (Number(result.changes) !== 0) {
-      return;
+    if (!reservation || holdNano <= 0) {
+      const result = this.db
+        .prepare(
+          `UPDATE users SET inflight = inflight + 1, updated_at = ?
+           WHERE id = ? AND status = 'active' AND balance_nano > 0 AND inflight < ?`,
+        )
+        .run(now, userId, limit);
+      if (Number(result.changes) !== 0) {
+        return;
+      }
+      this.throwAdmitDenied(userId);
     }
+    this.db.exec("BEGIN IMMEDIATE");
+    let admitted = false;
+    try {
+      const result = this.db
+        .prepare(
+          `UPDATE users
+           SET inflight = inflight + 1, balance_nano = balance_nano - ?, updated_at = ?
+           WHERE id = ? AND status = 'active' AND balance_nano > 0 AND balance_nano >= ? AND inflight < ?`,
+        )
+        .run(holdNano, now, userId, holdNano, limit);
+      if (Number(result.changes) === 0) {
+        this.db.exec("ROLLBACK");
+      } else {
+        this.db
+          .prepare(
+            `INSERT INTO user_balance_holds (request_id, user_id, hold_nano, created_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(reservation.requestId, userId, holdNano, now);
+        this.db.exec("COMMIT");
+        admitted = true;
+      }
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // The denied path already rolled the transaction back.
+      }
+      throw error;
+    }
+    if (!admitted) {
+      this.throwAdmitDenied(userId);
+    }
+  }
+
+  private throwAdmitDenied(userId: string): never {
     const row = this.db.prepare("SELECT status FROM users WHERE id = ?").get(userId) as { status: string } | undefined;
     if (!row) {
       throw Object.assign(new Error("user not found"), { statusCode: 404 });
@@ -1857,6 +2754,13 @@ export class AdminStore {
         this.db.exec("COMMIT");
         return;
       }
+      const holdRow = this.db
+        .prepare("SELECT hold_nano FROM user_balance_holds WHERE request_id = ?")
+        .get(input.requestId) as { hold_nano: number | bigint } | undefined;
+      if (holdRow) {
+        this.db.prepare("DELETE FROM user_balance_holds WHERE request_id = ?").run(input.requestId);
+      }
+      const delta = charge - (holdRow ? asNano(holdRow.hold_nano) : 0n);
       this.db
         .prepare(
           `UPDATE users
@@ -1865,7 +2769,7 @@ export class AdminStore {
                updated_at = ?
            WHERE id = ?`,
         )
-        .run(sqlInteger(charge), now, input.userId);
+        .run(sqlInteger(delta), now, input.userId);
       if (charge > 0n) {
         const row = this.db.prepare("SELECT balance_nano FROM users WHERE id = ?").get(input.userId) as
           | { balance_nano: number | bigint }
@@ -1899,6 +2803,7 @@ export class AdminStore {
       inputNanoPerMillion: number;
       outputNanoPerMillion: number;
       cacheReadNanoPerMillion?: number;
+      contextTiers?: ContextPriceTier[];
     }>,
     fetchedAt: string,
     source = "https://models.dev/api.json",
@@ -1908,8 +2813,8 @@ export class AdminStore {
       this.db.prepare("DELETE FROM model_prices").run();
       const insert = this.db.prepare(
         `INSERT INTO model_prices (
-           model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, updated_at
-         ) VALUES (?, ?, ?, ?, ?)`,
+           model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, context_tiers, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
       );
       for (const row of rows) {
         insert.run(
@@ -1917,6 +2822,7 @@ export class AdminStore {
           row.inputNanoPerMillion,
           row.outputNanoPerMillion,
           row.cacheReadNanoPerMillion ?? null,
+          contextTiersJson(row.contextTiers),
           fetchedAt,
         );
       }
@@ -1940,6 +2846,7 @@ export class AdminStore {
       inputNanoPerMillion: number;
       outputNanoPerMillion: number;
       cacheReadNanoPerMillion?: number;
+      contextTiers?: ContextPriceTier[];
     }>;
   } {
     const meta = this.db.prepare("SELECT fetched_at FROM model_price_meta WHERE id = 1").get() as
@@ -1947,26 +2854,40 @@ export class AdminStore {
       | undefined;
     const rows = this.db
       .prepare(
-        `SELECT model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million
+        `SELECT model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, context_tiers
          FROM model_prices`,
       )
-      .all() as Array<{
-      model_id: string;
-      input_nano_per_million: number | bigint;
-      output_nano_per_million: number | bigint;
-      cache_read_nano_per_million: number | bigint | null;
-    }>;
+      .all() as ModelPriceSqlRow[];
     return {
       fetchedAt: meta?.fetched_at ?? null,
-      rows: rows.map((row) => ({
-        modelId: row.model_id,
-        inputNanoPerMillion: numberFrom(row.input_nano_per_million),
-        outputNanoPerMillion: numberFrom(row.output_nano_per_million),
-        ...(row.cache_read_nano_per_million == null
-          ? {}
-          : { cacheReadNanoPerMillion: numberFrom(row.cache_read_nano_per_million) }),
-      })),
+      rows: rows.map(modelPriceFromRow),
     };
+  }
+
+  listModelPriceIds(): string[] {
+    const rows = this.db.prepare("SELECT model_id FROM model_prices").all() as Array<{ model_id: string }>;
+    return rows.map((row) => row.model_id);
+  }
+
+  listModelPricesByIds(modelIds: readonly string[]): Array<{
+    modelId: string;
+    inputNanoPerMillion: number;
+    outputNanoPerMillion: number;
+    cacheReadNanoPerMillion?: number;
+    contextTiers?: ContextPriceTier[];
+  }> {
+    if (modelIds.length === 0) {
+      return [];
+    }
+    const placeholders = modelIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT model_id, input_nano_per_million, output_nano_per_million, cache_read_nano_per_million, context_tiers
+         FROM model_prices
+         WHERE model_id IN (${placeholders})`,
+      )
+      .all(...modelIds) as ModelPriceSqlRow[];
+    return rows.map(modelPriceFromRow);
   }
 
   listModelPriceOverrides(): Array<{
@@ -2419,11 +3340,14 @@ export class AdminStore {
     };
   }
 
-  pruneRequestLogs(now = Date.now()): void {
-    const eventCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+  pruneRequestLogs(now = Date.now(), retentionMs = 7 * 24 * 60 * 60 * 1000): void {
+    const eventCutoff = new Date(now - retentionMs).toISOString();
     const minuteCutoff = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
     this.db.prepare("DELETE FROM request_logs WHERE started_at < ?").run(eventCutoff);
     this.db.prepare("DELETE FROM request_stats_minute WHERE bucket < ?").run(minuteCutoff);
+    const nowIso = new Date(now).toISOString();
+    this.db.prepare("DELETE FROM oauth_codes WHERE expires_at < ?").run(nowIso);
+    this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at < ?").run(nowIso);
   }
 
   private bumpRequestStats(record: RequestLogRecord): void {
@@ -2484,7 +3408,8 @@ export class AdminStore {
       outputTokens: row.output_tokens,
       cacheReadTokens: row.cache_read_tokens,
       cacheWriteTokens: row.cache_write_tokens,
-      usageSource: row.usage_source === "parser" ? "parser" : "missing",
+      usageSource:
+        row.usage_source === "parser" || row.usage_source === "estimated" ? row.usage_source : "missing",
       error: row.error,
       payloadPath: row.payload_path,
       payloadOffset: row.payload_offset,
@@ -2541,7 +3466,101 @@ export class AdminStore {
       createdAt: row.created_at,
       userId: row.user_id ?? null,
       channelId: row.channel_id ?? null,
+      kind: row.kind === "bot" ? "bot" : "client",
+      externalRef: row.external_ref ?? null,
+      ownerClientId: row.owner_client_id ?? null,
     };
+  }
+
+  private secretHash(secret: string): string {
+    return createHmac("sha256", this.key).update(secret).digest("hex");
+  }
+
+  private findOAuthToken(secret: string): OAuthTokenRow | null {
+    const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE token_hash = ?").get(this.secretHash(secret)) as
+      | OAuthTokenRow
+      | undefined;
+    return row ?? null;
+  }
+
+  private revokeTokenFamily(familyId: string, nowIso: string): void {
+    this.db
+      .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL")
+      .run(nowIso, familyId);
+  }
+
+  private insertTokenPair(input: {
+    clientId: string;
+    userId: string | null;
+    scope: string;
+    familyId: string;
+    now: Date;
+    refresh: boolean;
+  }): OAuthTokenGrant {
+    const accessToken = `vat_${randomBytes(32).toString("base64url")}`;
+    const createdAt = input.now.toISOString();
+    const accessExpires = new Date(input.now.getTime() + 60 * 60 * 1000).toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO oauth_tokens (
+          token_hash, kind, client_id, user_id, scope, family_id, expires_at, revoked_at, created_at
+        ) VALUES (?, 'access', ?, ?, ?, ?, ?, NULL, ?)`,
+      )
+      .run(
+        this.secretHash(accessToken),
+        input.clientId,
+        input.userId,
+        input.scope,
+        input.familyId,
+        accessExpires,
+        createdAt,
+      );
+    let refreshToken: string | undefined;
+    if (input.refresh) {
+      refreshToken = `vrt_${randomBytes(32).toString("base64url")}`;
+      const refreshExpires = new Date(input.now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO oauth_tokens (
+            token_hash, kind, client_id, user_id, scope, family_id, expires_at, revoked_at, created_at
+          ) VALUES (?, 'refresh', ?, ?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(
+          this.secretHash(refreshToken),
+          input.clientId,
+          input.userId,
+          input.scope,
+          input.familyId,
+          refreshExpires,
+          createdAt,
+        );
+    }
+    return {
+      accessToken,
+      ...(refreshToken ? { refreshToken } : {}),
+      expiresIn: 60 * 60,
+      scope: input.scope,
+    };
+  }
+
+  private toOAuthClient(row: OAuthClientRow): OAuthClient {
+    return {
+      id: row.id,
+      name: row.name,
+      redirectUris: parseJsonStringArray(row.redirect_uris),
+      scopes: parseJsonStringArray(row.scopes),
+      firstParty: row.first_party === 1,
+      allowHttpRedirects: row.allow_http_redirects === 1,
+      createdAt: row.created_at,
+    };
+  }
+
+  private requireOAuthClientRow(id: string): OAuthClientRow {
+    const row = this.db.prepare("SELECT * FROM oauth_clients WHERE id = ?").get(id) as OAuthClientRow | undefined;
+    if (!row) {
+      throw Object.assign(new Error("oauth client not found"), { statusCode: 404 });
+    }
+    return row;
   }
 
   private requireUser(id: string): GatewayUser {
@@ -2572,8 +3591,43 @@ export class AdminStore {
     };
   }
 
+  private requirePaymentOrder(id: string): PaymentOrder {
+    return this.toPaymentOrder(this.requirePaymentRow(id));
+  }
+
+  private requirePaymentRow(id: string): PaymentOrderRow {
+    const row = this.db.prepare("SELECT * FROM payment_orders WHERE id = ?").get(id) as PaymentOrderRow | undefined;
+    if (!row) {
+      throw Object.assign(new Error("payment not found"), { statusCode: 404 });
+    }
+    return row;
+  }
+
+  private toPaymentOrder(row: PaymentOrderRow): PaymentOrder {
+    const status = row.status === "paid" || row.status === "failed" ? row.status : "pending";
+    return {
+      id: row.id,
+      userId: row.user_id,
+      outTradeNo: row.out_trade_no,
+      tradeNo: row.trade_no,
+      status,
+      creditUsd: formatUsd(row.credit_nano),
+      money: formatCents(asNano(row.money_cents)),
+      currency: row.currency,
+      payType: row.pay_type,
+      pid: row.pid,
+      payUrl: row.pay_url,
+      payPayload: row.pay_payload,
+      lastError: row.last_error,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      paidAt: row.paid_at,
+    };
+  }
+
   private toLedger(row: LedgerRow): LedgerEntry {
-    const reason = row.reason === "grant" || row.reason === "adjust" || row.reason === "usage" ? row.reason : "adjust";
+    const reason =
+      row.reason === "grant" || row.reason === "adjust" || row.reason === "usage" || row.reason === "topup" ? row.reason : "adjust";
     return {
       id: row.id,
       userId: row.user_id,
@@ -2720,6 +3774,24 @@ function migrateSubscription(db: DatabaseSync): void {
   `);
 }
 
+function releaseOutstandingHolds(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      UPDATE users
+      SET balance_nano = balance_nano + (
+        SELECT COALESCE(SUM(hold_nano), 0) FROM user_balance_holds WHERE user_id = users.id
+      );
+      DELETE FROM user_balance_holds;
+      UPDATE users SET inflight = 0;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 function migrateUsers(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -2780,6 +3852,9 @@ function migrateUsers(db: DatabaseSync): void {
   if (!priceColumns.some((column) => column.name === "cache_read_nano_per_million")) {
     db.exec("ALTER TABLE model_prices ADD COLUMN cache_read_nano_per_million INTEGER");
   }
+  if (!priceColumns.some((column) => column.name === "context_tiers")) {
+    db.exec("ALTER TABLE model_prices ADD COLUMN context_tiers TEXT");
+  }
   const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
   if (!apiKeyColumns.some((column) => column.name === "user_id")) {
     db.exec("ALTER TABLE api_keys ADD COLUMN user_id TEXT REFERENCES users(id)");
@@ -2789,7 +3864,28 @@ function migrateUsers(db: DatabaseSync): void {
   if (!logColumns.some((column) => column.name === "user_id")) {
     db.exec("ALTER TABLE request_logs ADD COLUMN user_id TEXT");
   }
-  db.exec("CREATE INDEX IF NOT EXISTS request_logs_user_started ON request_logs(user_id, started_at DESC)");
+    db.exec("CREATE INDEX IF NOT EXISTS request_logs_user_started ON request_logs(user_id, started_at DESC)");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS payment_orders (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        out_trade_no TEXT NOT NULL UNIQUE,
+        trade_no TEXT,
+        status TEXT NOT NULL,
+        credit_nano INTEGER NOT NULL,
+        money_cents INTEGER NOT NULL,
+        currency TEXT NOT NULL,
+        pay_type TEXT NOT NULL,
+        pid TEXT NOT NULL,
+        pay_url TEXT,
+        pay_payload TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        paid_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS payment_orders_user_created ON payment_orders(user_id, created_at DESC);
+    `);
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_models (
       user_id TEXT NOT NULL REFERENCES users(id),
@@ -2805,6 +3901,7 @@ function migrateUsers(db: DatabaseSync): void {
     );
   `);
   migrateChannels(db);
+  migrateOAuth(db);
 }
 
 function migrateChannels(db: DatabaseSync): void {
@@ -2859,6 +3956,104 @@ function migrateChannels(db: DatabaseSync): void {
   insert.run(standardId, "Standard", 7, 1, JSON.stringify({ kind: "all" }));
   db.prepare("INSERT INTO user_channels (user_id, channel_id) SELECT id, ? FROM users").run(grokId);
   db.prepare("UPDATE api_keys SET channel_id = ?").run(grokId);
+}
+
+function migrateOAuth(db: DatabaseSync): void {
+  const apiKeyColumns = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+  const names = new Set(apiKeyColumns.map((column) => column.name));
+  if (!names.has("kind")) {
+    db.exec("ALTER TABLE api_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'client'");
+  }
+  if (!names.has("external_ref")) {
+    db.exec("ALTER TABLE api_keys ADD COLUMN external_ref TEXT");
+  }
+  if (!names.has("owner_client_id")) {
+    db.exec("ALTER TABLE api_keys ADD COLUMN owner_client_id TEXT");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      secret_hash TEXT NOT NULL,
+      redirect_uris TEXT NOT NULL,
+      scopes TEXT NOT NULL,
+      first_party INTEGER NOT NULL DEFAULT 1,
+      allow_http_redirects INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS oauth_codes (
+      code_hash TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      redirect_uri TEXT NOT NULL,
+      code_challenge TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      nonce TEXT,
+      auth_time INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      token_hash TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      client_id TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES users(id),
+      scope TEXT NOT NULL,
+      family_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS oauth_tokens_family ON oauth_tokens(family_id);
+  `);
+  const codeColumns = db.prepare("PRAGMA table_info(oauth_codes)").all() as Array<{ name: string }>;
+  const codeNames = new Set(codeColumns.map((column) => column.name));
+  if (!codeNames.has("nonce")) {
+    db.exec("ALTER TABLE oauth_codes ADD COLUMN nonce TEXT");
+  }
+  if (!codeNames.has("auth_time")) {
+    db.exec("ALTER TABLE oauth_codes ADD COLUMN auth_time INTEGER");
+  }
+}
+
+function parseJsonStringArray(value: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
+}
+
+const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
+
+function unixSeconds(value: number | bigint | null | undefined, fallback: number): number {
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  return fallback;
+}
+
+function pkceS256(verifier: string): string | null {
+  if (!PKCE_VERIFIER.test(verifier)) {
+    return null;
+  }
+  return createHash("sha256").update(verifier).digest("base64url");
+}
+
+function secretMatches(actual: string, expected: string): boolean {
+  const left = Buffer.from(actual);
+  const right = Buffer.from(expected);
+  if (left.length !== right.length) {
+    return false;
+  }
+  return timingSafeEqual(left, right);
 }
 
 function toChannel(row: ChannelRow): Channel {
@@ -2947,7 +4142,7 @@ function numberFrom(value: number | bigint | null | undefined): number {
   return value ?? 0;
 }
 
-function usageBaseNano(input: {
+export function usageBaseNano(input: {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens?: number;
@@ -2985,6 +4180,88 @@ function usageBaseNano(input: {
   );
 }
 
+type ModelPriceSqlRow = {
+  model_id: string;
+  input_nano_per_million: number | bigint;
+  output_nano_per_million: number | bigint;
+  cache_read_nano_per_million: number | bigint | null;
+  context_tiers: string | null;
+};
+
+function modelPriceFromRow(row: ModelPriceSqlRow): {
+  modelId: string;
+  inputNanoPerMillion: number;
+  outputNanoPerMillion: number;
+  cacheReadNanoPerMillion?: number;
+  contextTiers?: ContextPriceTier[];
+} {
+  const contextTiers = contextTiersFromJson(row.context_tiers);
+  return {
+    modelId: row.model_id,
+    inputNanoPerMillion: numberFrom(row.input_nano_per_million),
+    outputNanoPerMillion: numberFrom(row.output_nano_per_million),
+    ...(row.cache_read_nano_per_million == null
+      ? {}
+      : { cacheReadNanoPerMillion: numberFrom(row.cache_read_nano_per_million) }),
+    ...(contextTiers ? { contextTiers } : {}),
+  };
+}
+
+function contextTiersJson(tiers: readonly ContextPriceTier[] | undefined): string | null {
+  if (!tiers?.length) {
+    return null;
+  }
+  return JSON.stringify(
+    tiers.map((tier) => ({
+      atTokens: tier.atTokens,
+      inputNanoPerMillion: tier.inputNanoPerMillion,
+      outputNanoPerMillion: tier.outputNanoPerMillion,
+      ...(tier.cacheReadNanoPerMillion != null ? { cacheReadNanoPerMillion: tier.cacheReadNanoPerMillion } : {}),
+    })),
+  );
+}
+
+function contextTiersFromJson(raw: string | null): ContextPriceTier[] | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) {
+    return undefined;
+  }
+  const tiers: ContextPriceTier[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return undefined;
+    }
+    const atTokens = "atTokens" in entry ? entry.atTokens : undefined;
+    const inputNanoPerMillion = "inputNanoPerMillion" in entry ? entry.inputNanoPerMillion : undefined;
+    const outputNanoPerMillion = "outputNanoPerMillion" in entry ? entry.outputNanoPerMillion : undefined;
+    if (!isStoredCount(atTokens) || atTokens <= 0 || !isStoredCount(inputNanoPerMillion) || !isStoredCount(outputNanoPerMillion)) {
+      return undefined;
+    }
+    if (!("cacheReadNanoPerMillion" in entry)) {
+      tiers.push({ atTokens, inputNanoPerMillion, outputNanoPerMillion });
+      continue;
+    }
+    const cacheReadNanoPerMillion = entry.cacheReadNanoPerMillion;
+    if (!isStoredCount(cacheReadNanoPerMillion)) {
+      return undefined;
+    }
+    tiers.push({ atTokens, inputNanoPerMillion, outputNanoPerMillion, cacheReadNanoPerMillion });
+  }
+  return tiers.length > 0 ? tiers : undefined;
+}
+
+function isStoredCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type UserRow = {
@@ -2997,6 +4274,25 @@ type UserRow = {
   inflight: number | bigint;
   created_at: string;
   updated_at: string;
+};
+
+type PaymentOrderRow = {
+  id: string;
+  user_id: string;
+  out_trade_no: string;
+  trade_no: string | null;
+  status: string;
+  credit_nano: number | bigint;
+  money_cents: number | bigint;
+  currency: string;
+  pay_type: string;
+  pid: string;
+  pay_url: string | null;
+  pay_payload: string | null;
+  last_error: string | null;
+  created_at: string;
+  expires_at: string;
+  paid_at: string | null;
 };
 
 type LedgerRow = {

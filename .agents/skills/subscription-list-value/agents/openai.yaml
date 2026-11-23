@@ -1,0 +1,4 @@
+interface:
+  display_name: "Subscription list value"
+  short_description: "Price Viate subscription traffic at API list rates"
+  default_prompt: "Use $subscription-list-value to estimate the list-price value of this subscription's gateway usage."

@@ -7,10 +7,14 @@ import {
   type ClientApiKey,
   type GatewayUser,
   type LedgerEntry,
+  type PaymentCatalog,
+  type PaymentNext,
+  type PaymentOrderView,
   type PortalChannel,
   type PortalEndpointType,
   type UserUsageRequest,
 } from "./api";
+import { ConfirmDialog } from "./dialog";
 import { formatCount, formatDateTime } from "./format";
 import { LocaleSwitch } from "./locale-switch";
 import { m } from "./paraglide/messages.js";
@@ -63,6 +67,14 @@ function pageLabel(page: PortalPage): string {
 }
 
 export function PortalApp() {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/portal/oauth-login") {
+    return <OAuthLoginPage />;
+  }
+  return <PortalSession />;
+}
+
+function PortalSession() {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState<GatewayUser | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
@@ -171,6 +183,84 @@ function PortalLogin({ onLoggedIn }: { onLoggedIn: (user: GatewayUser) => void }
               onChange={(event) => setPassword(event.target.value)}
               required
             />
+          </label>
+          {error ? <p className="banner error" role="alert">{error}</p> : null}
+          <button className="primary" type="submit" disabled={busy}>
+            {busy ? m.busy_signing_in() : m.action_sign_in()}
+          </button>
+        </form>
+      </main>
+    </div>
+  );
+}
+
+function OAuthLoginPage() {
+  const requested = new URLSearchParams(window.location.search).get("return") ?? "";
+  const clientId = requested.startsWith("/oauth/authorize?")
+    ? new URLSearchParams(requested.slice("/oauth/authorize?".length)).get("client_id") ?? ""
+    : "";
+  const [clientName, setClientName] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!clientId) return;
+    let cancelled = false;
+    api<{ name: string }>(`/oauth/client-info?client_id=${encodeURIComponent(clientId)}`)
+      .then((result) => {
+        if (!cancelled) setClientName(result.name);
+      })
+      .catch(() => {
+        if (!cancelled) setClientName(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId]);
+
+  return (
+    <div className="login-screen">
+      <main className="login">
+        <div className="login-locale"><LocaleSwitch /></div>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">V</span>
+          <div>
+            <div className="brand-name">Viate</div>
+            <div className="brand-sub">{m.portal_brand()}</div>
+          </div>
+        </div>
+        <h1>{clientName ? m.oauth_login_title({ name: clientName }) : m.oauth_login_unknown()}</h1>
+        <p className="meta">{m.oauth_login_subtitle()}</p>
+        <form
+          className="form"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            setBusy(true);
+            setError(null);
+            try {
+              const result = await api<{ ok: true; redirect: string }>(
+                `/oauth/login?return=${encodeURIComponent(requested)}`,
+                { method: "POST", body: JSON.stringify({ email, password }) },
+              );
+              const next = result.redirect === "/portal" || result.redirect.startsWith("/oauth/authorize?")
+                ? result.redirect
+                : "/portal";
+              window.location.assign(next);
+            } catch (err) {
+              setError(isApiError(err) ? err.message : m.error_login());
+              setBusy(false);
+            }
+          }}
+        >
+          <label>
+            {m.label_email()}
+            <input type="email" name="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required />
+          </label>
+          <label>
+            {m.label_password()}
+            <input type="password" name="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
           </label>
           {error ? <p className="banner error" role="alert">{error}</p> : null}
           <button className="primary" type="submit" disabled={busy}>
@@ -321,6 +411,7 @@ function AccountPage({ user, onUser }: { user: GatewayUser; onUser: (user: Gatew
         <span className="portal-balance-unit">USD</span>
       </p>
       <p className="meta">{user.email} · {user.name}</p>
+      <PaymentPanel onUser={onUser} />
       <PasswordPanel onError={setError} onNotice={setNotice} />
     </section>
   );
@@ -420,6 +511,138 @@ function LogBlock<T>({
   );
 }
 
+function reasonLabel(reason: LedgerEntry["reason"]): string {
+  if (reason === "topup") return m.portal_reason_topup();
+  return reason;
+}
+
+function paymentStatus(order: PaymentOrderView): string {
+  if (order.displayStatus === "paid") return m.portal_pay_paid({ usd: order.creditUsd });
+  if (order.displayStatus === "failed") return order.lastError || m.portal_pay_failed();
+  if (order.displayStatus === "expired") return m.portal_pay_expired();
+  return m.portal_pay_waiting();
+}
+
+function PaymentPanel({ onUser }: { onUser: (user: GatewayUser) => void }) {
+  const [catalog, setCatalog] = useState<PaymentCatalog | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [order, setOrder] = useState<PaymentOrderView | null>(null);
+  const [payload, setPayload] = useState<string | null>(null);
+  const [link, setLink] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const focus = new URLSearchParams(window.location.search).get("payment");
+
+  useEffect(() => {
+    let cancelled = false;
+    api<PaymentCatalog>("/api/portal/payments")
+      .then((result) => {
+        if (cancelled) return;
+        setCatalog(result);
+        const current = result.orders.find((item) => item.id === focus) ?? null;
+        setOrder(current);
+        setPayload(current?.status === "pending" ? current.payPayload : null);
+        setLink(current?.status === "pending" ? current.payUrl : null);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(isApiError(err) ? err.message : m.error_load_account());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [focus]);
+
+  useEffect(() => {
+    if (!order || (order.displayStatus !== "pending" && order.displayStatus !== "expired")) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void api<{ order: PaymentOrderView }>(`/api/portal/payments/${order.id}`)
+        .then(async (result) => {
+          if (cancelled) return;
+          setOrder(result.order);
+          if (result.order.displayStatus === "paid") {
+            const usage = await api<PortalUsage>("/api/portal/usage");
+            if (!cancelled) onUser(usage.user);
+          }
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [onUser, order]);
+
+  async function pay(): Promise<void> {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api<{ order: PaymentOrderView; next: PaymentNext }>("/api/portal/payments", {
+        method: "POST",
+        body: JSON.stringify({ usd: selected }),
+      });
+      setOrder(result.order);
+      if (result.next.kind === "payload") {
+        setPayload(result.next.value);
+        setLink(null);
+        return;
+      }
+      const url = new URL(result.next.url);
+      if (url.protocol !== "https:" && url.protocol !== "http:") {
+        setError(m.portal_pay_failed());
+        return;
+      }
+      setPayload(null);
+      setLink(url.href);
+      window.location.assign(url.href);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : m.portal_pay_failed());
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel portal-pay">
+      <h2>{m.portal_pay_title()}</h2>
+      <p className="meta">{m.portal_pay_desc()}</p>
+      {error ? <p className="banner error" role="alert">{error}</p> : null}
+      {catalog && !catalog.enabled ? (
+        <p className="banner warn" role="status">
+          {m.portal_pay_disabled()}
+          {catalog.problems.length > 0 ? ` ${catalog.problems.join(" ")}` : ""}
+        </p>
+      ) : null}
+      {catalog?.enabled ? (
+        <>
+          <div className="portal-pay-offers" role="group" aria-label={m.portal_pay_title()}>
+            {catalog.offers.map((offer) => (
+              <button key={offer.usd} type="button" aria-pressed={selected === offer.usd} onClick={() => setSelected(offer.usd)}>
+                <span>{offer.usd} USD</span>
+                <span className="meta">{m.portal_pay_money({ money: offer.money, currency: offer.currency })}</span>
+              </button>
+            ))}
+          </div>
+          <button className="primary" type="button" disabled={!selected || busy} onClick={() => void pay()}>
+            {selected ? m.portal_pay_action({ usd: selected }) : m.portal_pay_continue()}
+          </button>
+        </>
+      ) : null}
+      {order ? <p className={order.displayStatus === "paid" ? "banner ok" : "banner"} role="status">{paymentStatus(order)}</p> : null}
+      {payload ? (
+        <div>
+          <p className="meta">{m.portal_pay_payload()}</p>
+          <pre className="portal-pay-payload">{payload}</pre>
+        </div>
+      ) : null}
+      {link ? <a href={link} rel="noreferrer">{m.portal_pay_continue()}</a> : null}
+    </section>
+  );
+}
+
 function ChargeTable({ rows }: { rows: LedgerEntry[] }) {
   return (
     <table className="portal-log-table">
@@ -437,7 +660,7 @@ function ChargeTable({ rows }: { rows: LedgerEntry[] }) {
           <tr key={entry.id}>
             <td>{formatDateTime(entry.createdAt)}</td>
             <td>
-              {entry.reason}
+              {reasonLabel(entry.reason)}
               {entry.note ? <span className="meta"> {entry.note}</span> : null}
             </td>
             <td>{entry.deltaUsd} USD</td>
@@ -456,7 +679,7 @@ function ChargeCards({ rows }: { rows: LedgerEntry[] }) {
         <article className="portal-log-card" key={entry.id}>
           <div>{formatDateTime(entry.createdAt)}</div>
           <div>
-            {entry.reason}
+            {reasonLabel(entry.reason)}
             {entry.note ? <span className="meta"> {entry.note}</span> : null}
           </div>
           <div>
@@ -523,6 +746,9 @@ function KeysPanel() {
   const [keys, setKeys] = useState<ClientApiKey[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState<{ name: string; secret: string } | null>(null);
+  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(null);
+  const [confirm, setConfirm] = useState<ClientApiKey | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const selected = channels?.find((channel) => channel.id === channelId) ?? null;
@@ -544,12 +770,18 @@ function KeysPanel() {
       .catch((err) => setError(isApiError(err) ? err.message : m.error_load_channels()));
   }, []);
 
+  useEffect(() => {
+    if (copyStatus !== "copied") return;
+    const timer = window.setTimeout(() => setCopyStatus(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copyStatus]);
+
   return (
-    <section className="panel stack portal-keys">
+    <section className="stack portal-keys">
       {notice ? <p className="banner ok" role="status">{notice}</p> : null}
       {error ? <p className="banner error" role="alert">{error}</p> : null}
       <form
-        className="form"
+        className="panel form"
         onSubmit={async (event) => {
           event.preventDefault();
           setBusy(true);
@@ -561,6 +793,7 @@ function KeysPanel() {
               body: JSON.stringify({ name, channelId }),
             });
             setName("");
+            setCopyStatus(null);
             setSecret({ name: result.apiKey.name, secret: result.secret });
             await refresh();
             setNotice(m.portal_copy_once());
@@ -609,14 +842,28 @@ function KeysPanel() {
         </button>
       </form>
       {secret ? (
-        <div className="banner ok secret-row" role="status">
+        <div className="banner ok secret-row">
           <div>
             <ParaglideMessage
               message={m.portal_copy_secret}
               inputs={{ name: secret.name, secret: secret.secret }}
               markup={{ code: ({ children }) => <code>{children}</code> }}
             />
+            {copyStatus ? (
+              <p className="meta" role="status">{copyStatus === "copied" ? m.portal_copied() : m.error_copy()}</p>
+            ) : null}
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard.writeText(secret.secret).then(
+                () => setCopyStatus("copied"),
+                () => setCopyStatus("failed"),
+              );
+            }}
+          >
+            {copyStatus === "copied" ? m.action_copied() : m.action_copy()}
+          </button>
         </div>
       ) : null}
       {keys === null ? <p className="meta">{m.portal_keys_loading()}</p> : null}
@@ -628,36 +875,53 @@ function KeysPanel() {
             <div className="resource-main">
               <div className="resource-title-row">
                 <h2>{key.name}</h2>
+                {key.kind === "bot" ? <span className="badge">{m.portal_key_bot()}</span> : null}
                 <span className="badge">{key.prefix}…</span>
               </div>
               <div className="meta">
                 {channel ? `${channel.name} · ${channel.ratio}x` : m.portal_no_channel()} · {m.portal_created({ time: formatDateTime(key.createdAt) })}
               </div>
+              {key.managed ? <div className="meta">{m.portal_key_managed()}</div> : null}
             </div>
             <div className="row-actions">
-            <button
-              className="danger"
-              type="button"
-              onClick={() => {
-                void (async () => {
-                  setError(null);
-                  try {
-                    await api(`/api/portal/keys/${key.id}`, { method: "DELETE" });
-                    if (secret?.name === key.name) setSecret(null);
-                    await refresh();
-                    setNotice(m.portal_revoked());
-                  } catch (err) {
-                    setError(isApiError(err) ? err.message : m.error_revoke());
-                  }
-                })();
-              }}
-            >
+            {key.managed ? null : (
+              <button className="danger" type="button" onClick={() => setConfirm(key)}>
                 {m.action_revoke()}
               </button>
+            )}
             </div>
           </article>
         );
       })}
+      {confirm ? (
+        <ConfirmDialog
+          title={m.keys_revoke_title({ name: confirm.name })}
+          body={m.portal_revoke_body()}
+          confirmLabel={m.action_revoke()}
+          busy={confirmBusy}
+          onCancel={() => {
+            if (!confirmBusy) setConfirm(null);
+          }}
+          onConfirm={async () => {
+            setConfirmBusy(true);
+            setError(null);
+            try {
+              await api(`/api/portal/keys/${confirm.id}`, { method: "DELETE" });
+              if (secret?.name === confirm.name) {
+                setSecret(null);
+                setCopyStatus(null);
+              }
+              await refresh();
+              setNotice(m.portal_revoked());
+            } catch (err) {
+              setError(isApiError(err) ? err.message : m.error_revoke());
+            } finally {
+              setConfirmBusy(false);
+              setConfirm(null);
+            }
+          }}
+        />
+      ) : null}
     </section>
   );
 }

@@ -120,6 +120,7 @@ export async function dispatchRouted(
   const attempts: RequestAttemptRecord[] = [];
   for (const member of ordered) {
     if (clientAbort.aborted) {
+      await discardExchange(lastExchange);
       throw Object.assign(new Error("aborted"), { name: "AbortError" });
     }
     const handler = providers.get(member.providerId)?.[capability];
@@ -137,7 +138,7 @@ export async function dispatchRouted(
     try {
       const upstream = await handler(
         {
-          body: rewriteBody(request.body, member.modelId),
+          body: rewriteBody(request.body, member.modelId, capability),
           headers: request.headers,
           signal: request.signal,
         },
@@ -153,6 +154,7 @@ export async function dispatchRouted(
         error: upstream.status >= 400 ? `upstream ${upstream.status}` : null,
       });
       if (isTerminalClientError(upstream.status)) {
+        await discardExchange(lastExchange);
         return routed(upstream, requestModel, member, attempts);
       }
       if (isRetryableStatus(upstream.status)) {
@@ -160,6 +162,7 @@ export async function dispatchRouted(
           onAuthFailure?.(member.connectionId);
         }
         lastError = `upstream ${upstream.status}`;
+        await discardExchange(lastExchange);
         lastExchange = upstream;
         lastMember = member;
         if (hash && stickyConnectionId === member.connectionId) {
@@ -168,15 +171,18 @@ export async function dispatchRouted(
         continue;
       }
       if (upstream.status >= 200 && upstream.status < 300) {
+        await discardExchange(lastExchange);
         store.setLkgp(requestModel, member.providerId, member.connectionId);
         if (hash) {
           recordStickyBinding(hash, member.connectionId);
         }
         return routed(upstream, requestModel, member, attempts);
       }
+      await discardExchange(lastExchange);
       return routed(upstream, requestModel, member, attempts);
     } catch (error) {
       if (clientAbort.aborted || (isAbortError(error) && clientAbort.aborted)) {
+        await discardExchange(lastExchange);
         throw error;
       }
       lastError = error instanceof Error ? error.message : String(error);
@@ -236,11 +242,33 @@ function requestModelFromBody(body: unknown): string {
   return model.trim();
 }
 
-function rewriteBody(body: unknown, upstreamModelId: string): unknown {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return { model: upstreamModelId };
+function rewriteBody(body: unknown, upstreamModelId: string, capability: RoutedCapability): unknown {
+  const rewritten =
+    !body || typeof body !== "object" || Array.isArray(body)
+      ? { model: upstreamModelId }
+      : { ...body, model: upstreamModelId };
+  if (capability !== "chatCompletions" || !("stream" in rewritten) || rewritten.stream !== true) {
+    return rewritten;
   }
-  return { ...body, model: upstreamModelId };
+  const current = "stream_options" in rewritten ? rewritten.stream_options : undefined;
+  const streamOptions: Record<string, unknown> = {};
+  if (current && typeof current === "object" && !Array.isArray(current)) {
+    for (const [key, value] of Object.entries(current)) {
+      streamOptions[key] = value;
+    }
+  }
+  return { ...rewritten, stream_options: { ...streamOptions, include_usage: true } };
+}
+
+async function discardExchange(exchange: HttpExchange | undefined): Promise<void> {
+  if (!exchange?.body) {
+    return;
+  }
+  try {
+    await exchange.body.cancel();
+  } catch {
+    // The discarded attempt may already be closed.
+  }
 }
 
 function promote(members: PublishedMember[], connectionId: string | undefined): PublishedMember[] {

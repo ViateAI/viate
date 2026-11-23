@@ -95,15 +95,29 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
         </div>
       ) : null}
       {users?.map((user) => (
-        <article className="resource" key={user.id}>
-          <div className="resource-main">
-            <div className="resource-title-row">
-              <h2>{user.email}</h2>
-              <StatusBadge tone={user.status === "active" ? "ok" : "warn"}>{user.status === "active" ? m.status_active() : m.status_disabled()}</StatusBadge>
+        <article className="resource user-card" key={user.id}>
+          <div className="user-card-head">
+            <div className="resource-main">
+              <div className="resource-title-row">
+                <h2>{user.email}</h2>
+                <StatusBadge tone={user.status === "active" ? "ok" : "warn"}>{user.status === "active" ? m.status_active() : m.status_disabled()}</StatusBadge>
+              </div>
+              <div className="meta">{user.name}</div>
+              <div className="meta">{m.users_balance({ amount: user.balanceUsd })}</div>
             </div>
-            <div className="meta">{user.name}</div>
-            <div className="meta">{m.users_balance({ amount: user.balanceUsd })}</div>
-            {openId === user.id ? (
+            <div className="row-actions">
+              <button
+                className="ghost"
+                type="button"
+                aria-expanded={openId === user.id}
+                onClick={() => setOpenId(openId === user.id ? null : user.id)}
+              >
+                {openId === user.id ? m.action_close() : m.action_manage()}
+              </button>
+            </div>
+          </div>
+          {openId === user.id ? (
+            <div className="user-editor">
               <UserEditor
                 user={user}
                 onError={setError}
@@ -112,13 +126,8 @@ export function UsersPage({ onNotice }: { onNotice: (value: string | null) => vo
                   await refresh();
                 }}
               />
-            ) : null}
-          </div>
-          <div className="row-actions">
-            <button className="ghost" type="button" onClick={() => setOpenId(openId === user.id ? null : user.id)}>
-              {openId === user.id ? m.action_close() : m.action_manage()}
-            </button>
-          </div>
+            </div>
+          ) : null}
         </article>
       ))}
     </section>

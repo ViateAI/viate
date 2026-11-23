@@ -23,20 +23,43 @@ export type AdminPlugin = {
     | "videoExtensions"
     | "videoResult"
   >;
-  credentialsForm: CredentialField[];
-  hasParseCredentials: boolean;
-  hasOAuth: boolean;
+  authMethods: AuthMethod[];
   hasKeepalive: boolean;
   hasSubscription: boolean;
   advertisedEndpointTypes: PublicEndpointType[];
 };
 
+export type CredentialFieldOption = {
+  label: string;
+  value: string;
+};
+
 export type CredentialField = {
   key: string;
   label: string;
-  kind: "string" | "secret" | "url";
+  description?: string;
+  placeholder?: string;
   required?: boolean;
-};
+  defaultValue?: string;
+} & (
+  | { kind: "string" | "secret" | "url" }
+  | { kind: "textarea"; rows?: number }
+  | { kind: "select"; options: CredentialFieldOption[] }
+);
+
+export type AuthMethod =
+  | {
+      id: string;
+      label: string;
+      type: "credentials";
+      fields: CredentialField[];
+    }
+  | {
+      id: string;
+      label: string;
+      type: "oauth";
+      fields?: CredentialField[];
+    };
 
 export type OperationLog = {
   id: number;
@@ -148,6 +171,9 @@ export type ClientApiKey = {
   createdAt: string;
   userId: string | null;
   channelId: string | null;
+  kind?: "client" | "bot";
+  externalRef?: string | null;
+  managed?: boolean;
 };
 
 export type ChannelRule =
@@ -192,11 +218,45 @@ export type LedgerEntry = {
   userId: string;
   deltaUsd: string;
   balanceAfterUsd: string;
-  reason: "grant" | "adjust" | "usage";
+  reason: "grant" | "adjust" | "usage" | "topup";
   requestId: string | null;
   note: string | null;
   createdAt: string;
 };
+
+export type PaymentOffer = {
+  usd: string;
+  money: string;
+  currency: string;
+  payType: string;
+};
+
+export type PaymentOrderView = {
+  id: string;
+  status: "pending" | "paid" | "failed";
+  displayStatus: "pending" | "paid" | "failed" | "expired";
+  creditUsd: string;
+  money: string;
+  currency: string;
+  payType: string;
+  createdAt: string;
+  expiresAt: string;
+  paidAt: string | null;
+  lastError: string | null;
+  payUrl: string | null;
+  payPayload: string | null;
+};
+
+export type PaymentCatalog = {
+  enabled: boolean;
+  problems: string[];
+  currency: string | null;
+  payType: string | null;
+  offers: PaymentOffer[];
+  orders: PaymentOrderView[];
+};
+
+export type PaymentNext = { kind: "link"; url: string } | { kind: "payload"; value: string };
 
 export type UserUsageRequest = {
   id: string;

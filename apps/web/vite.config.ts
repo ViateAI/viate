@@ -46,6 +46,8 @@ export default defineConfig({
     proxy: {
       "/api": { target: "http://127.0.0.1:4317", changeOrigin: false },
       "/health": { target: "http://127.0.0.1:4317", changeOrigin: false },
+      "/oauth": { target: "http://127.0.0.1:4317", changeOrigin: false },
+      "/.well-known": { target: "http://127.0.0.1:4317", changeOrigin: false },
     },
   },
   build: {

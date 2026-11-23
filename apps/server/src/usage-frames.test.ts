@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseAnthropicUsage, parseOpenAIChatUsage, parseOpenAIResponsesUsage } from "@viateai/sdk";
+import {
+  parseAnthropicUsage,
+  parseOpenAIChatUsage,
+  parseOpenAIResponsesUsage,
+  type RequestUsage,
+} from "@viateai/sdk";
 import { frameJson, frameSse, tapExchange } from "./usage-frames.js";
 
 describe("frameJson", () => {
@@ -127,6 +132,47 @@ describe("tapExchange", () => {
     const result = await tap;
     assert.equal(result.usage, null);
   });
+
+  it("parses OpenAI chat, Responses, and Anthropic usage when parseUsage is omitted", async () => {
+    const chat = await tapJson({ usage: { prompt_tokens: 3, completion_tokens: 4 } });
+    assert.deepEqual(chat.usage, {
+      inputTokens: 3,
+      outputTokens: 4,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    });
+
+    const responses = await tapJson({ usage: { input_tokens: 40, output_tokens: 2 } });
+    assert.deepEqual(responses.usage, {
+      inputTokens: 40,
+      outputTokens: 2,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    });
+
+    const anthropic = await tapJson({
+      type: "message_start",
+      message: { usage: { input_tokens: 7, output_tokens: 1 } },
+    });
+    assert.deepEqual(anthropic.usage, {
+      inputTokens: 7,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    });
+  });
+
+  it("does not replace an explicit null parser with the host fallback", async () => {
+    const { exchange, tap } = tapExchange({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: streamOf(JSON.stringify({ usage: { prompt_tokens: 9, completion_tokens: 4 } })),
+      parseUsage: () => null,
+    });
+    await new Response(exchange.body).text();
+    const result = await tap;
+    assert.equal(result.usage, null);
+  });
 });
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -136,4 +182,13 @@ function streamOf(text: string): ReadableStream<Uint8Array> {
       controller.close();
     },
   });
+}
+
+function tapJson(body: unknown): Promise<{ usage: RequestUsage | null }> {
+  const { exchange, tap } = tapExchange({
+    status: 200,
+    headers: { "content-type": "application/json" },
+    body: streamOf(JSON.stringify(body)),
+  });
+  return Promise.all([new Response(exchange.body).text(), tap]).then(([, result]) => result);
 }

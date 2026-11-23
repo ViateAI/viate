@@ -10,6 +10,7 @@ export class LoginRateLimiter {
 
   consume(key: string): { allowed: boolean; retryAfterSeconds: number } {
     const now = Date.now();
+    this.sweep(now);
     const current = this.attempts.get(key);
     if (!current || current.resetAt <= now) {
       this.attempts.set(key, { count: 1, resetAt: now + this.windowMs });
@@ -27,5 +28,13 @@ export class LoginRateLimiter {
 
   reset(key: string): void {
     this.attempts.delete(key);
+  }
+
+  private sweep(now: number): void {
+    for (const [key, entry] of this.attempts) {
+      if (entry.resetAt <= now) {
+        this.attempts.delete(key);
+      }
+    }
   }
 }

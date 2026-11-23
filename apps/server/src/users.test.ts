@@ -86,6 +86,30 @@ describe("AdminStore users", { concurrency: false }, () => {
     assert.equal(store.listLedger(user.id).length, 2);
   });
 
+  it("honors a caller-supplied in-flight limit", () => {
+    const user = store.createUser({ email: "cap@example.com", name: "Cap", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    store.admitUser(user.id, 1);
+    assert.throws(() => store.admitUser(user.id, 1), (error: unknown) => statusCode(error) === 402);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "cap-release",
+      inputTokens: 0,
+      outputTokens: 0,
+      inputNanoPerMillion: 0,
+      outputNanoPerMillion: 0,
+    });
+    store.admitUser(user.id, 1);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "cap-release-2",
+      inputTokens: 0,
+      outputTokens: 0,
+      inputNanoPerMillion: 0,
+      outputNanoPerMillion: 0,
+    });
+  });
+
   it("blocks admission at balance 0, at eight in-flight calls, and when the user is disabled", () => {
     const user = store.createUser({ email: "admit@example.com", name: "Admit", password: "password1" });
     assert.throws(
@@ -223,17 +247,17 @@ describe("AdminStore users", { concurrency: false }, () => {
     assert.equal(readBalanceNano(dataDir, user.id), 1_000_000_000 - 840_000 - 3_000_000);
   });
 
-  it("keeps unbound keys unbound and verifies a key bound to a user", () => {
+  it("requires a user on a client key and verifies the binding", () => {
     const user = store.createUser({ email: "keys@example.com", name: "Keys", password: "password1" });
-    const legacy = store.createApiKey("legacy");
-    assert.equal(legacy.apiKey.userId, null);
-    assert.equal(store.verifyApiKey(legacy.secret)?.userId, null);
+    assert.throws(
+      () => store.createApiKey("legacy", " "),
+      (error: unknown) => statusCode(error) === 400 && error instanceof Error && error.message === "user is required",
+    );
+    assert.throws(() => store.createApiKey("missing", "no-such-user"), (error: unknown) => statusCode(error) === 404);
 
     const bound = store.createApiKey("bound", user.id);
     assert.equal(store.verifyApiKey(bound.secret)?.userId, user.id);
     assert.equal(store.listApiKeys(user.id).some((key) => key.id === bound.apiKey.id), true);
-    assert.equal(store.listApiKeys(user.id).some((key) => key.id === legacy.apiKey.id), false);
-    assert.throws(() => store.createApiKey("missing", "no-such-user"), (error: unknown) => statusCode(error) === 404);
   });
 
   it("clears inflight admissions when the store opens again", async () => {
@@ -250,6 +274,84 @@ describe("AdminStore users", { concurrency: false }, () => {
         assert.equal(readInflight(dir, user.id), 0);
         reopened.admitUser(user.id);
         assert.equal(readInflight(dir, user.id), 1);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reserves a hold, rejects a second hold the balance cannot cover, and settles the actual charge", () => {
+    const user = store.createUser({ email: "hold@example.com", name: "Hold", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    store.admitUser(user.id, 8, { requestId: "hold-1", holdNano: 600_000_000 });
+    assert.equal(readBalanceNano(dataDir, user.id), 400_000_000);
+    assert.equal(readInflight(dataDir, user.id), 1);
+    assert.throws(
+      () => store.admitUser(user.id, 8, { requestId: "hold-2", holdNano: 600_000_000 }),
+      (error: unknown) =>
+        statusCode(error) === 402 && error instanceof Error && error.message === "insufficient balance",
+    );
+    assert.equal(readBalanceNano(dataDir, user.id), 400_000_000);
+    assert.equal(readInflight(dataDir, user.id), 1);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "hold-1",
+      inputTokens: 100_000,
+      outputTokens: 0,
+      inputNanoPerMillion: 1_000_000_000,
+      outputNanoPerMillion: 0,
+    });
+    assert.equal(readBalanceNano(dataDir, user.id), 900_000_000);
+    assert.equal(readInflight(dataDir, user.id), 0);
+    const usage = store.listLedger(user.id).filter((entry) => entry.reason === "usage");
+    assert.equal(usage.length, 1);
+    assert.equal(usage[0]?.deltaUsd, "-0.10");
+    assert.equal(usage[0]?.balanceAfterUsd, "0.90");
+    assert.equal(usage[0]?.requestId, "hold-1");
+  });
+
+  it("lets a charge above the hold go negative and then blocks admission", () => {
+    const user = store.createUser({ email: "hold-over@example.com", name: "Over", password: "password1" });
+    store.grantUsd(user.id, "1.00");
+    store.admitUser(user.id, 8, { requestId: "hold-over", holdNano: 100_000_000 });
+    assert.equal(readBalanceNano(dataDir, user.id), 900_000_000);
+    assert.equal(readInflight(dataDir, user.id), 1);
+    store.settleUsage({
+      userId: user.id,
+      requestId: "hold-over",
+      inputTokens: 2_000_000,
+      outputTokens: 0,
+      inputNanoPerMillion: 1_000_000_000,
+      outputNanoPerMillion: 0,
+    });
+    assert.equal(readBalanceNano(dataDir, user.id), -1_000_000_000);
+    assert.equal(readInflight(dataDir, user.id), 0);
+    assert.throws(
+      () => store.admitUser(user.id),
+      (error: unknown) =>
+        statusCode(error) === 402 && error instanceof Error && error.message === "insufficient balance",
+    );
+  });
+
+  it("returns an outstanding hold when the store opens again", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "viate-users-hold-reopen-"));
+    const opened = await AdminStore.open(dir);
+    try {
+      const user = opened.createUser({ email: "hold-crash@example.com", name: "HoldCrash", password: "password1" });
+      opened.grantUsd(user.id, "1.00");
+      const before = readBalanceNano(dir, user.id);
+      opened.admitUser(user.id, 8, { requestId: "hold-crash", holdNano: 600_000_000 });
+      assert.equal(readBalanceNano(dir, user.id), before - 600_000_000);
+      assert.equal(readInflight(dir, user.id), 1);
+      opened.close();
+      const reopened = await AdminStore.open(dir);
+      try {
+        assert.equal(readBalanceNano(dir, user.id), before);
+        assert.equal(readInflight(dir, user.id), 0);
+        reopened.admitUser(user.id, 8, { requestId: "hold-after", holdNano: 600_000_000 });
+        assert.equal(readBalanceNano(dir, user.id), before - 600_000_000);
       } finally {
         reopened.close();
       }
@@ -537,17 +639,22 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     assert.deepEqual(body.channels[0]?.models, []);
   });
 
-  it("leaves unbound keys unchanged, bills a bound chat once, and blocks an empty balance", async () => {
-    const unbound = store.createApiKey("unbound").secret;
+  it("rejects a detached key, bills a bound chat once, and blocks an empty balance", async () => {
+    const legacyUser = store.createUser({ email: "legacy-key@example.com", name: "Legacy", password: "password1" });
+    const legacy = store.createApiKey("unbound", legacyUser.id);
+    const detached = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    detached.prepare("UPDATE api_keys SET user_id = NULL WHERE id = ?").run(legacy.apiKey.id);
+    detached.close();
+    const beforeOpen = upstreamCalls;
     const openChat = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
-      headers: { authorization: `Bearer ${unbound}` },
+      headers: { authorization: `Bearer ${legacy.secret}` },
       payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
     });
-    assert.equal(openChat.statusCode, 200);
-    const unboundLogs = await waitForLogs(store, (rows) => rows.some((row) => row.apiKeyPrefix === unbound.slice(0, 12)));
-    assert.equal(unboundLogs.find((row) => row.apiKeyPrefix === unbound.slice(0, 12))?.userId ?? null, null);
+    assert.equal(openChat.statusCode, 403);
+    assert.equal(openChat.json().error.message, "api key is not bound to a user");
+    assert.equal(upstreamCalls, beforeOpen);
 
     const broke = store.createUser({ email: "broke@example.com", name: "Broke", password: "password1" });
     const brokeKey = store.createApiKey("broke", broke.id).secret;
@@ -685,6 +792,73 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     }
   });
 
+  it("bills every token at the context tier the prompt reaches", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "viate-users-context-tier-"));
+    const tierStore = await AdminStore.open(dir);
+    const tiers = [
+      {
+        atTokens: 200000,
+        inputNanoPerMillion: 4_000_000_000,
+        outputNanoPerMillion: 12_000_000_000,
+        cacheReadNanoPerMillion: 1_000_000_000,
+      },
+    ];
+    const tierUpstream = await listen((_req, res) => {
+      tiers[0]!.inputNanoPerMillion = 9;
+      tiers[0]!.outputNanoPerMillion = 9;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "chatcmpl-tier",
+          choices: [{ message: { content: "ok" } }],
+          usage: { prompt_tokens: 200000, completion_tokens: 1000 },
+        }),
+      );
+    });
+    enablePublished(tierStore, { baseUrl: tierUpstream.url, apiKey: "env-key" });
+    const user = tierStore.createUser({ email: "tier-http@example.com", name: "Tier", password: "password1" });
+    tierStore.grantUsd(user.id, "1.00");
+    const secret = tierStore.createApiKey("tier", user.id).secret;
+    const tierApp = await buildApp({
+      logger: false,
+      pluginManager: emptyPlugins(),
+      providers: [billingProvider()],
+      store: tierStore,
+      adminPassword: "correct-horse",
+      adminEnabled: true,
+      modelPrices: {
+        ready: true,
+        lookup(modelId: string) {
+          if (modelId !== "demo") {
+            return null;
+          }
+          return {
+            inputNanoPerMillion: 2_000_000_000,
+            outputNanoPerMillion: 6_000_000_000,
+            cacheReadNanoPerMillion: 500_000_000,
+            contextTiers: tiers,
+          };
+        },
+      },
+    });
+    try {
+      const billed = await tierApp.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${secret}` },
+        payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
+      });
+      assert.equal(billed.statusCode, 200);
+      await waitForUser(tierStore, user.id, "0.188");
+      assert.equal(readBalanceNano(dir, user.id), 1_000_000_000 - 800_000_000 - 12_000_000);
+    } finally {
+      await tierApp.close();
+      await tierUpstream.close();
+      tierStore.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not reserve inflight for an invalid JSON body or an unknown route", async () => {
     const user = store.createUser({ email: "stuck@example.com", name: "Stuck", password: "password1" });
     store.grantUsd(user.id, "1.00");
@@ -766,7 +940,7 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
     }
   });
 
-  it("proxies an unbound key when no price catalog is configured", async () => {
+  it("rejects a detached key when no price catalog is configured", async () => {
     const dir = await mkdtemp(join(tmpdir(), "viate-users-unbound-"));
     const openStore = await AdminStore.open(dir);
     const openUpstream = await listen((_req, res) => {
@@ -774,7 +948,11 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
       res.end(JSON.stringify({ id: "chatcmpl-open", choices: [{ message: { content: "ok" } }] }));
     });
     enablePublished(openStore, { baseUrl: openUpstream.url, apiKey: "env-key" });
-    const secret = openStore.createApiKey("plain").secret;
+    const user = openStore.createUser({ email: "plain@example.com", name: "Plain", password: "password1" });
+    const created = openStore.createApiKey("plain", user.id);
+    const detached = new DatabaseSync(join(dir, "viate.sqlite"));
+    detached.prepare("UPDATE api_keys SET user_id = NULL WHERE id = ?").run(created.apiKey.id);
+    detached.close();
     const openApp = await buildApp({
       logger: false,
       pluginManager: emptyPlugins(),
@@ -787,11 +965,11 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
       const response = await openApp.inject({
         method: "POST",
         url: "/v1/chat/completions",
-        headers: { authorization: `Bearer ${secret}` },
+        headers: { authorization: `Bearer ${created.secret}` },
         payload: { model: "demo", messages: [{ role: "user", content: "hi" }] },
       });
-      assert.equal(response.statusCode, 200);
-      assert.equal(response.json().id, "chatcmpl-open");
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.json().error.message, "api key is not bound to a user");
     } finally {
       await openApp.close();
       await openUpstream.close();
@@ -824,6 +1002,119 @@ describe("customer admin and portal HTTP", { concurrency: false }, () => {
   });
 });
 
+describe("GET /v1/user/balance", () => {
+  it("returns the key owner's USD wallet and does not charge", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-user-balance-"));
+    const store = await AdminStore.open(dataDir);
+    const owner = store.createUser({ email: "owner@example.com", name: "Owner", password: "password1" });
+    store.grantUsd(owner.id, "10.50");
+    const bearerKey = store.createApiKey("bearer", owner.id).secret;
+    const headerKey = store.createApiKey("header", owner.id).secret;
+
+    const zero = store.createUser({ email: "zero@example.com", name: "Zero", password: "password1" });
+    const zeroKey = store.createApiKey("zero", zero.id).secret;
+
+    const negative = store.createUser({ email: "negative@example.com", name: "Negative", password: "password1" });
+    const negativeKey = store.createApiKey("negative", negative.id).secret;
+    const negativeNano = -2_004_500_001;
+    writeBalanceNano(dataDir, negative.id, negativeNano);
+
+    const disabled = store.createUser({ email: "disabled@example.com", name: "Disabled", password: "password1" });
+    const disabledKey = store.createApiKey("disabled", disabled.id).secret;
+    store.updateUser(disabled.id, { status: "disabled" });
+
+    const gone = store.createUser({ email: "gone@example.com", name: "Gone", password: "password1" });
+    const goneKey = store.createApiKey("gone", gone.id);
+    retargetApiKeyUser(dataDir, goneKey.apiKey.id, "missing-user");
+
+    const unboundUser = store.createUser({ email: "unbound@example.com", name: "Unbound", password: "password1" });
+    const unbound = store.createApiKey("unbound", unboundUser.id);
+    retargetApiKeyUser(dataDir, unbound.apiKey.id, null);
+
+    const app = await buildApp({ logger: false, store });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    try {
+      const address = app.server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected tcp address");
+      }
+      const url = `http://127.0.0.1:${address.port}/v1/user/balance`;
+
+      const byBearer = await fetch(url, { headers: { authorization: `Bearer ${bearerKey}` } });
+      assert.equal(byBearer.status, 200);
+      assert.deepEqual(await byBearer.json(), { balanceUsd: "10.50" });
+
+      const byHeader = await fetch(url, { headers: { "x-api-key": headerKey } });
+      assert.equal(byHeader.status, 200);
+      assert.deepEqual(await byHeader.json(), { balanceUsd: "10.50" });
+
+      const zeroNano = readBalanceNano(dataDir, zero.id);
+      const zeroInflight = readInflight(dataDir, zero.id);
+      const zeroResponse = await fetch(url, { headers: { authorization: `Bearer ${zeroKey}` } });
+      assert.equal(zeroResponse.status, 200);
+      assert.deepEqual(await zeroResponse.json(), { balanceUsd: "0.00" });
+      assert.equal(readBalanceNano(dataDir, zero.id), zeroNano);
+      assert.equal(readInflight(dataDir, zero.id), zeroInflight);
+      assert.equal(zeroNano, 0);
+      assert.equal(zeroInflight, 0);
+
+      const negativeBefore = readBalanceNano(dataDir, negative.id);
+      const negativeInflight = readInflight(dataDir, negative.id);
+      const negativeResponse = await fetch(url, { headers: { authorization: `Bearer ${negativeKey}` } });
+      assert.equal(negativeResponse.status, 200);
+      assert.deepEqual(await negativeResponse.json(), { balanceUsd: "-2.004500001" });
+      assert.equal(readBalanceNano(dataDir, negative.id), negativeBefore);
+      assert.equal(readInflight(dataDir, negative.id), negativeInflight);
+      assert.equal(negativeBefore, negativeNano);
+
+      const disabledResponse = await fetch(url, { headers: { authorization: `Bearer ${disabledKey}` } });
+      assert.equal(disabledResponse.status, 403);
+      assert.deepEqual(await disabledResponse.json(), {
+        error: { message: "user disabled", type: "viate_error" },
+      });
+
+      const missingUser = await fetch(url, { headers: { authorization: `Bearer ${goneKey.secret}` } });
+      assert.equal(missingUser.status, 404);
+      assert.deepEqual(await missingUser.json(), {
+        error: { message: "user not found", type: "viate_error" },
+      });
+
+      const unboundResponse = await fetch(url, { headers: { authorization: `Bearer ${unbound.secret}` } });
+      assert.equal(unboundResponse.status, 403);
+      assert.deepEqual(await unboundResponse.json(), {
+        error: { message: "api key is not bound to a user", type: "viate_error" },
+      });
+
+      const missing = await fetch(url);
+      assert.equal(missing.status, 401);
+      assert.deepEqual(await missing.json(), {
+        error: { message: "invalid api key", type: "viate_error" },
+      });
+
+      const unknown = await fetch(url, { headers: { authorization: "Bearer viate_wrong" } });
+      assert.equal(unknown.status, 401);
+      assert.deepEqual(await unknown.json(), {
+        error: { message: "invalid api key", type: "viate_error" },
+      });
+
+      const login = await loginPortal(app, "owner@example.com", "password1");
+      const cookie = await fetch(url, { headers: { cookie: login.cookie } });
+      assert.equal(cookie.status, 401);
+      assert.deepEqual(await cookie.json(), {
+        error: { message: "invalid api key", type: "viate_error" },
+      });
+
+      assert.equal(store.listRequestLogs().length, 0);
+      assert.equal(store.getUser(owner.id)?.balanceUsd, "10.50");
+      assert.equal(readInflight(dataDir, owner.id), 0);
+    } finally {
+      await app.close();
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 function statusCode(error: unknown): number | undefined {
   if (typeof error === "object" && error !== null && "statusCode" in error) {
     return Number((error as { statusCode: unknown }).statusCode);
@@ -848,6 +1139,25 @@ function readBalanceNano(dataDir: string, userId: string): number {
       balance_nano: number | bigint;
     };
     return Number(row.balance_nano);
+  } finally {
+    db.close();
+  }
+}
+
+function writeBalanceNano(dataDir: string, userId: string, balanceNano: number): void {
+  const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
+  try {
+    db.prepare("UPDATE users SET balance_nano = ? WHERE id = ?").run(balanceNano, userId);
+  } finally {
+    db.close();
+  }
+}
+
+function retargetApiKeyUser(dataDir: string, apiKeyId: string, userId: string | null): void {
+  const db = new DatabaseSync(join(dataDir, "viate.sqlite"));
+  try {
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.prepare("UPDATE api_keys SET user_id = ? WHERE id = ?").run(userId, apiKeyId);
   } finally {
     db.close();
   }

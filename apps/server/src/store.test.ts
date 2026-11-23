@@ -57,6 +57,29 @@ describe("AdminStore connections", () => {
     assert.equal("apiKey" in listed[0]!, false);
   });
 
+  it("stores an explicit display label without replacing it when credentials omit one", () => {
+    const created = store.createConnection("openai-compatible", "  desk  ");
+    assert.equal(created.displayLabel, "desk");
+    assert.equal(created.hasCredentials, false);
+
+    const blank = store.createConnection("openai-compatible", "   ");
+    assert.equal(blank.displayLabel, blank.id);
+
+    const kept = store.putCredentials(created.id, { token: "a" });
+    assert.equal(kept.displayLabel, "desk");
+    assert.deepEqual(store.getCredentials(created.id), { token: "a" });
+
+    const renamed = store.setDisplayLabel(created.id, "  other  ");
+    assert.equal(renamed.displayLabel, "other");
+    assert.deepEqual(store.getCredentials(created.id), { token: "a" });
+
+    const cleared = store.setDisplayLabel(created.id, " ");
+    assert.equal(cleared.displayLabel, cleared.id);
+
+    const replaced = store.putCredentials(created.id, { token: "b" }, "next");
+    assert.equal(replaced.displayLabel, "next");
+  });
+
   it("rejects activating a connection without credentials", () => {
     const created = store.createConnection("openai-compatible");
     assert.throws(() => store.setActive(created.id, true), /no credentials/);
@@ -89,7 +112,9 @@ describe("AdminStore API keys", () => {
   });
 
   it("hashes client keys, lists prefixes only, verifies, and revokes", () => {
-    const created = store.createApiKey("cli");
+    const user = store.createUser({ email: "cli@example.com", name: "Cli", password: "password1" });
+    const created = store.createApiKey("cli", user.id);
+    assert.equal(created.apiKey.userId, user.id);
     assert.match(created.secret, /^viate_/);
     assert.equal(created.apiKey.prefix, created.secret.slice(0, 12));
     assert.equal(store.listApiKeys()[0]?.prefix, created.apiKey.prefix);
@@ -100,7 +125,10 @@ describe("AdminStore API keys", () => {
   });
 
   it("rejects empty names and missing ids", () => {
-    assert.throws(() => store.createApiKey(" "), /name is required/);
+    const user = store.createUser({ email: "blank@example.com", name: "Blank", password: "password1" });
+    assert.throws(() => store.createApiKey(" ", user.id), /name is required/);
+    assert.throws(() => store.createApiKey("orphan", " "), /user is required/);
+    assert.throws(() => store.createApiKey("missing-user", "no-such-user"), /user not found/);
     assert.throws(() => store.deleteApiKey("missing"), /api key not found/);
   });
 });
@@ -917,6 +945,99 @@ describe("AdminStore request log browsing", () => {
     });
     assert.equal(instant.requests, 1);
     assert.equal(instant.rpm, 1);
+  });
+});
+
+describe("AdminStore model prices", () => {
+  it("round-trips context tiers and reads corrupt JSON as no tiers", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "viate-price-tiers-"));
+    const created = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    created.exec(`
+      CREATE TABLE model_prices (
+        model_id TEXT PRIMARY KEY,
+        input_nano_per_million INTEGER NOT NULL,
+        output_nano_per_million INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        cache_read_nano_per_million INTEGER
+      );
+    `);
+    created.close();
+
+    const store = await AdminStore.open(dataDir);
+    try {
+      store.replaceModelPrices(
+        [
+          {
+            modelId: "grok-4.7",
+            inputNanoPerMillion: 2_000_000_000,
+            outputNanoPerMillion: 6_000_000_000,
+            cacheReadNanoPerMillion: 500_000_000,
+            contextTiers: [
+              {
+                atTokens: 200000,
+                inputNanoPerMillion: 4_000_000_000,
+                outputNanoPerMillion: 12_000_000_000,
+                cacheReadNanoPerMillion: 1_000_000_000,
+              },
+              {
+                atTokens: 1000000,
+                inputNanoPerMillion: 8_000_000_000,
+                outputNanoPerMillion: 24_000_000_000,
+              },
+            ],
+          },
+          {
+            modelId: "plain-4",
+            inputNanoPerMillion: 1_000_000_000,
+            outputNanoPerMillion: 2_000_000_000,
+          },
+        ],
+        "2026-04-01T00:00:00.000Z",
+      );
+      const listed = store.listModelPrices();
+      const grok = listed.rows.find((row) => row.modelId === "grok-4.7");
+      assert.deepEqual(grok?.contextTiers, [
+        {
+          atTokens: 200000,
+          inputNanoPerMillion: 4_000_000_000,
+          outputNanoPerMillion: 12_000_000_000,
+          cacheReadNanoPerMillion: 1_000_000_000,
+        },
+        {
+          atTokens: 1000000,
+          inputNanoPerMillion: 8_000_000_000,
+          outputNanoPerMillion: 24_000_000_000,
+        },
+      ]);
+      assert.equal("cacheReadNanoPerMillion" in (grok?.contextTiers?.[1] ?? {}), false);
+      const plain = listed.rows.find((row) => row.modelId === "plain-4");
+      assert.equal(plain?.inputNanoPerMillion, 1_000_000_000);
+      assert.equal("contextTiers" in (plain ?? {}), false);
+    } finally {
+      store.close();
+    }
+
+    const raw = new DatabaseSync(join(dataDir, "viate.sqlite"));
+    const stored = raw
+      .prepare("SELECT model_id, context_tiers FROM model_prices ORDER BY model_id")
+      .all() as Array<{ model_id: string; context_tiers: string | null }>;
+    assert.equal(stored.find((row) => row.model_id === "plain-4")?.context_tiers, null);
+    const grokJson = stored.find((row) => row.model_id === "grok-4.7")?.context_tiers;
+    assert.equal(typeof grokJson, "string");
+    assert.notEqual(grokJson, "[]");
+    raw.prepare("UPDATE model_prices SET context_tiers = ? WHERE model_id = ?").run("{", "grok-4.7");
+    raw.close();
+
+    const reopened = await AdminStore.open(dataDir);
+    try {
+      const again = reopened.listModelPrices().rows.find((row) => row.modelId === "grok-4.7");
+      assert.equal(again?.inputNanoPerMillion, 2_000_000_000);
+      assert.equal(again?.cacheReadNanoPerMillion, 500_000_000);
+      assert.equal("contextTiers" in (again ?? {}), false);
+    } finally {
+      reopened.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 });
 

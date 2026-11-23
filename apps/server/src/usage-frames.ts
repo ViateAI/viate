@@ -1,4 +1,10 @@
-import type { HttpExchange, RequestUsage } from "@viateai/sdk";
+import {
+  parseAnthropicUsage,
+  parseOpenAIChatUsage,
+  parseOpenAIResponsesUsage,
+  type HttpExchange,
+  type RequestUsage,
+} from "@viateai/sdk";
 
 export const PAYLOAD_MAX_BYTES = 1_048_576;
 
@@ -113,6 +119,11 @@ async function consumeTap(
     } catch {
       usage = null;
     }
+  } else {
+    usage =
+      parseOpenAIChatUsage(parsedFrames) ??
+      parseOpenAIResponsesUsage(parsedFrames) ??
+      parseAnthropicUsage(parsedFrames);
   }
   let responseBody: unknown = text;
   if (!sse) {

@@ -45,6 +45,12 @@ h2 {
   letter-spacing: -0.02em;
 }
 
+h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;
@@ -88,8 +94,8 @@ button.primary {
 }
 
 button.primary:hover:not(:disabled) {
-  background: #262626;
-  border-color: #262626;
+  background: color-mix(in srgb, var(--primary) 88%, var(--background));
+  border-color: color-mix(in srgb, var(--primary) 88%, var(--background));
 }
 
 button.danger {
@@ -158,6 +164,7 @@ button.balance-link {
   height: 6px;
   border-radius: 99px;
   background: var(--accent);
+  border: 1px solid var(--border);
   overflow: hidden;
 }
 
@@ -392,6 +399,12 @@ textarea {
   gap: 4px;
 }
 
+.panel-header p {
+  color: var(--muted-foreground);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
 .resource {
   padding: 14px 16px;
   display: flex;
@@ -400,6 +413,29 @@ textarea {
   align-items: flex-start;
   min-width: 0;
   max-width: 100%;
+}
+
+.resource.is-editing {
+  border-color: var(--foreground);
+}
+
+.user-card {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.user-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.user-editor {
+  width: 100%;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
 }
 
 .resource-main {
@@ -720,6 +756,29 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.price-tier {
+  display: block;
+}
+
+.price-tier + .price-tier {
+  margin-top: 4px;
+}
+
+.price-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.price-pager .meta {
+  display: block;
+}
+
+.req-table tr.is-overridden td:first-child {
+  box-shadow: inset 3px 0 0 var(--foreground);
+}
+
 .published-row {
   display: grid;
   gap: 8px;
@@ -776,21 +835,21 @@ textarea {
 }
 
 .banner.error, .status.error, .badge.error {
-  background: #fef2f2;
+  background: color-mix(in srgb, var(--destructive) 6%, var(--background));
   color: var(--destructive);
-  border-color: #f4d6d2;
+  border-color: color-mix(in srgb, var(--destructive) 18%, var(--background));
 }
 
 .banner.ok, .status.ok, .badge.ok {
-  background: #f0fdf4;
+  background: color-mix(in srgb, var(--ok) 6%, var(--background));
   color: var(--ok);
-  border-color: #d7edd9;
+  border-color: color-mix(in srgb, var(--ok) 16%, var(--background));
 }
 
 .banner.warn, .status.warn, .badge.warn {
-  background: #fffbeb;
+  background: color-mix(in srgb, var(--warn) 8%, var(--background));
   color: var(--warn);
-  border-color: #f1e4b3;
+  border-color: color-mix(in srgb, var(--warn) 28%, var(--background));
 }
 
 .badge {
@@ -838,7 +897,7 @@ textarea {
 }
 
 form.panel .primary,
-form.form > button.primary {
+form.form > button {
   width: fit-content;
 }
 
@@ -847,6 +906,10 @@ label {
   gap: 6px;
   font-weight: 500;
   font-size: 0.85rem;
+}
+
+.field-hint {
+  font-weight: 400;
 }
 
 .segmented {
@@ -872,7 +935,8 @@ label {
   border-left: 1px solid var(--border);
 }
 
-.segmented button[aria-pressed="true"] {
+.segmented button[aria-pressed="true"],
+.segmented button[aria-selected="true"] {
   background: var(--primary);
   color: var(--primary-foreground);
 }
@@ -913,8 +977,15 @@ label {
 
 .secret-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.secret-row > div {
+  flex: 1 1 16rem;
+  min-width: 0;
 }
 
 .secret-row code {
@@ -1033,15 +1104,15 @@ label {
   background: var(--accent);
 }
 
-.req-table tr[role="button"] {
+.req-table tbody tr[data-request-id] {
   cursor: pointer;
 }
 
-.req-table tr[role="button"]:hover td {
+.req-table tbody tr[data-request-id]:hover td {
   background: var(--muted);
 }
 
-.req-table tr[role="button"]:focus-visible {
+.req-table tbody tr[data-request-id]:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
@@ -1076,18 +1147,19 @@ label {
 .req-metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1px;
   border: 1px solid var(--border);
   border-radius: calc(var(--radius) + 2px);
   overflow: hidden;
-  background: var(--background);
+  background: var(--border);
 }
 
 .req-metric {
   display: grid;
   gap: 4px;
   padding: 12px 14px;
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  border: 0;
   min-width: 0;
 }
 
@@ -1107,6 +1179,7 @@ label {
   height: 8px;
   border-radius: 99px;
   background: var(--accent);
+  border: 1px solid var(--border);
   overflow: hidden;
   flex: 0 0 72px;
 }
@@ -1180,6 +1253,53 @@ label {
   display: none;
 }
 
+.mobile-more-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+  background: rgb(10 10 10 / 42%);
+}
+
+.mobile-more-sheet {
+  width: 100%;
+  max-height: min(70dvh, 480px);
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  background: var(--background);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: 16px 16px 0 0;
+}
+
+.mobile-more-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mobile-more-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.mobile-more-grid button {
+  min-height: 44px;
+  justify-content: flex-start;
+}
+
+.mobile-more-grid button[aria-current="page"] {
+  background: var(--accent);
+  border-color: var(--foreground);
+  color: var(--foreground);
+}
+
 @media (max-width: 1100px) {
   .models-workspace {
     grid-template-columns: 1fr;
@@ -1193,7 +1313,7 @@ label {
 
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
-    padding-bottom: calc(220px + env(safe-area-inset-bottom));
+    padding-bottom: calc(68px + env(safe-area-inset-bottom));
   }
 
   .app-shell.portal-shell {
@@ -1212,25 +1332,44 @@ label {
 
   .mobile-nav {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     position: fixed;
     left: 0;
     right: 0;
     bottom: 0;
+    height: calc(56px + env(safe-area-inset-bottom));
     background: var(--background);
     border-top: 1px solid var(--border);
-    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    padding: 0 4px env(safe-area-inset-bottom);
     z-index: 5;
+  }
+
+  .portal-shell .mobile-nav {
+    grid-template-columns: repeat(3, 1fr);
+    height: auto;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   }
 
   .mobile-nav button,
   .mobile-nav a {
-    min-height: 52px;
+    min-height: 56px;
+    height: 56px;
     border: 0;
     background: transparent;
-    font-size: 0.8rem;
+    font-size: 0.72rem;
+    line-height: 1.15;
+    white-space: normal;
     color: var(--muted-foreground);
     text-decoration: none;
+    padding: 2px 4px;
+  }
+
+  .portal-shell .mobile-nav button,
+  .portal-shell .mobile-nav a {
+    min-height: 52px;
+    height: auto;
+    font-size: 0.8rem;
+    padding: 0 8px;
   }
 
   .mobile-nav a {
@@ -1258,7 +1397,7 @@ label {
   }
 
   .model-scroll {
-    max-height: calc(100dvh - 460px);
+    max-height: calc(100dvh - 280px);
   }
 
   .models-pane-tools,
@@ -1274,7 +1413,13 @@ label {
 
   .custom-model-form {
     flex-direction: column;
+    flex-wrap: nowrap;
     align-items: stretch;
+  }
+
+  .custom-model-form label,
+  .endpoint-fieldset {
+    flex: none;
   }
 
   .custom-model-form button,
@@ -1316,6 +1461,35 @@ label {
     scroll-behavior: auto !important;
     transition: none !important;
   }
+}
+
+.portal-pay h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.portal-pay-offers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.portal-pay-offers button {
+  display: grid;
+  gap: 2px;
+  text-align: start;
+}
+
+.portal-pay-offers button[aria-pressed="true"] {
+  border-color: var(--foreground);
+}
+
+.portal-pay-payload {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
 }
 
 .portal-balance {

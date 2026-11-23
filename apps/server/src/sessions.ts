@@ -7,6 +7,7 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 export type SessionRecord = {
   id: string;
   csrf: string;
+  createdAt: number;
   expiresAt: number;
   subject?: string;
 };
@@ -16,10 +17,12 @@ export class SessionStore {
 
   create(subject?: string): SessionRecord {
     this.purge();
+    const now = Date.now();
     const record: SessionRecord = {
       id: randomBytes(32).toString("hex"),
       csrf: randomBytes(32).toString("hex"),
-      expiresAt: Date.now() + SESSION_TTL_MS,
+      createdAt: now,
+      expiresAt: now + SESSION_TTL_MS,
       ...(subject === undefined ? {} : { subject }),
     };
     this.sessions.set(record.id, record);
@@ -79,8 +82,16 @@ export function parseCookies(header: string | string[] | undefined): Record<stri
   return cookies;
 }
 
-export function cookieHeader(name: string, value: string, maxAgeSeconds: number): string {
-  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}`;
+export function cookieHeader(
+  name: string,
+  value: string,
+  maxAgeSeconds: number,
+  attributes?: { path?: string; sameSite?: "Strict" | "Lax"; secure?: boolean },
+): string {
+  const path = attributes?.path ?? "/";
+  const sameSite = attributes?.sameSite ?? "Strict";
+  const secure = attributes?.secure ? "; Secure" : "";
+  return `${name}=${encodeURIComponent(value)}; Path=${path}; HttpOnly; SameSite=${sameSite}; Max-Age=${maxAgeSeconds}${secure}`;
 }
 
 export function clearCookieHeader(name: string): string {

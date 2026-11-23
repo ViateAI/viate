@@ -1,5 +1,5 @@
 import { ParaglideMessage } from "@inlang/paraglide-js-react";
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   api,
   isApiError,
@@ -13,6 +13,7 @@ import {
   type ConnectionModel,
   type ConnectionModelCatalog,
   type PublicEndpointType,
+  type AuthMethod,
   type CredentialField,
   type GatewayUser,
   type OAuthStart,
@@ -21,17 +22,17 @@ import {
 } from "./api";
 import { balanceSummary, BalancesPage } from "./balances";
 import { ChannelsPage } from "./channels";
+import { ConfirmDialog, useDialogDismiss } from "./dialog";
 import { formatDateTime } from "./format";
 import { LocaleSwitch } from "./locale-switch";
 import { m } from "./paraglide/messages.js";
+import { OAuthClientsPage } from "./oauth-clients";
 import { PortalApp } from "./portal";
 import { PricesPage } from "./prices";
 import { RequestsPage } from "./requests";
 import { UsersPage } from "./users";
 
-type Page = "plugins" | "connections" | "balances" | "models" | "prices" | "channels" | "users" | "api-keys" | "requests" | "logs";
-
-type CredentialMode = "form" | "paste" | "oauth";
+type Page = "plugins" | "connections" | "balances" | "models" | "prices" | "channels" | "users" | "oauth-clients" | "api-keys" | "requests" | "logs";
 
 function keepaliveLabel(status: Connection["keepaliveStatus"]): string {
   if (status === "ok") return m.keepalive_ok();
@@ -47,12 +48,6 @@ function logActionLabel(action: string): string {
   return action;
 }
 
-function credentialModeLabel(mode: CredentialMode): string {
-  if (mode === "form") return m.mode_form();
-  if (mode === "paste") return m.mode_paste();
-  return m.mode_oauth();
-}
-
 const PUBLIC_ENDPOINT_TYPES: PublicEndpointType[] = ["openai", "openai-response", "openai-image", "openai-audio", "openai-video"];
 
 function endpointLabel(type: PublicEndpointType): string {
@@ -63,12 +58,16 @@ function endpointLabel(type: PublicEndpointType): string {
   return m.endpoint_video();
 }
 
-function credentialModes(provider: AdminPlugin | null): CredentialMode[] {
-  const modes: CredentialMode[] = [];
-  if (provider?.credentialsForm.length) modes.push("form");
-  if (provider?.hasParseCredentials) modes.push("paste");
-  if (provider?.hasOAuth) modes.push("oauth");
-  return modes;
+function loadedPlugins(plugins: AdminPlugin[]): AdminPlugin[] {
+  return plugins.filter((plugin) => plugin.id && plugin.status === "active" && !plugin.error);
+}
+
+function defaultFieldValues(method: AuthMethod | undefined): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const field of method?.fields ?? []) {
+    if (field.defaultValue !== undefined) next[field.key] = field.defaultValue;
+  }
+  return next;
 }
 
 export function App() {
@@ -201,12 +200,54 @@ function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
   );
 }
 
+const ADMIN_PAGES: Page[] = ["plugins", "connections", "balances", "models", "prices", "channels", "users", "oauth-clients", "api-keys", "requests", "logs"];
+const MORE_PAGES: Page[] = ["balances", "prices", "channels", "users", "oauth-clients", "api-keys", "logs"];
+
+function normalizePath(pathname: string): string {
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
+function pageFromPathname(pathname: string): Page {
+  const path = normalizePath(pathname);
+  if (path === "/" || path === "/admin") return "plugins";
+  if (path.startsWith("/admin/")) {
+    const page = path.slice("/admin/".length);
+    if ((ADMIN_PAGES as readonly string[]).includes(page)) return page as Page;
+  }
+  return "plugins";
+}
+
+function pagePath(page: Page): string {
+  return page === "plugins" ? "/admin" : `/admin/${page}`;
+}
+
 function Console({ onLogout }: { onLogout: () => void }) {
-  const [page, setPage] = useState<Page>("plugins");
+  const [page, setPage] = useState<Page>(() => pageFromPathname(window.location.pathname));
   const [notice, setNotice] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
   const [balanceConnectionId, setBalanceConnectionId] = useState<string | null>(null);
   const [editConnectionId, setEditConnectionId] = useState<string | null>(null);
+
+  function openPage(next: Page) {
+    setNotice(null);
+    setPage(next);
+    setMoreOpen(false);
+    const target = pagePath(next);
+    if (normalizePath(window.location.pathname) !== target) {
+      history.pushState(null, "", target);
+    }
+  }
+
+  useEffect(() => {
+    function onPop() {
+      setPage(pageFromPathname(window.location.pathname));
+      setNotice(null);
+      setMoreOpen(false);
+    }
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   return (
     <div className="app-shell">
@@ -219,16 +260,17 @@ function Console({ onLogout }: { onLogout: () => void }) {
           </div>
         </div>
         <nav className="nav" aria-label={m.nav_label()}>
-          <NavButton page="plugins" current={page} onClick={setPage}>{m.nav_plugins()}</NavButton>
-          <NavButton page="connections" current={page} onClick={setPage}>{m.nav_connections()}</NavButton>
-          <NavButton page="balances" current={page} onClick={setPage}>{m.nav_balances()}</NavButton>
-          <NavButton page="models" current={page} onClick={setPage}>{m.nav_models()}</NavButton>
-          <NavButton page="prices" current={page} onClick={setPage}>{m.nav_prices()}</NavButton>
-          <NavButton page="channels" current={page} onClick={setPage}>{m.nav_channels()}</NavButton>
-          <NavButton page="users" current={page} onClick={setPage}>{m.nav_users()}</NavButton>
-          <NavButton page="api-keys" current={page} onClick={setPage}>{m.nav_api_keys()}</NavButton>
-          <NavButton page="requests" current={page} onClick={setPage}>{m.nav_requests()}</NavButton>
-          <NavButton page="logs" current={page} onClick={setPage}>{m.nav_logs()}</NavButton>
+          <NavButton page="plugins" current={page} onClick={openPage}>{m.nav_plugins()}</NavButton>
+          <NavButton page="connections" current={page} onClick={openPage}>{m.nav_connections()}</NavButton>
+          <NavButton page="balances" current={page} onClick={openPage}>{m.nav_balances()}</NavButton>
+          <NavButton page="models" current={page} onClick={openPage}>{m.nav_models()}</NavButton>
+          <NavButton page="prices" current={page} onClick={openPage}>{m.nav_prices()}</NavButton>
+          <NavButton page="channels" current={page} onClick={openPage}>{m.nav_channels()}</NavButton>
+          <NavButton page="users" current={page} onClick={openPage}>{m.nav_users()}</NavButton>
+          <NavButton page="oauth-clients" current={page} onClick={openPage}>{m.nav_oauth_clients()}</NavButton>
+          <NavButton page="api-keys" current={page} onClick={openPage}>{m.nav_api_keys()}</NavButton>
+          <NavButton page="requests" current={page} onClick={openPage}>{m.nav_requests()}</NavButton>
+          <NavButton page="logs" current={page} onClick={openPage}>{m.nav_logs()}</NavButton>
         </nav>
         <div className="sidebar-footer">
           <button
@@ -270,11 +312,11 @@ function Console({ onLogout }: { onLogout: () => void }) {
             onNotice={setNotice}
             onManageModels={(connectionId) => {
               setSelectedConnectionId(connectionId);
-              setPage("models");
+              openPage("models");
             }}
             onOpenBalance={(connectionId) => {
               setBalanceConnectionId(connectionId);
-              setPage("balances");
+              openPage("balances");
             }}
             editConnectionId={editConnectionId}
             onEditHandled={() => setEditConnectionId(null)}
@@ -285,7 +327,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
             focusId={balanceConnectionId}
             onConfigure={(connectionId) => {
               setEditConnectionId(connectionId);
-              setPage("connections");
+              openPage("connections");
             }}
           />
         ) : null}
@@ -299,22 +341,67 @@ function Console({ onLogout }: { onLogout: () => void }) {
         {page === "prices" ? <PricesPage onNotice={setNotice} /> : null}
         {page === "channels" ? <ChannelsPage onNotice={setNotice} /> : null}
         {page === "users" ? <UsersPage onNotice={setNotice} /> : null}
+        {page === "oauth-clients" ? <OAuthClientsPage onNotice={setNotice} /> : null}
         {page === "api-keys" ? <ApiKeysPage onNotice={setNotice} /> : null}
         {page === "requests" ? <RequestsPage /> : null}
         {page === "logs" ? <LogsPage /> : null}
       </main>
       <nav className="mobile-nav" aria-label={m.nav_label()}>
-        <NavButton page="plugins" current={page} onClick={setPage}>{m.nav_plugins()}</NavButton>
-        <NavButton page="connections" current={page} onClick={setPage}>{m.nav_connections()}</NavButton>
-        <NavButton page="balances" current={page} onClick={setPage}>{m.nav_balances()}</NavButton>
-        <NavButton page="models" current={page} onClick={setPage}>{m.nav_models()}</NavButton>
-        <NavButton page="prices" current={page} onClick={setPage}>{m.nav_prices()}</NavButton>
-        <NavButton page="channels" current={page} onClick={setPage}>{m.nav_channels()}</NavButton>
-        <NavButton page="users" current={page} onClick={setPage}>{m.nav_users()}</NavButton>
-        <NavButton page="api-keys" current={page} onClick={setPage}>{m.nav_api_keys()}</NavButton>
-        <NavButton page="requests" current={page} onClick={setPage}>{m.nav_requests()}</NavButton>
-        <NavButton page="logs" current={page} onClick={setPage}>{m.nav_logs()}</NavButton>
+        <NavButton page="plugins" current={page} onClick={openPage}>{m.nav_plugins()}</NavButton>
+        <NavButton page="connections" current={page} onClick={openPage}>{m.nav_connections()}</NavButton>
+        <NavButton page="models" current={page} onClick={openPage}>{m.nav_models()}</NavButton>
+        <NavButton page="requests" current={page} onClick={openPage}>{m.nav_requests()}</NavButton>
+        <button
+          type="button"
+          aria-expanded={moreOpen}
+          aria-current={MORE_PAGES.includes(page) ? "page" : undefined}
+          onClick={() => setMoreOpen(true)}
+        >
+          {m.nav_more()}
+        </button>
       </nav>
+      {moreOpen ? <MobileMoreSheet page={page} onClose={() => setMoreOpen(false)} onOpen={openPage} /> : null}
+    </div>
+  );
+}
+
+function MobileMoreSheet({
+  page,
+  onClose,
+  onOpen,
+}: {
+  page: Page;
+  onClose: () => void;
+  onOpen: (page: Page) => void;
+}) {
+  const titleId = useId();
+  const panelRef = useDialogDismiss<HTMLDivElement>(onClose);
+  return (
+    <div
+      className="mobile-more-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div ref={panelRef} className="mobile-more-sheet" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+        <div className="mobile-more-head">
+          <h2 id={titleId}>{m.nav_more()}</h2>
+          <button type="button" onClick={onClose}>{m.action_close()}</button>
+        </div>
+        <div className="mobile-more-grid">
+          {MORE_PAGES.map((item) => (
+            <button
+              key={item}
+              type="button"
+              aria-current={page === item ? "page" : undefined}
+              onClick={() => onOpen(item)}
+            >
+              {navLabel(item)}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -331,10 +418,32 @@ function NavButton({
   children: string;
 }) {
   return (
-    <button type="button" aria-current={current === page ? "page" : undefined} onClick={() => onClick(page)}>
+    <a
+      href={pagePath(page)}
+      aria-current={current === page ? "page" : undefined}
+      onClick={(event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        event.preventDefault();
+        onClick(page);
+      }}
+    >
       {children}
-    </button>
+    </a>
   );
+}
+
+function navLabel(page: Page): string {
+  if (page === "plugins") return m.nav_plugins();
+  if (page === "connections") return m.nav_connections();
+  if (page === "balances") return m.nav_balances();
+  if (page === "models") return m.nav_models();
+  if (page === "prices") return m.nav_prices();
+  if (page === "channels") return m.nav_channels();
+  if (page === "users") return m.nav_users();
+  if (page === "oauth-clients") return m.nav_oauth_clients();
+  if (page === "api-keys") return m.nav_api_keys();
+  if (page === "requests") return m.nav_requests();
+  return m.nav_logs();
 }
 
 function pageLabel(page: Page): string {
@@ -345,6 +454,7 @@ function pageLabel(page: Page): string {
   if (page === "prices") return m.page_prices();
   if (page === "channels") return m.page_channels();
   if (page === "users") return m.page_users();
+  if (page === "oauth-clients") return m.page_oauth_clients();
   if (page === "api-keys") return m.page_api_keys();
   if (page === "requests") return m.page_requests();
   return m.page_logs();
@@ -358,6 +468,7 @@ function pageDescription(page: Page): string {
   if (page === "prices") return m.page_prices_desc();
   if (page === "channels") return m.page_channels_desc();
   if (page === "users") return m.page_users_desc();
+  if (page === "oauth-clients") return m.page_oauth_clients_desc();
   if (page === "api-keys") return m.page_api_keys_desc();
   if (page === "requests") return m.page_requests_desc();
   return m.page_logs_desc();
@@ -786,20 +897,21 @@ function ConnectionsPage({
         );
       })}
       {creating ? (
-        <ProviderPicker
+        <ConnectionDialog
+          existing={null}
           plugins={plugins ?? []}
           onCancel={() => setCreating(false)}
-          onCreated={async (connection) => {
+          onSaved={async () => {
             await refresh();
             setCreating(false);
-            setEditing(connection);
+            onNotice(m.connections_saved());
           }}
         />
       ) : null}
       {editing ? (
-        <ConnectionForm
+        <ConnectionDialog
           existing={editing}
-          provider={plugins?.find((plugin) => plugin.id === editing.providerId) ?? null}
+          plugins={plugins ?? []}
           onCancel={() => setEditing(null)}
           onSaved={async () => {
             await refresh();
@@ -831,192 +943,398 @@ function ConnectionsPage({
   );
 }
 
-function ProviderPicker({
+function ConnectionDialog({
+  existing,
   plugins,
   onCancel,
-  onCreated,
+  onSaved,
 }: {
+  existing: Connection | null;
   plugins: AdminPlugin[];
   onCancel: () => void;
-  onCreated: (connection: Connection) => Promise<void>;
+  onSaved: () => Promise<void>;
 }) {
-  const loaded = plugins.filter((plugin) => plugin.id && plugin.status === "active" && !plugin.error);
-  const [providerId, setProviderId] = useState(loaded[0]?.id ?? "");
+  const loaded = loadedPlugins(plugins);
+  const initialProviderId = existing?.providerId ?? loaded[0]?.id ?? "";
+  const initialMethod = plugins.find((plugin) => plugin.id === initialProviderId)?.authMethods[0];
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [methodId, setMethodId] = useState(initialMethod?.id ?? "");
+  const [displayLabel, setDisplayLabel] = useState(
+    existing && existing.displayLabel !== existing.id ? existing.displayLabel : "",
+  );
+  const [values, setValues] = useState<Record<string, string>>(() => defaultFieldValues(initialMethod));
+  const [oauth, setOAuth] = useState<OAuthStart | null>(null);
+  const [pasteCode, setPasteCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [connId, setConnId] = useState<string | null>(existing?.id ?? null);
+  const connIdRef = useRef<string | null>(existing?.id ?? null);
+  const createdHereRef = useRef(false);
+  const closedRef = useRef(false);
+  const busyRef = useRef(false);
+  const finishingRef = useRef(false);
+  const titleId = useId();
+  const selectedProviderId = existing?.providerId ?? providerId;
+  const plugin = plugins.find((item) => item.id === selectedProviderId) ?? null;
+  const methods = plugin?.authMethods ?? [];
+  const method = methods.find((item) => item.id === methodId) ?? methods[0];
+  const credentialFields = method?.type === "credentials" ? method.fields : [];
+  const hasCredentialInput = credentialFields.some((field) => (values[field.key] ?? "") !== (field.defaultValue ?? ""));
+  const enforceRequired = method?.type === "oauth" || !existing?.hasCredentials || hasCredentialInput;
+  const title = existing
+    ? m.credentials_title({
+        name: (existing.displayLabel !== existing.id ? existing.displayLabel : "") || existing.providerId,
+      })
+    : m.connections_new();
+
+  useEffect(() => {
+    if (existing || providerId) return;
+    const first = loadedPlugins(plugins)[0];
+    if (!first?.id) return;
+    setProviderId(first.id);
+    setMethodId(first.authMethods[0]?.id ?? "");
+    setValues(defaultFieldValues(first.authMethods[0]));
+  }, [existing, providerId, plugins]);
+
+  function markBusy(value: boolean) {
+    busyRef.current = value;
+    setBusy(value);
+  }
+
+  async function dismiss() {
+    if (closedRef.current || busyRef.current || finishingRef.current) return;
+    closedRef.current = true;
+    const id = connIdRef.current;
+    if (createdHereRef.current && id) {
+      try {
+        await api(`/api/admin/connections/${id}?unconfigured=1`, { method: "DELETE" });
+      } catch {
+        // The dialog still closes if cleanup fails.
+      }
+    }
+    onCancel();
+  }
+
+  async function finishSaved() {
+    if (finishingRef.current) return;
+    finishingRef.current = true;
+    createdHereRef.current = false;
+    await onSaved();
+  }
+
+  const panelRef = useDialogDismiss<HTMLFormElement>(() => {
+    void dismiss();
+  });
+
+  function selectProvider(id: string) {
+    const nextPlugin = plugins.find((item) => item.id === id);
+    const nextMethod = nextPlugin?.authMethods[0];
+    setProviderId(id);
+    setMethodId(nextMethod?.id ?? "");
+    setValues(defaultFieldValues(nextMethod));
+    setOAuth(null);
+    setPasteCode("");
+    setError(null);
+  }
+
+  function selectMethod(id: string) {
+    const next = methods.find((item) => item.id === id);
+    setMethodId(id);
+    setValues(defaultFieldValues(next));
+    setOAuth(null);
+    setPasteCode("");
+    setError(null);
+  }
+
+  async function saveCredentials() {
+    if (busyRef.current || !selectedProviderId) return;
+    const label = displayLabel.trim();
+    const id = connIdRef.current;
+    if (!method || method.type !== "credentials") {
+      if (!id) return;
+      markBusy(true);
+      setError(null);
+      try {
+        await api(`/api/admin/connections/${id}`, {
+          method: "PUT",
+          body: JSON.stringify({ displayLabel: label }),
+        });
+        await finishSaved();
+      } catch (err) {
+        setError(isApiError(err) ? err.message : m.error_save());
+        markBusy(false);
+      }
+      return;
+    }
+    if (existing?.hasCredentials && !hasCredentialInput) {
+      if (!id) return;
+      markBusy(true);
+      setError(null);
+      try {
+        await api(`/api/admin/connections/${id}`, {
+          method: "PUT",
+          body: JSON.stringify({ displayLabel: label }),
+        });
+        await finishSaved();
+      } catch (err) {
+        setError(isApiError(err) ? err.message : m.error_save());
+        markBusy(false);
+      }
+      return;
+    }
+    if (method.fields.some((field) => field.required && !(values[field.key] ?? "").trim())) {
+      setError(m.error_credentials_required());
+      return;
+    }
+    const credentials: Record<string, string> = {};
+    for (const field of method.fields) credentials[field.key] = values[field.key] ?? "";
+    markBusy(true);
+    setError(null);
+    try {
+      if (id === null) {
+        await api("/api/admin/connections", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId: selectedProviderId,
+            ...(label ? { displayLabel: label } : {}),
+            credentials,
+          }),
+        });
+      } else {
+        await api(`/api/admin/connections/${id}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            ...(label ? { displayLabel: label } : {}),
+            credentials,
+          }),
+        });
+      }
+      await finishSaved();
+    } catch (err) {
+      setError(isApiError(err) ? err.message : m.error_save());
+      markBusy(false);
+    }
+  }
+
+  async function connect() {
+    if (busyRef.current || !selectedProviderId || method?.type !== "oauth") return;
+    const fields = method.fields ?? [];
+    if (fields.some((field) => field.required && !(values[field.key] ?? "").trim())) {
+      setError(m.error_credentials_required());
+      return;
+    }
+    const label = displayLabel.trim();
+    const input: Record<string, string> = {};
+    for (const field of fields) input[field.key] = values[field.key] ?? "";
+    markBusy(true);
+    setError(null);
+    try {
+      let id = connIdRef.current;
+      if (id === null) {
+        const created = await api<{ connection: Connection }>("/api/admin/connections", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId: selectedProviderId,
+            ...(label ? { displayLabel: label } : {}),
+          }),
+        });
+        id = created.connection.id;
+        connIdRef.current = id;
+        createdHereRef.current = true;
+        setConnId(id);
+      }
+      const started = await api<OAuthStart>(`/api/admin/connections/${id}/oauth/start`, {
+        method: "POST",
+        body: JSON.stringify({
+          input,
+          ...(label ? { displayLabel: label } : {}),
+        }),
+      });
+      setOAuth(started);
+      if (started.type === "authorization_url") {
+        window.open(started.authorizationUrl, "_blank", "noopener,noreferrer");
+      }
+    } catch (err) {
+      setError(isApiError(err) ? err.message : m.error_oauth_start());
+    } finally {
+      markBusy(false);
+    }
+  }
+
+  async function exchange() {
+    const id = connIdRef.current;
+    const code = pasteCode.trim();
+    if (busyRef.current || !id || !code) {
+      if (!code) setError(m.error_oauth_exchange());
+      return;
+    }
+    markBusy(true);
+    setError(null);
+    try {
+      await api(`/api/admin/connections/${id}/oauth/exchange`, {
+        method: "POST",
+        body: JSON.stringify({ code }),
+      });
+      await finishSaved();
+    } catch (err) {
+      setError(isApiError(err) ? err.message : m.error_oauth_exchange());
+      markBusy(false);
+    }
+  }
 
   return (
-    <div className="dialog-backdrop" role="presentation">
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) void dismiss();
+      }}
+    >
       <form
+        ref={panelRef}
         className="dialog"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="provider-picker-title"
-        onSubmit={async (event) => {
+        aria-labelledby={titleId}
+        onSubmit={(event) => {
           event.preventDefault();
-          setBusy(true);
-          setError(null);
-          try {
-            const result = await api<{ connection: Connection }>("/api/admin/connections", {
-              method: "POST",
-              body: JSON.stringify({ providerId }),
-            });
-            await onCreated(result.connection);
-          } catch (err) {
-            setError(isApiError(err) ? err.message : m.error_connection_create());
-          } finally {
-            setBusy(false);
+          if (method?.type === "oauth") {
+            if (oauth?.type === "paste_code") void exchange();
+            else if (!oauth) void connect();
+            return;
           }
+          void saveCredentials();
         }}
       >
-        <h2 id="provider-picker-title">{m.connections_new()}</h2>
+        <h2 id={titleId}>{title}</h2>
+        <p className="meta">{m.credentials_hint()}</p>
         <label>
           {m.connections_loaded_plugin()}
-          <select value={providerId} onChange={(event) => setProviderId(event.target.value)} required>
-            {loaded.map((plugin) => <option key={plugin.id} value={plugin.id ?? ""}>{plugin.name}</option>)}
-          </select>
+          {existing ? (
+            <input value={plugin?.name ?? existing.providerId} readOnly />
+          ) : (
+            <select value={selectedProviderId} onChange={(event) => selectProvider(event.target.value)} required disabled={connId !== null}>
+              {loaded.map((item) => (
+                <option key={item.id} value={item.id ?? ""}>{item.name}</option>
+              ))}
+            </select>
+          )}
         </label>
-        {loaded.length === 0 ? <p className="banner warn">{m.connections_picker_empty()}</p> : null}
+        <label>
+          {m.connections_display_name()}
+          <input
+            value={displayLabel}
+            onChange={(event) => setDisplayLabel(event.target.value)}
+            placeholder={m.connections_display_name_hint()}
+            disabled={oauth !== null}
+          />
+        </label>
+        {loaded.length === 0 && !existing ? <p className="banner warn">{m.connections_picker_empty()}</p> : null}
+        {selectedProviderId && methods.length === 0 ? <p className="banner warn">{m.connections_no_auth()}</p> : null}
+        {methods.length > 1 ? (
+          <div className="segmented" role="group" aria-label={m.credentials_method()}>
+            {methods.map((item) => (
+              <button key={item.id} type="button" aria-pressed={method?.id === item.id} onClick={() => selectMethod(item.id)}>
+                {item.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {method && (method.type === "credentials" || !oauth)
+          ? (method.fields ?? []).map((field) => (
+              <CredentialFieldInput
+                key={`${method.id}:${field.key}`}
+                field={field}
+                value={values[field.key] ?? ""}
+                required={Boolean(field.required) && enforceRequired}
+                onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))}
+              />
+            ))
+          : null}
+        {method?.type === "oauth" && busy && !oauth ? <p className="meta">{m.oauth_starting()}</p> : null}
+        {method?.type === "oauth" && oauth?.type === "device_code" && connId ? (
+          <DeviceCodePanel connectionId={connId} flow={oauth} onComplete={finishSaved} onError={setError} />
+        ) : null}
+        {method?.type === "oauth" && oauth?.type === "authorization_url" && connId ? (
+          <AuthUrlPanel connectionId={connId} url={oauth.authorizationUrl} onComplete={finishSaved} onError={setError} />
+        ) : null}
+        {oauth?.type === "paste_code" ? (
+          <label>
+            {m.oauth_code()}
+            <textarea value={pasteCode} onChange={(event) => setPasteCode(event.target.value)} rows={4} required />
+          </label>
+        ) : null}
         {error ? <p className="banner error" role="alert">{error}</p> : null}
         <div className="row-actions">
-          <button className="primary" type="submit" disabled={busy || !providerId}>{busy ? m.busy_creating() : m.action_continue()}</button>
-          <button type="button" onClick={onCancel}>{m.action_cancel()}</button>
+          {method?.type === "oauth" ? (
+            oauth?.type === "paste_code" ? (
+              <button className="primary" type="submit" disabled={busy}>
+                {busy ? m.busy_saving() : m.oauth_submit_code()}
+              </button>
+            ) : oauth ? null : (
+              <button className="primary" type="submit" disabled={busy || !selectedProviderId}>
+                {busy ? m.busy_starting() : m.action_connect()}
+              </button>
+            )
+          ) : (
+            <button className="primary" type="submit" disabled={busy || !selectedProviderId || (!existing && !method)}>
+              {busy ? m.busy_saving() : m.action_save()}
+            </button>
+          )}
+          <button type="button" disabled={busy} onClick={() => void dismiss()}>
+            {m.action_cancel()}
+          </button>
         </div>
       </form>
     </div>
   );
 }
 
-function ConnectionForm({
-  existing,
-  provider,
-  onCancel,
-  onSaved,
+function CredentialFieldInput({
+  field,
+  value,
+  required,
+  onChange,
 }: {
-  existing: Connection;
-  provider: AdminPlugin | null;
-  onCancel: () => void;
-  onSaved: () => Promise<void>;
+  field: CredentialField;
+  value: string;
+  required: boolean;
+  onChange: (value: string) => void;
 }) {
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [paste, setPaste] = useState("");
-  const modes = credentialModes(provider);
-  const [mode, setMode] = useState<CredentialMode>(modes[0] ?? "paste");
-  const [oauth, setOAuth] = useState<OAuthStart | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+  const control =
+    field.kind === "textarea" ? (
+      <textarea
+        value={value}
+        rows={field.rows ?? 4}
+        placeholder={field.placeholder}
+        required={required}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    ) : field.kind === "select" ? (
+      <select value={value} required={required} onChange={(event) => onChange(event.target.value)}>
+        {field.required && field.defaultValue ? null : <option value=""></option>}
+        {field.options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    ) : (
+      <input
+        type={field.kind === "secret" ? "password" : field.kind === "url" ? "url" : "text"}
+        autoComplete={field.kind === "secret" ? "new-password" : undefined}
+        value={value}
+        placeholder={field.placeholder}
+        required={required}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    );
   return (
-    <div className="dialog-backdrop" role="presentation">
-      <form
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="connection-form-title"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          if (mode === "oauth") return;
-          setBusy(true);
-          setError(null);
-          try {
-            const payload = mode === "paste" ? { text: paste } : { credentials: values };
-            await api(`/api/admin/connections/${existing.id}`, {
-              method: "PUT",
-              body: JSON.stringify(payload),
-            });
-            await onSaved();
-          } catch (err) {
-            setError(isApiError(err) ? err.message : m.error_save());
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <h2 id="connection-form-title">{m.credentials_title({ name: existing.displayLabel || existing.providerId })}</h2>
-        <p className="meta">{m.credentials_hint()}</p>
-        {modes.length > 1 ? (
-          <div className="segmented" role="tablist" aria-label={m.credentials_method()}>
-            {modes.map((item) => (
-              <button
-                key={item}
-                type="button"
-                aria-pressed={mode === item}
-                onClick={() => {
-                  setMode(item);
-                  if (item !== "oauth") {
-                    setOAuth(null);
-                    setError(null);
-                  }
-                }}
-              >
-                {credentialModeLabel(item)}
-              </button>
-            ))}
-          </div>
-        ) : null}
-        {mode === "form"
-          ? provider?.credentialsForm.map((field: CredentialField) => (
-              <label key={field.key}>
-                {field.label}
-                <input
-                  type={field.kind === "secret" ? "password" : field.kind}
-                  autoComplete={field.kind === "secret" ? "new-password" : undefined}
-                  value={values[field.key] ?? ""}
-                  onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}
-                  required={field.required}
-                />
-              </label>
-            ))
-          : null}
-        {mode === "paste" ? (
-          <label>
-            {m.credentials_paste()}
-            <textarea value={paste} onChange={(event) => setPaste(event.target.value)} required />
-          </label>
-        ) : null}
-        {mode === "oauth" && busy && !oauth ? <p className="meta">{m.oauth_starting()}</p> : null}
-        {mode === "oauth" && oauth?.type === "device_code" ? (
-          <DeviceCodePanel connectionId={existing.id} flow={oauth} onComplete={onSaved} onError={setError} />
-        ) : null}
-        {mode === "oauth" && oauth?.type === "authorization_url" ? (
-          <AuthUrlPanel connectionId={existing.id} url={oauth.authorizationUrl} onComplete={onSaved} />
-        ) : null}
-        {error ? <p className="banner error" role="alert">{error}</p> : null}
-        <div className="row-actions">
-          {mode === "oauth" ? (
-            oauth ? null : (
-              <button
-                className="primary"
-                type="button"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  setError(null);
-                  try {
-                    const started = await api<OAuthStart>(`/api/admin/connections/${existing.id}/oauth/start`, {
-                      method: "POST",
-                    });
-                    setOAuth(started);
-                    if (started.type === "authorization_url") {
-                      window.open(started.authorizationUrl, "_blank", "noopener,noreferrer");
-                    }
-                  } catch (err) {
-                    setError(isApiError(err) ? err.message : m.error_oauth_start());
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                {busy ? m.busy_starting() : m.action_connect()}
-              </button>
-            )
-          ) : (
-            <button className="primary" type="submit" disabled={busy}>{busy ? m.busy_saving() : m.action_save()}</button>
-          )}
-          <button type="button" onClick={onCancel}>{m.action_cancel()}</button>
-        </div>
-      </form>
-    </div>
+    <label>
+      {field.label}
+      {field.description ? <span className="field-hint meta">{field.description}</span> : null}
+      {control}
+    </label>
   );
 }
 
@@ -1082,11 +1400,15 @@ function AuthUrlPanel({
   connectionId,
   url,
   onComplete,
+  onError,
 }: {
   connectionId: string;
   url: string;
   onComplete: () => Promise<void>;
+  onError: (value: string | null) => void;
 }) {
+  const [callback, setCallback] = useState("");
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     let cancelled = false;
     let polling = false;
@@ -1113,17 +1435,51 @@ function AuthUrlPanel({
   }, [connectionId, onComplete]);
 
   return (
-    <div className="banner ok" role="status">
-      <ParaglideMessage
-        message={m.oauth_browser}
-        inputs={{ url }}
-        markup={{
-          link: ({ children, options }) => (
-            <a href={String(options.href)} target="_blank" rel="noreferrer">{children}</a>
-          ),
-        }}
-      />
-    </div>
+    <>
+      <div className="banner ok" role="status">
+        <ParaglideMessage
+          message={m.oauth_browser}
+          inputs={{ url }}
+          markup={{
+            link: ({ children, options }) => (
+              <a href={String(options.href)} target="_blank" rel="noreferrer">{children}</a>
+            ),
+          }}
+        />
+      </div>
+      <label>
+        {m.oauth_callback_paste()}
+        <textarea
+          value={callback}
+          placeholder="http://127.0.0.1:38723/callback?code=…&state=…"
+          onChange={(event) => setCallback(event.target.value)}
+        />
+      </label>
+      <div className="row-actions">
+        <button
+          className="primary"
+          type="button"
+          disabled={busy || callback.trim() === ""}
+          onClick={async () => {
+            setBusy(true);
+            onError(null);
+            try {
+              await api(`/api/admin/connections/${connectionId}/oauth/exchange`, {
+                method: "POST",
+                body: JSON.stringify({ callback }),
+              });
+              await onComplete();
+            } catch (err) {
+              onError(isApiError(err) ? err.message : m.error_oauth());
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? m.busy_saving() : m.oauth_callback_finish()}
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -1148,6 +1504,10 @@ function ModelsPage({
   const [customName, setCustomName] = useState("");
   const [customTypes, setCustomTypes] = useState<PublicEndpointType[]>([]);
   const [saving, setSaving] = useState(false);
+  const [pendingModelIds, setPendingModelIds] = useState<string[]>([]);
+  const [reordering, setReordering] = useState(false);
+  const [confirmModel, setConfirmModel] = useState<ConnectionModel | null>(null);
+  const writeLock = useRef(false);
 
   const selected = connections?.find((connection) => connection.id === selectedConnectionId) ?? null;
   const selectedPlugin = plugins?.find((plugin) => plugin.id === selected?.providerId) ?? null;
@@ -1230,10 +1590,11 @@ function ModelsPage({
     return { total: models.length, enabled, disabled: models.length - enabled };
   }, [catalog]);
   const filtering = query.trim().length > 0 || visibility !== "all";
+  const inventoryLocked = saving || pendingModelIds.length > 0 || reordering;
 
   async function movePublishedProvider(model: AdminPublishedModel, index: number, delta: number): Promise<void> {
     const next = index + delta;
-    if (next < 0 || next >= model.providers.length) {
+    if (next < 0 || next >= model.providers.length || writeLock.current) {
       return;
     }
     const providerIds = model.providers.map((provider) => provider.providerId);
@@ -1242,6 +1603,8 @@ function ModelsPage({
       return;
     }
     providerIds.splice(next, 0, moved);
+    writeLock.current = true;
+    setReordering(true);
     setError(null);
     try {
       const result = await api<{ models: AdminPublishedModel[] }>(
@@ -1251,13 +1614,18 @@ function ModelsPage({
       setPublished(result.models);
     } catch (err) {
       setError(isApiError(err) ? err.message : m.error_reorder());
+    } finally {
+      writeLock.current = false;
+      setReordering(false);
     }
   }
 
   async function setModelEnabled(modelId: string, enabled: boolean): Promise<void> {
-    if (!selected) {
+    if (!selected || writeLock.current) {
       return;
     }
+    writeLock.current = true;
+    setPendingModelIds([modelId]);
     setError(null);
     try {
       const result = await api<ConnectionModelCatalog>(
@@ -1269,6 +1637,9 @@ function ModelsPage({
       setPublished(publishedResult.models);
     } catch (err) {
       setError(isApiError(err) ? err.message : m.error_update());
+    } finally {
+      writeLock.current = false;
+      setPendingModelIds([]);
     }
   }
 
@@ -1279,13 +1650,14 @@ function ModelsPage({
 
   async function addCustomModel(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (!selected) {
+    if (!selected || writeLock.current) {
       return;
     }
     const id = customId.trim();
     if (!id) {
       return;
     }
+    writeLock.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -1306,6 +1678,7 @@ function ModelsPage({
     } catch (err) {
       setError(isApiError(err) ? err.message : m.error_add());
     } finally {
+      writeLock.current = false;
       setSaving(false);
     }
   }
@@ -1318,7 +1691,7 @@ function ModelsPage({
   }
 
   async function setCustomEndpoints(model: ConnectionModel, type: PublicEndpointType, enabled: boolean): Promise<void> {
-    if (!selected) {
+    if (!selected || writeLock.current) {
       return;
     }
     const current = endpointSelection(model);
@@ -1326,6 +1699,7 @@ function ModelsPage({
     if (next.length === 0) {
       return;
     }
+    writeLock.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -1338,14 +1712,16 @@ function ModelsPage({
     } catch (err) {
       setError(isApiError(err) ? err.message : m.error_update());
     } finally {
+      writeLock.current = false;
       setSaving(false);
     }
   }
 
   async function removeCustomModel(modelId: string): Promise<void> {
-    if (!selected) {
+    if (!selected || writeLock.current) {
       return;
     }
+    writeLock.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -1359,7 +1735,33 @@ function ModelsPage({
     } catch (err) {
       setError(isApiError(err) ? err.message : m.error_remove());
     } finally {
+      writeLock.current = false;
       setSaving(false);
+    }
+  }
+
+  async function setShownEnabled(enabled: boolean): Promise<void> {
+    if (!selected || filtered.length === 0 || writeLock.current) {
+      return;
+    }
+    const modelIds = filtered.map((model) => model.id);
+    writeLock.current = true;
+    setSaving(true);
+    setPendingModelIds(modelIds);
+    setError(null);
+    try {
+      const result = await api<ConnectionModelCatalog>(`/api/admin/connections/${selected.id}/models`, {
+        method: "PATCH",
+        body: JSON.stringify({ modelIds, enabled }),
+      });
+      setCatalog(result);
+      await refreshPublished();
+    } catch (err) {
+      setError(isApiError(err) ? err.message : m.error_update());
+    } finally {
+      writeLock.current = false;
+      setSaving(false);
+      setPendingModelIds([]);
     }
   }
 
@@ -1375,7 +1777,9 @@ function ModelsPage({
           >
             {connections?.map((connection) => (
               <option key={connection.id} value={connection.id}>
-                {connection.displayLabel || connection.providerId}
+                {connection.displayLabel && connection.displayLabel !== connection.providerId
+                  ? `${connection.displayLabel} · ${connection.providerId}`
+                  : connection.displayLabel || connection.providerId}
                 {connection.active ? m.connections_active_suffix() : ""}
               </option>
             ))}
@@ -1461,6 +1865,22 @@ function ModelsPage({
                    {m.visibility_disabled({ count: String(totals.disabled) })}
                  </button>
                 </div>
+                <button
+                  className="ghost"
+                  type="button"
+                  disabled={saving || filtered.length === 0 || inventoryLocked}
+                  onClick={() => void setShownEnabled(true)}
+                >
+                  {m.action_enable_shown()}
+                </button>
+                <button
+                  className="ghost"
+                  type="button"
+                  disabled={saving || filtered.length === 0 || inventoryLocked}
+                  onClick={() => void setShownEnabled(false)}
+                >
+                  {m.action_disable_shown()}
+                </button>
               </div>
               <form className="custom-model-form" onSubmit={(event) => void addCustomModel(event)}>
                 <label>
@@ -1555,6 +1975,7 @@ function ModelsPage({
                               <input
                                 type="checkbox"
                                 checked={model.enabled}
+                                disabled={inventoryLocked}
                                 aria-label={model.enabled ? m.models_disable({ name: model.name }) : m.models_enable({ name: model.name })}
                                 onChange={(event) => {
                                   void setModelEnabled(model.id, event.target.checked);
@@ -1576,7 +1997,7 @@ function ModelsPage({
                                         <input
                                           type="checkbox"
                                           checked={checked}
-                                          disabled={saving || (checked && selectedTypes.length === 1)}
+                                          disabled={inventoryLocked || (checked && selectedTypes.length === 1)}
                                           aria-label={m.models_endpoint_for({ endpoint: endpointLabel(type), name: model.name })}
                                           onChange={(event) => {
                                             void setCustomEndpoints(model, type, event.target.checked);
@@ -1592,8 +2013,8 @@ function ModelsPage({
                                 <button
                                   className="danger"
                                   type="button"
-                                  disabled={saving}
-                                  onClick={() => void removeCustomModel(model.id)}
+                                  disabled={inventoryLocked}
+                                  onClick={() => setConfirmModel(model)}
                                 >
                                   {m.action_remove()}
                                 </button>
@@ -1651,14 +2072,14 @@ function ModelsPage({
                           <div className="row-actions">
                             <button
                               type="button"
-                              disabled={index === 0}
+                              disabled={inventoryLocked || index === 0}
                               onClick={() => void movePublishedProvider(model, index, -1)}
                             >
                               {m.models_up()}
                             </button>
                             <button
                               type="button"
-                              disabled={index === model.providers.length - 1}
+                              disabled={inventoryLocked || index === model.providers.length - 1}
                               onClick={() => void movePublishedProvider(model, index, 1)}
                             >
                               {m.models_down()}
@@ -1673,6 +2094,21 @@ function ModelsPage({
             </div>
           </section>
         </div>
+      ) : null}
+      {confirmModel ? (
+        <ConfirmDialog
+          title={m.models_remove_title({ name: confirmModel.name })}
+          body={m.models_remove_body()}
+          confirmLabel={m.action_remove()}
+          busy={saving}
+          onCancel={() => {
+            if (!saving) setConfirmModel(null);
+          }}
+          onConfirm={async () => {
+            await removeCustomModel(confirmModel.id);
+            setConfirmModel(null);
+          }}
+        />
       ) : null}
     </section>
   );
@@ -1720,36 +2156,5 @@ function LogsPage() {
         </div>
       ) : null}
     </section>
-  );
-}
-
-function ConfirmDialog({
-  title,
-  body,
-  confirmLabel,
-  onCancel,
-  onConfirm,
-}: {
-  title: string;
-  body: string;
-  confirmLabel: string;
-  onCancel: () => void;
-  onConfirm: () => void | Promise<void>;
-}) {
-  return (
-    <div className="dialog-backdrop" role="presentation">
-      <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-        <h2 id="confirm-title">{title}</h2>
-        <p>{body}</p>
-        <div className="row-actions">
-          <button className="danger" type="button" onClick={() => void onConfirm()}>
-            {confirmLabel}
-          </button>
-          <button type="button" onClick={onCancel}>
-            {m.action_cancel()}
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
