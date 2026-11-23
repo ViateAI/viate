@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.0.0](https://github.com/ViateAI/viate/compare/v1.0.1...v2.0.0) (2026-11-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* ProviderHandler.parseCredentials is removed from @viateai/sdk. Declare authMethods, or keep credentialsForm as the credentials fallback.
+
+### Features
+
+* accept a pasted OAuth loopback callback ([d085da0](https://github.com/ViateAI/viate/commit/d085da0bf44523ed4aba134f2b7d2c8e7bd7f5fa))
+* add a skill for pricing subscription usage at API list rates ([ca8dd40](https://github.com/ViateAI/viate/commit/ca8dd402191c67693fcde446ce46dbcd506a44c3))
+* add an OAuth server and service API for bot clients ([5f349e1](https://github.com/ViateAI/viate/commit/5f349e1ed54d404979536d694cd8b716d67bb051))
+* add auth methods and remove parseCredentials ([ee417ea](https://github.com/ViateAI/viate/commit/ee417eaf0af8dba07989fa2fcf927594a52e0f5d))
+* add OIDC id tokens and JWKS ([c768cc0](https://github.com/ViateAI/viate/commit/c768cc07f4dd6aef0af877435f65071e630cf1ec))
+* bill context tiers and page catalog prices ([c77e0c3](https://github.com/ViateAI/viate/commit/c77e0c30b097b7d85e5b8b4458e3dd02755018d8))
+* let a client key read its owner's balance ([ab3d889](https://github.com/ViateAI/viate/commit/ab3d889430b041f4b52d899e1b4f455aab59bb18))
+* merge dev into main ([7a8195f](https://github.com/ViateAI/viate/commit/7a8195f5a4eccde68e4088cff99ee08beb860003))
+* refresh stale balances without blocking the page ([8bb0d3c](https://github.com/ViateAI/viate/commit/8bb0d3cab774bfb55880a3f8117d7a9da0f0ef94))
+* reserve estimated cost and bill omitted usage ([ba08fdc](https://github.com/ViateAI/viate/commit/ba08fdc5a13e7864ebfb7a202d6c975327502c13))
+* top up USD balance through an EPay gateway ([c4acd3b](https://github.com/ViateAI/viate/commit/c4acd3bd73910336651c989b6c729a465a699c9b))
+
+
+### Bug Fixes
+
+* bind client keys to users and tighten gateway limits ([5684177](https://github.com/ViateAI/viate/commit/5684177673903640926bc7860965ed490f3dab45))
+* keep an auto-refresh error until that connection succeeds ([3d04e81](https://github.com/ViateAI/viate/commit/3d04e81a73614f1ff7eaf987c8f7a7ba9d2d43bf))
+
 ## [1.0.1](https://github.com/ViateAI/viate/compare/v1.0.0...v1.0.1) (2026-11-04)
 
 
